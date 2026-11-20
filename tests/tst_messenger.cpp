@@ -671,6 +671,116 @@ private slots:
         QVERIFY(bob.last(bobTrip) != QString("just us"));
     }
 
+    void linkedDevices()
+    {
+        Device alice(file("alice"));
+        Device bob(file("bob"));
+        QVERIFY(signUp(alice, "alice"));
+        QVERIFY(signUp(bob, "bob"));
+        const QByteArray picture = QByteArray("\x89PNG\r\n\x1a\n", 8) + Crypto::randomBytes(1500);
+        QVERIFY(alice.messenger->setMyProfile("Alice", picture));
+        const qint64 aliceToBob = startConversation(alice, "bob");
+        alice.messenger->send(aliceToBob, "hello Bob");
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("alice") > 0, kWait);
+        const qint64 bobToAlice = bob.store->directConversation("alice");
+        bob.messenger->acceptRequest(bobToAlice);
+
+        std::optional<qint64> earlier;
+        alice.messenger->createGroup("Before", {"bob"}, [&](qint64 c, const QString &) { earlier = c; });
+        QTRY_VERIFY_WITH_TIMEOUT(earlier.has_value() && *earlier > 0, kWait);
+        const QString earlierId = alice.store->group(*earlier).id;
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->groupConversation(earlierId) > 0, kWait);
+        alice.messenger->block("mallory");
+
+        // Alice's second computer: a code, typed on the first, and it joins.
+        Device laptop(file("laptop"));
+        std::optional<QString> code;
+        std::optional<bool> linked;
+        QString error;
+        laptop.messenger->linkThisDevice(m_url, [&](const QString &shown) { code = shown; },
+                                         [&](bool ok, const QString &why) { linked = ok; error = why; });
+        QTRY_VERIFY_WITH_TIMEOUT(code.has_value(), kWait);
+        QCOMPARE(code->size(), 64);
+        std::optional<bool> sent;
+        alice.messenger->linkDevice("not a code", [&](bool ok, const QString &) { sent = ok; });
+        QCOMPARE(sent, std::optional<bool>(false));
+        sent.reset();
+        alice.messenger->linkDevice(*code, [&](bool ok, const QString &why) { sent = ok; error = why; });
+        QTRY_VERIFY_WITH_TIMEOUT(sent.has_value(), kWait);
+        QVERIFY2(*sent, qPrintable(error));
+        QTRY_VERIFY_WITH_TIMEOUT(linked.has_value(), kWait);
+        QVERIFY2(*linked, qPrintable(error));
+        QCOMPARE(laptop.messenger->username(), QString("alice"));
+        QCOMPARE(laptop.messenger->device(), 2u);
+        QCOMPARE(laptop.keys->account()->identity.publicKey(), alice.keys->account()->identity.publicKey());
+        QCOMPARE(laptop.messenger->myProfile().name, QString("Alice"));
+        QCOMPARE(laptop.messenger->myProfile().avatar, picture);
+        QVERIFY(laptop.store->messages(laptop.store->noteToSelf()).isEmpty()); // no old history
+        // Her contacts, groups and blocks, but none of the messages.
+        QVERIFY(laptop.messenger->isBlocked("mallory"));
+        QVERIFY(laptop.store->directConversation("bob") > 0);
+        QVERIFY(laptop.store->messages(laptop.store->directConversation("bob")).isEmpty());
+        QVERIFY(laptop.store->groupConversation(earlierId) > 0);
+        QCOMPARE(laptop.store->group(laptop.store->groupConversation(earlierId)).members, (QStringList{"alice", "bob"}));
+        bob.messenger->send(bob.store->groupConversation(earlierId), "in the old group");
+        QTRY_COMPARE_WITH_TIMEOUT(laptop.last(laptop.store->groupConversation(earlierId)), QString("in the old group"), kWait);
+        // The same code again: used.
+        sent.reset();
+        alice.messenger->linkDevice(*code, [&](bool ok, const QString &) { sent = ok; });
+        QTRY_COMPARE_WITH_TIMEOUT(sent, std::optional<bool>(false), kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(alice.messenger->myDevices().size(), 2, kWait);
+
+        // Bob writes: both of Alice's computers have it. Safety number: the same.
+        bob.messenger->send(bobToAlice, "hi both");
+        QTRY_VERIFY_WITH_TIMEOUT(laptop.store->directConversation("bob") > 0, kWait);
+        const qint64 laptopToBob = laptop.store->directConversation("bob");
+        QTRY_COMPARE_WITH_TIMEOUT(laptop.last(laptopToBob), QString("hi both"), kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(alice.last(aliceToBob), QString("hi both"), kWait);
+        QCOMPARE(laptop.messenger->safetyNumber("bob"), alice.messenger->safetyNumber("bob"));
+        QVERIFY(!bob.messenger->safetyNumberHasChanged("alice"));
+
+        // Bob was accepted on the first computer: on the laptop too, not a request.
+        QVERIFY(!laptop.store->conversation(laptopToBob).request);
+        // Read on the first computer: read on the laptop too.
+        QCOMPARE(laptop.store->conversation(laptopToBob).unread, 1);
+        alice.messenger->markRead(aliceToBob);
+        QTRY_COMPARE_WITH_TIMEOUT(laptop.store->conversation(laptopToBob).unread, 0, kWait);
+        // She answers from the laptop: Bob has it; her first computer shows it as hers.
+        laptop.messenger->send(laptopToBob, "from my laptop");
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(bobToAlice), QString("from my laptop"), kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(alice.last(aliceToBob), QString("from my laptop"), kWait);
+        QVERIFY(alice.store->messages(aliceToBob).last().outgoing());
+
+        // A group made on the first computer is on the laptop; written there, seen everywhere.
+        std::optional<qint64> group;
+        alice.messenger->createGroup("Us", {"bob"}, [&](qint64 c, const QString &) { group = c; });
+        QTRY_VERIFY_WITH_TIMEOUT(group.has_value() && *group > 0, kWait);
+        const QString gid = alice.store->group(*group).id;
+        QTRY_VERIFY_WITH_TIMEOUT(laptop.store->groupConversation(gid) > 0, kWait);
+        const qint64 laptopGroup = laptop.store->groupConversation(gid);
+        QVERIFY(!laptop.store->conversation(laptopGroup).request);
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->groupConversation(gid) > 0, kWait);
+        laptop.messenger->send(laptopGroup, "group, from the laptop");
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(bob.store->groupConversation(gid)), QString("group, from the laptop"), kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(alice.last(*group), QString("group, from the laptop"), kWait);
+        // A new name on the laptop reaches the first computer (and Bob).
+        QVERIFY(laptop.messenger->setMyProfile("Alice L.", picture));
+        QTRY_COMPARE_WITH_TIMEOUT(alice.messenger->myProfile().name, QString("Alice L."), kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.messenger->displayName("alice"), QString("Alice L."), kWait);
+
+        // The first computer removes the laptop: it can no longer sign in.
+        std::optional<bool> removed;
+        alice.messenger->removeDevice(2, [&](bool ok, const QString &) { removed = ok; });
+        QTRY_VERIFY_WITH_TIMEOUT(removed.has_value(), kWait);
+        QVERIFY(*removed);
+        QTRY_VERIFY_WITH_TIMEOUT(laptop.messenger->state() != Messenger::State::Online, kWait);
+        QTest::qWait(500);
+        QVERIFY(laptop.messenger->state() != Messenger::State::Online);
+        alice.messenger->send(aliceToBob, "only one computer again");
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(bobToAlice), QString("only one computer again"), kWait);
+        QVERIFY(laptop.last(laptopToBob) != QString("only one computer again"));
+    }
+
     void keyStoreTrust()
     {
         Device alice(file("alice"));

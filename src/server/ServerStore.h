@@ -34,6 +34,13 @@ public:
     bool createAccount(const QString &username, const QByteArray &identityKey,
                        const Protocol::PublicSignedPreKey &signedPreKey);
     QList<quint32> devices(const QString &username) const;
+    // Linked devices: one more for the account (the next number), with the
+    // account's identity key; 0 if there is no such account.
+    quint32 addDevice(const QString &username, const QByteArray &identityKey,
+                      const Protocol::PublicSignedPreKey &signedPreKey);
+    // The device, its keys and its queue.
+    bool removeDevice(const QString &username, quint32 device);
+    qint64 deviceCreated(const QString &username, quint32 device) const;
     // Empty if there is no such device.
     QByteArray identityKey(const QString &username, quint32 device) const;
 

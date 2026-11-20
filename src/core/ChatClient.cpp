@@ -143,6 +143,12 @@ void ChatClient::onText(const QString &text)
     if (!document.isObject())
         return;
     const QJsonObject json = document.object();
+    if (json.value(QStringLiteral("op")) == QLatin1String("provision")) {
+        const auto message = Protocol::Json::bytes(json.value(QStringLiteral("message")), -1, 768 * 1024);
+        if (message)
+            emit provisionReceived(*message);
+        return;
+    }
     if (json.value(QStringLiteral("op")) == QLatin1String("deliver")) {
         const auto envelope = Protocol::envelopeFromJson(json.value(QStringLiteral("envelope")).toObject());
         if (envelope)
@@ -339,4 +345,42 @@ void ChatClient::downloadAttachment(const QString &id, qint64 size, const Progre
                 });
     };
     (*next)();
+}
+
+void ChatClient::openProvisioning(const Callback &done)
+{
+    request(QStringLiteral("provision-open"), {}, done);
+}
+
+void ChatClient::sendProvisioning(const QString &id, const QByteArray &message, const Callback &done)
+{
+    request(QStringLiteral("provision-send"),
+            {{QStringLiteral("id"), id}, {QStringLiteral("message"), Protocol::Json::base64(message)}}, done);
+}
+
+void ChatClient::addDevice(const QString &username, const Crypto::IdentityKeyPair &identity,
+                           const Protocol::PublicSignedPreKey &signedPreKey,
+                           const QList<Protocol::PublicOneTimePreKey> &oneTimePreKeys, const Callback &done)
+{
+    withChallenge(done, [=](const QByteArray &nonce) {
+        request(QStringLiteral("add-device"),
+                {{QStringLiteral("username"), username},
+                 {QStringLiteral("identityKey"), Protocol::Json::base64(identity.publicKey())},
+                 {QStringLiteral("signedPreKey"), Protocol::signedPreKeyToJson(signedPreKey)},
+                 {QStringLiteral("oneTimePreKeys"), Protocol::oneTimePreKeysToJson(oneTimePreKeys)},
+                 // Device 0: a device to be (a sign-in is for 1 and up).
+                 {QStringLiteral("signature"),
+                  Protocol::Json::base64(identity.sign(Protocol::authMessage(nonce, username, 0)))}},
+                done);
+    });
+}
+
+void ChatClient::listDevices(const Callback &done)
+{
+    request(QStringLiteral("devices"), {}, done);
+}
+
+void ChatClient::removeDevice(quint32 device, const Callback &done)
+{
+    request(QStringLiteral("remove-device"), {{QStringLiteral("device"), double(device)}}, done);
 }

@@ -78,6 +78,17 @@ public:
     void downloadAttachment(const QString &id, qint64 size, const Progress &progress,
                             const std::function<void(const QByteArray &blob, const Result &result)> &done);
 
+    // Linking a device. The new one: a slot (the answer's "id"), then
+    // provisionReceived when a device of the account sends into it, then
+    // addDevice. The account's device: sendProvisioning into that slot.
+    void openProvisioning(const Callback &done);
+    void sendProvisioning(const QString &id, const QByteArray &message, const Callback &done);
+    void addDevice(const QString &username, const Crypto::IdentityKeyPair &identity,
+                   const Protocol::PublicSignedPreKey &signedPreKey,
+                   const QList<Protocol::PublicOneTimePreKey> &oneTimePreKeys, const Callback &done);
+    void listDevices(const Callback &done);
+    void removeDevice(quint32 device, const Callback &done);
+
     // Tests: the ping interval and how long past it a silence is tolerated.
     void setKeepAlive(int intervalMs, int timeoutMs);
 
@@ -88,6 +99,8 @@ signals:
     void connected();
     void disconnected();
     void envelopeReceived(const Protocol::Envelope &envelope);
+    // The sealed message for a device waiting to be linked.
+    void provisionReceived(const QByteArray &message);
     // The connection's trouble (TLS errors included), for people.
     void failed(const QString &why);
 

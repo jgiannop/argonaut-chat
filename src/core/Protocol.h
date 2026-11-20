@@ -64,6 +64,9 @@ struct Content
     std::optional<Attachment::Pointer> avatar;
     // Text, Group, Leave: the group (32 hex digits; empty: a direct message).
     QString group;
+    // Text, to my own other devices only: whom I sent it to (a username), so
+    // they show it as mine (a group's has `group` instead).
+    QString sentTo;
     // Group (from its admin): its name, admin, members (the admin among
     // them) and revision (each update one higher; older ones are ignored).
     QString groupName;

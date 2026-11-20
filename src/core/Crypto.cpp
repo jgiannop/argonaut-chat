@@ -188,6 +188,30 @@ QByteArray dhPublicKeyOf(const QByteArray &identityKey)
     return out;
 }
 
+QByteArray sealTo(const QByteArray &publicKey, const QByteArray &plaintext)
+{
+    init();
+    if (publicKey.size() != crypto_box_PUBLICKEYBYTES)
+        return {};
+    QByteArray out(plaintext.size() + crypto_box_SEALBYTES, Qt::Uninitialized);
+    if (crypto_box_seal(bytes(out), bytes(plaintext), quint64(plaintext.size()), bytes(publicKey)) != 0)
+        return {};
+    return out;
+}
+
+std::optional<QByteArray> openSealed(const DhKeyPair &pair, const QByteArray &ciphertext)
+{
+    init();
+    if (!pair.isValid() || ciphertext.size() < int(crypto_box_SEALBYTES))
+        return std::nullopt;
+    QByteArray out(ciphertext.size() - crypto_box_SEALBYTES, Qt::Uninitialized);
+    if (crypto_box_seal_open(bytes(out), bytes(ciphertext), quint64(ciphertext.size()), bytes(pair.publicKey),
+                             bytes(pair.secretKey))
+        != 0)
+        return std::nullopt;
+    return out;
+}
+
 QByteArray seal(const QByteArray &key, const QByteArray &nonce, const QByteArray &plaintext,
                 const QByteArray &associatedData)
 {

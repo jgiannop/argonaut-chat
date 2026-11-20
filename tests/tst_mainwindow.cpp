@@ -464,6 +464,68 @@ private slots:
         }
     }
 
+    void linkingInTheWindow()
+    {
+        ServerStore serverStore(QDir::homePath() + QStringLiteral("/server7/server.sqlite"));
+        ChatServer server(&serverStore);
+        QVERIFY(server.listen());
+        const QUrl url(QStringLiteral("ws://127.0.0.1:%1").arg(server.port()));
+        ChatStore aliceStore(QDir::homePath() + QStringLiteral("/alice7/chat.sqlite"));
+        KeyStore aliceKeys(&aliceStore);
+        Messenger alice(&aliceStore, &aliceKeys);
+        std::optional<bool> signedUp;
+        alice.signUp(url, QStringLiteral("alice"), [&](bool ok, const QString &) { signedUp = ok; });
+        QTRY_VERIFY(signedUp.has_value() && *signedUp);
+
+        // The laptop: Link to My Account… shows a code.
+        ChatStore laptopStore(QDir::homePath() + QStringLiteral("/laptop7/chat.sqlite"));
+        KeyStore laptopKeys(&laptopStore);
+        Messenger laptop(&laptopStore, &laptopKeys);
+        SignUpDialog dialog(&laptop);
+        dialog.show();
+        dialog.serverField()->setText(url.toString());
+        dialog.linkButton()->click();
+        QTRY_VERIFY_WITH_TIMEOUT(!dialog.codeField()->text().isEmpty(), 5000);
+        QVERIFY(dialog.codeField()->isVisible());
+        QVERIFY(dialog.messageLabel()->text().contains(QStringLiteral("Linked Devices")));
+
+        // Alice's computer takes the code; the laptop is in.
+        DevicesDialog devices(&alice);
+        QTRY_COMPARE_WITH_TIMEOUT(devices.list()->count(), 1, 5000);
+        devices.linkWithCode(dialog.codeField()->text());
+        QTRY_COMPARE_WITH_TIMEOUT(dialog.result(), int(QDialog::Accepted), 5000);
+        QCOMPARE(laptop.username(), QStringLiteral("alice"));
+        QCOMPARE(laptop.device(), 2u);
+
+        // Both, this one marked; only the first computer removes the others.
+        DevicesDialog onLaptop(&laptop);
+        QTRY_COMPARE_WITH_TIMEOUT(onLaptop.list()->count(), 2, 5000);
+        QVERIFY(onLaptop.list()->item(1)->text().contains(QStringLiteral("this one")));
+        onLaptop.list()->setCurrentRow(0);
+        QVERIFY(!onLaptop.removeButton()->isEnabled()); // the first stays
+        onLaptop.list()->setCurrentRow(1);
+        QVERIFY(onLaptop.removeButton()->isEnabled()); // itself
+        DevicesDialog onFirst(&alice);
+        QTRY_COMPARE_WITH_TIMEOUT(onFirst.list()->count(), 2, 5000);
+        onFirst.list()->setCurrentRow(1);
+        QVERIFY(onFirst.removeButton()->isEnabled());
+        onFirst.removeSelected(false);
+        QTRY_COMPARE_WITH_TIMEOUT(onFirst.list()->count(), 1, 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(laptop.state() != Messenger::State::Online, 5000);
+
+        // A cancelled link leaves nothing behind.
+        ChatStore thirdStore(QDir::homePath() + QStringLiteral("/third7/chat.sqlite"));
+        KeyStore thirdKeys(&thirdStore);
+        Messenger third(&thirdStore, &thirdKeys);
+        SignUpDialog cancelled(&third);
+        cancelled.serverField()->setText(url.toString());
+        cancelled.linkButton()->click();
+        QTRY_VERIFY_WITH_TIMEOUT(!cancelled.codeField()->text().isEmpty(), 5000);
+        cancelled.reject();
+        QCOMPARE(third.state(), Messenger::State::NoAccount);
+        QVERIFY(!thirdKeys.account());
+    }
+
     void notificationContent()
     {
         using Notifications::Content;

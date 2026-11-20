@@ -4,6 +4,7 @@
 #include "ChatStore.h"
 #include "KeyStore.h"
 
+#include <QJsonObject>
 #include <QObject>
 #include <QSet>
 #include <QTimer>
@@ -89,6 +90,25 @@ public:
     void leaveGroup(qint64 conversation);
     ChatStore::Group group(qint64 conversation) const { return m_store->group(conversation); }
 
+    // Linked devices: one account (one identity key) on up to 5 computers.
+    // This one, new: a code to show (its one-time public key and a slot on
+    // the server), then the account comes sealed to that key from a device
+    // of it, and this one joins. Starts empty: no old history.
+    using LinkCode = std::function<void(const QString &code)>;
+    void linkThisDevice(const QUrl &server, const LinkCode &showCode, const Done &done);
+    void cancelLinking();
+    // A device of the account: the account's keys to the device showing `code`.
+    void linkDevice(const QString &code, const Done &done);
+    using DevicesDone = std::function<void(const QList<quint32> &devices, const QString &error)>;
+    void listDevices(const DevicesDone &done);
+    void removeDevice(quint32 device, const Done &done);
+    quint32 device() const { return m_account ? m_account->device : 0; }
+    // The account's devices as last heard from the server (this one too).
+    QList<quint32> myDevices() const { return m_myDevices; }
+    // The code: its parts as base64url, no padding (64 characters).
+    static QString encodeLinkCode(const QByteArray &publicKey, const QString &slot);
+    static bool decodeLinkCode(const QString &code, QByteArray *publicKey, QString *slot);
+
     // Profiles: a display name and a picture, sent only inside encrypted
     // messages, to the people I write to or accept (and again to them all
     // when it changes); the server never has one. The picture: PNG or JPEG,
@@ -158,6 +178,18 @@ private:
     QStringList othersIn(qint64 conversation) const;
     // Everyone I have accepted: direct peers, and members of my accepted groups.
     QStringList knownPeople() const;
+    // To my own other devices, if there are any (what I sent, what I read,
+    // group changes, my profile).
+    void syncToMyDevices(const Protocol::Content &content);
+    bool haveOtherDevices() const;
+    void refreshMyDevices();
+    // From another device of mine.
+    void handleSync(const Protocol::Content &content);
+    void applyMyProfile(const QString &name, const std::optional<Attachment::Pointer> &avatar);
+    void onProvision(const QByteArray &sealed);
+    // From the linking message: my contacts, groups and blocked people.
+    void takeLinkedState(const QJsonObject &json);
+    void finishLinking(bool ok, const QString &error);
 
     // My profile to `peer` if they lack this version; to everyone accepted.
     void shareProfile(const QString &peer);
@@ -196,4 +228,9 @@ private:
     bool m_avatarUploading = false;
     bool m_avatarFetching = false;
     QSet<QString> m_profileInFlight;
+    // Linking this device: while waiting for the account.
+    Done m_linkDone;
+    LinkCode m_linkCode;
+    Crypto::DhKeyPair m_linkKey;
+    QList<quint32> m_myDevices; // all of the account's, this one too
 };

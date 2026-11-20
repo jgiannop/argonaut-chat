@@ -163,7 +163,8 @@ void ChatServer::onNewConnection()
         connect(socket, &QWebSocket::disconnected, this, [this, socket] { onDisconnected(socket); });
         // Sign in soon, or go.
         QTimer::singleShot(SignInTimeoutMs, socket, [this, socket] {
-            if (m_clients.contains(socket) && !m_clients[socket].signedIn())
+            // (A new device waiting to be linked has longer: provisionOpen.)
+            if (m_clients.contains(socket) && !m_clients[socket].signedIn() && m_clients[socket].provisioning.isEmpty())
                 socket->close(QWebSocketProtocol::CloseCodePolicyViolated);
         });
     }
@@ -176,6 +177,8 @@ void ChatServer::onDisconnected(QWebSocket *socket)
         const QString key = deviceKey(it->username, it->device);
         if (it->signedIn() && m_online.value(key) == socket)
             m_online.remove(key);
+        if (!it->provisioning.isEmpty() && m_provisioning.value(it->provisioning) == socket)
+            m_provisioning.remove(it->provisioning);
         if (--m_perAddress[it->address] <= 0)
             m_perAddress.remove(it->address);
         m_clients.erase(it);
@@ -204,7 +207,8 @@ void ChatServer::onText(QWebSocket *socket, const QString &text)
     sendJson(socket, response);
     // After signing in or acknowledging: what is waiting.
     if (m_clients.contains(socket) && m_clients[socket].signedIn() && response.value(QStringLiteral("ok")).toBool()
-        && (op == QLatin1String("login") || op == QLatin1String("register") || op == QLatin1String("ack")))
+        && (op == QLatin1String("login") || op == QLatin1String("register") || op == QLatin1String("ack")
+            || op == QLatin1String("add-device")))
         deliverQueued(socket);
 }
 
@@ -226,10 +230,23 @@ QJsonObject ChatServer::handle(QWebSocket *socket, Client &client, const QString
     }
     if (op == QLatin1String("login"))
         return login(socket, client, request);
+    if (op == QLatin1String("provision-open")) {
+        if (auto limited = limit(QStringLiteral("challenge:") + client.address, m_limits.challengesPerAddress))
+            return *limited;
+        return provisionOpen(socket, client);
+    }
+    if (op == QLatin1String("add-device")) {
+        if (!client.signedIn()) {
+            if (auto limited = limit(QStringLiteral("signup:") + client.address, m_limits.signUpsPerAddress))
+                return *limited;
+        }
+        return addDevice(socket, client, request);
+    }
     if (!client.signedIn()) {
         if (op == QLatin1String("keys") || op == QLatin1String("send") || op == QLatin1String("ack")
             || op == QLatin1String("prekeys") || op == QLatin1String("upload") || op == QLatin1String("upload-chunk")
-            || op == QLatin1String("download"))
+            || op == QLatin1String("download") || op == QLatin1String("provision-send")
+            || op == QLatin1String("devices") || op == QLatin1String("remove-device"))
             return fail(QStringLiteral("unauthenticated"), QStringLiteral("Sign in first."));
         return fail(QStringLiteral("unknown-op"), QStringLiteral("No such request."));
     }
@@ -259,6 +276,12 @@ QJsonObject ChatServer::handle(QWebSocket *socket, Client &client, const QString
         return uploadChunk(client, request);
     if (op == QLatin1String("download"))
         return download(client, request);
+    if (op == QLatin1String("provision-send"))
+        return provisionSend(request);
+    if (op == QLatin1String("devices"))
+        return listDevices(client);
+    if (op == QLatin1String("remove-device"))
+        return removeDevice(client, request);
     return fail(QStringLiteral("unknown-op"), QStringLiteral("No such request."));
 }
 
@@ -515,6 +538,105 @@ QJsonObject ChatServer::download(const Client &client, const QJsonObject &reques
     if (data.isEmpty())
         return fail(QStringLiteral("server"), QStringLiteral("Could not read the attachment."));
     return ok({{QStringLiteral("data"), Protocol::Json::base64(data)}, {QStringLiteral("size"), double(info->size)}});
+}
+
+QJsonObject ChatServer::provisionOpen(QWebSocket *socket, Client &client)
+{
+    if (client.signedIn())
+        return fail(QStringLiteral("signed-in"), QStringLiteral("Already signed in."));
+    if (client.provisioning.isEmpty()) {
+        client.provisioning = QString::fromLatin1(Crypto::randomBytes(16).toHex());
+        m_provisioning.insert(client.provisioning, socket);
+        // Linked within ten minutes, or gone.
+        QTimer::singleShot(ProvisioningTimeoutMs, socket, [this, socket] {
+            if (m_clients.contains(socket) && !m_clients[socket].signedIn())
+                socket->close(QWebSocketProtocol::CloseCodePolicyViolated);
+        });
+    }
+    return ok({{QStringLiteral("id"), client.provisioning}});
+}
+
+QJsonObject ChatServer::provisionSend(const QJsonObject &request)
+{
+    const QString id = request.value(QStringLiteral("id")).toString();
+    const auto message = Protocol::Json::bytes(request.value(QStringLiteral("message")), -1, MaxProvisionBytes);
+    if (!Attachment::isValidId(id) || !message)
+        return badRequest(QStringLiteral("Malformed provisioning message."));
+    // One message per slot.
+    QWebSocket *target = m_provisioning.take(id);
+    if (!target || !m_clients.contains(target))
+        return fail(QStringLiteral("not-found"), QStringLiteral("No device is waiting with that code."));
+    sendJson(target, {{QStringLiteral("op"), QStringLiteral("provision")},
+                      {QStringLiteral("message"), Protocol::Json::base64(*message)}});
+    return ok();
+}
+
+QJsonObject ChatServer::addDevice(QWebSocket *socket, Client &client, const QJsonObject &request)
+{
+    if (client.signedIn())
+        return fail(QStringLiteral("signed-in"), QStringLiteral("Already signed in."));
+    const QByteArray nonce = client.nonce;
+    client.nonce.clear();
+    if (nonce.isEmpty())
+        return signInFailed(socket, client, QStringLiteral("no-challenge"), QStringLiteral("Ask for a challenge first."));
+    const QString username = request.value(QStringLiteral("username")).toString();
+    const auto identityKey = Protocol::Json::bytes(request.value(QStringLiteral("identityKey")), Crypto::KeySize);
+    const auto signedPreKey = Protocol::signedPreKeyFromJson(request.value(QStringLiteral("signedPreKey")));
+    const auto oneTimePreKeys = Protocol::oneTimePreKeysFromJson(
+        request.value(QStringLiteral("oneTimePreKeys")).isUndefined() ? QJsonValue(QJsonArray())
+                                                                      : request.value(QStringLiteral("oneTimePreKeys")));
+    const auto signature = Protocol::Json::bytes(request.value(QStringLiteral("signature")), Crypto::SignatureSize);
+    if (!Protocol::isValidUsername(username) || !identityKey || !signedPreKey || !oneTimePreKeys || !signature)
+        return signInFailed(socket, client, QStringLiteral("bad-request"), QStringLiteral("Malformed request."));
+    // The account's identity key, and proof of holding it (device 0: a device to be).
+    const QList<quint32> devices = m_store->devices(username);
+    if (devices.isEmpty() || m_store->identityKey(username, devices.first()) != *identityKey
+        || !Crypto::verify(*identityKey, Protocol::authMessage(nonce, username, 0), *signature)
+        || !Crypto::verify(*identityKey, signedPreKey->key, signedPreKey->signature))
+        return signInFailed(socket, client, QStringLiteral("denied"), QStringLiteral("Linking refused."));
+    if (devices.size() >= MaxDevices)
+        return fail(QStringLiteral("too-many-devices"),
+                    QStringLiteral("This account has %1 devices already.").arg(MaxDevices));
+    const quint32 device = m_store->addDevice(username, *identityKey, *signedPreKey);
+    if (device == 0)
+        return fail(QStringLiteral("server"), QStringLiteral("Could not add the device."));
+    m_store->addOneTimePreKeys(username, device, *oneTimePreKeys);
+    if (!client.provisioning.isEmpty()) {
+        m_provisioning.remove(client.provisioning);
+        client.provisioning.clear();
+    }
+    signIn(socket, client, username, device);
+    return ok({{QStringLiteral("device"), double(device)}});
+}
+
+QJsonObject ChatServer::listDevices(const Client &client)
+{
+    QJsonArray list;
+    for (quint32 device : m_store->devices(client.username))
+        list.append(QJsonObject{{QStringLiteral("device"), double(device)},
+                                {QStringLiteral("created"), double(m_store->deviceCreated(client.username, device))}});
+    return ok({{QStringLiteral("devices"), list}});
+}
+
+QJsonObject ChatServer::removeDevice(const Client &client, const QJsonObject &request)
+{
+    const auto device = Protocol::Json::integer(request.value(QStringLiteral("device")), 1,
+                                                std::numeric_limits<quint32>::max());
+    if (!device)
+        return badRequest(QStringLiteral("No device."));
+    // The first device removes the others; any device removes itself; the first stays.
+    if (*device == 1 || (client.device != 1 && quint32(*device) != client.device))
+        return fail(QStringLiteral("denied"), QStringLiteral("Only your first device can remove the others."));
+    if (!m_store->removeDevice(client.username, quint32(*device)))
+        return fail(QStringLiteral("not-found"), QStringLiteral("No such device."));
+    // Its connection, if any: no longer signed in, and gone (taken out of
+    // m_online here, as onDisconnected will not know whose it was).
+    if (QWebSocket *online = m_online.take(deviceKey(client.username, quint32(*device)))) {
+        if (m_clients.contains(online))
+            m_clients[online].username.clear();
+        QTimer::singleShot(0, online, [online] { online->close(QWebSocketProtocol::CloseCodeNormal); });
+    }
+    return ok();
 }
 
 void ChatServer::deliverQueued(QWebSocket *socket)

@@ -25,10 +25,16 @@ public:
     QLineEdit *serverField() const { return m_server; }
     QLineEdit *usernameField() const { return m_username; }
     QPushButton *signUpButton() const { return m_signUp; }
+    QPushButton *linkButton() const { return m_link; }
     QLabel *messageLabel() const { return m_message; }
+    // While linking: the code to type on the other computer.
+    QLineEdit *codeField() const { return m_code; }
+    // Not Now, or closed: a link under way is cancelled.
+    void reject() override;
 
 private:
     void signUp();
+    void link();
     void updateButton();
 
     Messenger *m_messenger;
@@ -36,7 +42,11 @@ private:
     QLineEdit *m_username = nullptr;
     QLabel *m_message = nullptr;
     QPushButton *m_signUp = nullptr;
+    QPushButton *m_link = nullptr;
+    QWidget *m_codeRow = nullptr;
+    QLineEdit *m_code = nullptr;
     bool m_busy = false;
+    bool m_linking = false;
 };
 
 // The safety number with someone, to compare in person or on a call: the
@@ -119,6 +129,32 @@ private:
     QPlainTextEdit *m_members = nullptr;
     QLabel *m_message = nullptr;
     QPushButton *m_ok = nullptr;
+};
+
+// The account's computers: this one marked; link a new one by the code it
+// shows, or remove one (the first computer removes the others; any removes itself).
+class DevicesDialog : public QDialog
+{
+    Q_OBJECT
+
+public:
+    explicit DevicesDialog(Messenger *messenger, QWidget *parent = nullptr);
+
+    QListWidget *list() const { return m_list; }
+    QPushButton *removeButton() const { return m_remove; }
+    QLabel *messageLabel() const { return m_message; }
+    // Link New Device…'s work, after the code is typed.
+    void linkWithCode(const QString &code);
+    void removeSelected(bool ask);
+
+private:
+    void reload();
+    void updateButtons();
+
+    Messenger *m_messenger;
+    QListWidget *m_list = nullptr;
+    QPushButton *m_remove = nullptr;
+    QLabel *m_message = nullptr;
 };
 
 // The people whose messages are dropped, to unblock.

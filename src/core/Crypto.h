@@ -76,6 +76,13 @@ bool verify(const QByteArray &identityKey, const QByteArray &message, const QByt
 // Someone's identity key as X25519; empty if it is not a valid Ed25519 key.
 QByteArray dhPublicKeyOf(const QByteArray &identityKey);
 
+// libsodium's sealed box (X25519, XSalsa20-Poly1305): anyone can encrypt
+// to a public key, only its secret key opens it, and nothing says who sent
+// it. For linking a device: the account's keys, to the new device's
+// one-time key.
+QByteArray sealTo(const QByteArray &publicKey, const QByteArray &plaintext);
+std::optional<QByteArray> openSealed(const DhKeyPair &pair, const QByteArray &ciphertext);
+
 // XChaCha20-Poly1305. `key` 32 bytes, `nonce` 24, never the same pair twice.
 QByteArray seal(const QByteArray &key, const QByteArray &nonce, const QByteArray &plaintext,
                 const QByteArray &associatedData);

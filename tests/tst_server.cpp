@@ -668,6 +668,82 @@ private slots:
         QCOMPARE(QDir(m_store->attachmentFolder()).entryList(QDir::Files).size(), 0);
     }
 
+    void linkedDevices()
+    {
+        Person alice(QStringLiteral("alice"));
+        Person bob(QStringLiteral("bob"));
+        QVERIFY(join(alice));
+        QVERIFY(join(bob));
+
+        // A new computer opens a slot; Alice's sends into it, once.
+        ChatClient fresh;
+        QVERIFY(connectTo(fresh));
+        QSignalSpy provisioned(&fresh, &ChatClient::provisionReceived);
+        ChatClient::Result result = wait([&](auto done) { fresh.openProvisioning(done); });
+        QVERIFY(result.ok);
+        const QString slot = result.data.value("id").toString();
+        QVERIFY(Attachment::isValidId(slot));
+        const auto oneTime = Crypto::DhKeyPair::generate();
+        const QByteArray sealed = Crypto::sealTo(oneTime.publicKey, "the keys");
+        QVERIFY(wait([&](auto done) { alice.client.sendProvisioning(slot, sealed, done); }).ok);
+        QTRY_COMPARE_WITH_TIMEOUT(provisioned.size(), 1, kWait);
+        QCOMPARE(Crypto::openSealed(oneTime, provisioned.at(0).at(0).toByteArray()), std::optional<QByteArray>("the keys"));
+        QCOMPARE(wait([&](auto done) { alice.client.sendProvisioning(slot, sealed, done); }).error, QString("not-found"));
+        QCOMPARE(wait([&](auto done) { fresh.sendProvisioning(slot, sealed, done); }).error, QString("unauthenticated"));
+
+        // It joins Alice's account: only with her identity key.
+        const auto spk = X3dh::makeSignedPreKey(alice.identity, 50);
+        const auto stranger = Crypto::IdentityKeyPair::generate();
+        result = wait([&](auto done) {
+            fresh.addDevice("alice", stranger, Protocol::publicPart(X3dh::makeSignedPreKey(stranger, 1)), {}, done);
+        });
+        QCOMPARE(result.error, QString("denied"));
+        result = wait([&](auto done) {
+            fresh.addDevice("alice", alice.identity, Protocol::publicPart(spk),
+                            Protocol::publicParts(X3dh::makeOneTimePreKeys(500, 3)), done);
+        });
+        QVERIFY2(result.ok, qPrintable(result.message));
+        QCOMPARE(result.data.value("device").toInt(), 2);
+        QCOMPARE(m_store->devices("alice"), (QList<quint32>{1, 2}));
+
+        // Now Alice has two devices: Bob must send to both; Alice to herself, to the other one.
+        const auto bundles = ChatClient::bundles(wait([&](auto done) { bob.client.fetchKeys("alice", done); }));
+        QCOMPARE(bundles->size(), 2);
+        QCOMPARE(bundles->at(1).bundle.identityKey, alice.identity.publicKey()); // one identity
+        const QByteArray cipher = Protocol::encodeCipherMessage({false, {}, {}, 0, {}, QByteArray(60, 'x')});
+        result = wait([&](auto done) { bob.client.send("alice", {{1, cipher}}, done); });
+        QCOMPARE(result.error, QString("devices"));
+        QCOMPARE(result.data.value("devices").toArray(), (QJsonArray{1, 2}));
+        QVERIFY(wait([&](auto done) { bob.client.send("alice", {{1, cipher}, {2, cipher}}, done); }).ok);
+        result = wait([&](auto done) { alice.client.send("alice", {{2, cipher}}, done); });
+        QVERIFY2(result.ok, qPrintable(result.message));
+        QCOMPARE(m_store->queuedCount("alice", 2), 2);
+
+        // The list; only the first device removes the others.
+        result = wait([&](auto done) { fresh.listDevices(done); });
+        QCOMPARE(result.data.value("devices").toArray().size(), 2);
+        QCOMPARE(wait([&](auto done) { fresh.removeDevice(1, done); }).error, QString("denied"));
+        QSignalSpy gone(&fresh, &ChatClient::disconnected);
+        QVERIFY(wait([&](auto done) { alice.client.removeDevice(2, done); }).ok);
+        QTRY_COMPARE_WITH_TIMEOUT(gone.size(), 1, kWait);
+        QCOMPARE(m_store->devices("alice"), (QList<quint32>{1}));
+        QCOMPARE(m_store->queuedCount("alice", 2), 0);
+        ChatClient again;
+        QVERIFY(connectTo(again));
+        QCOMPARE(wait([&](auto done) { again.login("alice", 2, alice.identity, done); }).error, QString("denied"));
+
+        // At most five.
+        for (int i = 0; i < ChatServer::MaxDevices - 1; ++i) {
+            ChatClient extra;
+            QVERIFY(connectTo(extra));
+            QVERIFY(wait([&](auto done) { extra.addDevice("alice", alice.identity, Protocol::publicPart(spk), {}, done); }).ok);
+        }
+        ChatClient sixth;
+        QVERIFY(connectTo(sixth));
+        result = wait([&](auto done) { sixth.addDevice("alice", alice.identity, Protocol::publicPart(spk), {}, done); });
+        QCOMPARE(result.error, QString("too-many-devices"));
+    }
+
     void clientRefusesPlainRemote()
     {
         ChatClient client;

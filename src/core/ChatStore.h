@@ -97,6 +97,8 @@ public:
     // The wire ids of theirs not seen yet (for read receipts).
     QStringList unseenUids(qint64 conversation) const;
     void markRead(qint64 conversation);
+    // Read on another of my devices: theirs with these wire ids, seen.
+    void markSeenUids(const QStringList &uids);
 
     // People whose messages are dropped.
     void block(const QString &username);

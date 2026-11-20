@@ -104,6 +104,7 @@ private:
     QHash<QString, QPixmap> m_avatars; // username -> their picture, small
     QAction *m_profileAction = nullptr;
     QAction *m_newGroupAction = nullptr;
+    QAction *m_devicesAction = nullptr;
     QAction *m_membersAction = nullptr;
     QAction *m_leaveAction = nullptr;
     QLabel *m_leftNote = nullptr;

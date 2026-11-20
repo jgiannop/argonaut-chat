@@ -303,6 +303,11 @@ QByteArray encodeContent(const Content &content)
                 return {};
             json.insert(QStringLiteral("group"), content.group);
         }
+        if (!content.sentTo.isEmpty()) {
+            if (!isValidUsername(content.sentTo))
+                return {};
+            json.insert(QStringLiteral("sentTo"), content.sentTo);
+        }
         json.insert(QStringLiteral("body"), content.body);
         if (content.attachments.size() > MaxAttachments)
             return {};
@@ -393,6 +398,12 @@ std::optional<Content> decodeContent(const QByteArray &padded)
             if (!group.isString() || !isValidGroupId(group.toString()))
                 return std::nullopt;
             content.group = group.toString();
+        }
+        const QJsonValue sentTo = json.value(QStringLiteral("sentTo"));
+        if (!sentTo.isUndefined()) {
+            if (!sentTo.isString() || !isValidUsername(sentTo.toString()))
+                return std::nullopt;
+            content.sentTo = sentTo.toString();
         }
         const QJsonValue attachments = json.value(QStringLiteral("attachments"));
         if (!attachments.isUndefined()) {

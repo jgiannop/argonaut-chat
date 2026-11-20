@@ -30,6 +30,9 @@ program: [docs/how-signal-works.md](docs/how-signal-works.md).
 - **Groups** of up to 50 (File › New Group…): kept by their members, each
   message encrypted for each member; the server cannot tell a group exists.
   Its creator adds and removes people; anyone can leave.
+- **Linked devices**: your account on up to five computers (File › Linked
+  Devices…), linked by a code; what you send and read follows you; a new
+  computer starts without the old history.
 - **Your name and picture** (File › Profile…), sent only to the people you
   write to or accept, encrypted; the server never sees them. Others always
   see your username too.
@@ -51,8 +54,7 @@ program: [docs/how-signal-works.md](docs/how-signal-works.md).
 ## Not there yet
 
 PQXDH (the
-post-quantum start), contacts and profiles, groups, attachments, linked
-devices, calls.
+post-quantum start), calls, disappearing messages.
 
 ## Installing
 

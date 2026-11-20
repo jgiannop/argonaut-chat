@@ -6,6 +6,8 @@
 #include "SafetyNumber.h"
 
 #include <QBuffer>
+#include <QClipboard>
+#include <QGuiApplication>
 #include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QHBoxLayout>
@@ -20,7 +22,10 @@
 #include <QListWidget>
 #include <QPointer>
 #include <QPlainTextEdit>
+#include <QInputDialog>
+#include <QMessageBox>
 #include <QPushButton>
+#include <QTimer>
 #include <QRegularExpression>
 #include <QVBoxLayout>
 
@@ -53,8 +58,26 @@ SignUpDialog::SignUpDialog(Messenger *messenger, QWidget *parent)
     m_message->setWordWrap(true);
     layout->addWidget(m_message);
 
+    // Linking: the code, shown big enough to copy.
+    m_codeRow = new QWidget(this);
+    auto *codeLayout = new QHBoxLayout(m_codeRow);
+    codeLayout->setContentsMargins(0, 0, 0, 0);
+    m_code = new QLineEdit(m_codeRow);
+    m_code->setObjectName(QStringLiteral("linkCode"));
+    m_code->setReadOnly(true);
+    m_code->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    auto *copy = new QPushButton(tr("Copy"), m_codeRow);
+    connect(copy, &QPushButton::clicked, this, [this] { QGuiApplication::clipboard()->setText(m_code->text()); });
+    codeLayout->addWidget(m_code, 1);
+    codeLayout->addWidget(copy);
+    m_codeRow->hide();
+    layout->addWidget(m_codeRow);
+
     auto *buttons = new QDialogButtonBox(this);
     m_signUp = buttons->addButton(tr("Sign Up"), QDialogButtonBox::AcceptRole);
+    m_link = buttons->addButton(tr("Link to My Account…"), QDialogButtonBox::ActionRole);
+    m_link->setToolTip(tr("This computer joins an account you already have on another computer"));
+    connect(m_link, &QPushButton::clicked, this, &SignUpDialog::link);
     buttons->addButton(tr("Not Now"), QDialogButtonBox::RejectRole);
     layout->addWidget(buttons);
     connect(buttons, &QDialogButtonBox::accepted, this, &SignUpDialog::signUp);
@@ -76,6 +99,56 @@ void SignUpDialog::updateButton()
         m_message->setText(!m_username->text().isEmpty() && !nameOk
                                ? tr("A username is 3 to 32 letters (a-z), digits, _ or ., and starts with a letter.")
                                : QString());
+}
+
+void SignUpDialog::link()
+{
+    const QUrl url(m_server->text().trimmed());
+    if (!url.isValid() || url.host().isEmpty()) {
+        m_message->setText(tr("First the server, as on your other computer."));
+        return;
+    }
+    m_busy = true;
+    m_linking = true;
+    updateButton();
+    m_link->setEnabled(false);
+    m_server->setEnabled(false);
+    m_username->setEnabled(false);
+    m_message->setText(tr("Connecting…"));
+    QPointer<SignUpDialog> self(this);
+    m_messenger->linkThisDevice(
+        url,
+        [self](const QString &code) {
+            if (!self)
+                return;
+            self->m_code->setText(code);
+            self->m_codeRow->show();
+            self->m_message->setText(tr("On your other computer: File › Linked Devices › Link New Device…, and "
+                                        "type or paste this code there. It works once, for ten minutes."));
+        },
+        [self](bool ok, const QString &error) {
+            if (!self)
+                return;
+            self->m_busy = false;
+            self->m_linking = false;
+            if (ok) {
+                self->accept();
+                return;
+            }
+            self->m_codeRow->hide();
+            self->m_server->setEnabled(true);
+            self->m_username->setEnabled(true);
+            self->m_link->setEnabled(true);
+            self->updateButton();
+            self->m_message->setText(error.isEmpty() ? tr("The linking did not work.") : error);
+        });
+}
+
+void SignUpDialog::reject()
+{
+    if (m_linking)
+        m_messenger->cancelLinking(); // its answer comes before the dialog goes
+    QDialog::reject();
 }
 
 void SignUpDialog::signUp()
@@ -416,4 +489,109 @@ void GroupDialog::apply()
         m_messenger->createGroup(m_name->text(), members(), done);
     else
         m_messenger->changeGroup(m_conversation, m_name->text(), members(), done);
+}
+
+DevicesDialog::DevicesDialog(Messenger *messenger, QWidget *parent)
+    : QDialog(parent)
+    , m_messenger(messenger)
+{
+    setWindowTitle(tr("Linked Devices"));
+    auto *layout = new QVBoxLayout(this);
+    auto *intro = new QLabel(tr("Your account on up to five computers, all with the same identity. A newly linked "
+                                "computer starts empty: it gets what comes from then on, not the history."),
+                             this);
+    intro->setWordWrap(true);
+    layout->addWidget(intro);
+    m_list = new QListWidget(this);
+    m_list->setObjectName(QStringLiteral("deviceList"));
+    layout->addWidget(m_list);
+    m_message = new QLabel(this);
+    m_message->setWordWrap(true);
+    layout->addWidget(m_message);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, this);
+    auto *link = buttons->addButton(tr("Link New Device…"), QDialogButtonBox::ActionRole);
+    m_remove = buttons->addButton(tr("Remove"), QDialogButtonBox::ActionRole);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    connect(link, &QPushButton::clicked, this, [this] {
+        bool ok = false;
+        const QString code = QInputDialog::getText(
+            this, tr("Link New Device"),
+            tr("The code the new computer shows (only ever type a code from your own computer: it gets your account):"),
+            QLineEdit::Normal, QString(), &ok);
+        if (ok && !code.trimmed().isEmpty())
+            linkWithCode(code);
+    });
+    connect(m_remove, &QPushButton::clicked, this, [this] { removeSelected(true); });
+    connect(m_list, &QListWidget::currentRowChanged, this, &DevicesDialog::updateButtons);
+    reload();
+    resize(420, 340);
+}
+
+void DevicesDialog::reload()
+{
+    QPointer<DevicesDialog> self(this);
+    m_messenger->listDevices([self](const QList<quint32> &devices, const QString &error) {
+        if (!self)
+            return;
+        self->m_list->clear();
+        if (!error.isEmpty()) {
+            self->m_message->setText(error);
+            return;
+        }
+        for (quint32 device : devices) {
+            QString text = device == 1 ? tr("Computer %1 (the first)").arg(device) : tr("Computer %1").arg(device);
+            if (device == self->m_messenger->device())
+                text += tr(" · this one");
+            auto *item = new QListWidgetItem(text, self->m_list);
+            item->setData(Qt::UserRole, device);
+        }
+        self->updateButtons();
+    });
+}
+
+void DevicesDialog::updateButtons()
+{
+    const QListWidgetItem *item = m_list->currentItem();
+    const quint32 device = item ? item->data(Qt::UserRole).toUInt() : 0;
+    const quint32 mine = m_messenger->device();
+    // The first computer removes the others; any other removes itself; the first stays.
+    m_remove->setEnabled(device > 1 && (mine == 1 || device == mine));
+}
+
+void DevicesDialog::linkWithCode(const QString &code)
+{
+    m_message->setText(tr("Sending your account to it…"));
+    QPointer<DevicesDialog> self(this);
+    m_messenger->linkDevice(code, [self](bool ok, const QString &error) {
+        if (!self)
+            return;
+        self->m_message->setText(ok ? tr("Sent. The new computer is joining.") : error);
+        if (ok)
+            QTimer::singleShot(2500, self, &DevicesDialog::reload);
+    });
+}
+
+void DevicesDialog::removeSelected(bool ask)
+{
+    const QListWidgetItem *item = m_list->currentItem();
+    if (!item)
+        return;
+    const quint32 device = item->data(Qt::UserRole).toUInt();
+    const bool self = device == m_messenger->device();
+    if (ask && QMessageBox::question(this, tr("Remove"),
+                                     self ? tr("Remove this computer from your account? It will no longer get your "
+                                               "messages.")
+                                          : tr("Remove computer %1 from your account? It will no longer get your "
+                                               "messages.")
+                                                .arg(device))
+                   != QMessageBox::Yes)
+        return;
+    QPointer<DevicesDialog> dialog(this);
+    m_messenger->removeDevice(device, [dialog](bool ok, const QString &error) {
+        if (!dialog)
+            return;
+        dialog->m_message->setText(ok ? tr("Removed.") : error);
+        dialog->reload();
+    });
 }

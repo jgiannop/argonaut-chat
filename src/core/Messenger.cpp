@@ -5,6 +5,8 @@
 
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMimeDatabase>
 #include <QSaveFile>
 #include <QTimeZone>
@@ -38,6 +40,7 @@ Messenger::Messenger(ChatStore *store, KeyStore *keys, QObject *parent)
     connect(&m_client, &ChatClient::disconnected, this, [this] { onConnectionLost(tr("The connection was lost.")); });
     connect(&m_client, &ChatClient::failed, this, &Messenger::onConnectionLost);
     connect(&m_client, &ChatClient::envelopeReceived, this, &Messenger::receive);
+    connect(&m_client, &ChatClient::provisionReceived, this, &Messenger::onProvision);
 }
 
 Messenger::~Messenger()
@@ -144,6 +147,21 @@ void Messenger::connectNow()
 
 void Messenger::onConnected()
 {
+    if (m_linkDone) {
+        // This device, to be linked: a slot, and the code to show.
+        m_client.openProvisioning([this](const ChatClient::Result &result) {
+            const QString slot = result.data.value(QStringLiteral("id")).toString();
+            if (!m_linkDone)
+                return;
+            if (!result.ok || !Attachment::isValidId(slot)) {
+                finishLinking(false, result.message.isEmpty() ? tr("The server did not open a slot.") : result.message);
+                return;
+            }
+            if (m_linkCode)
+                m_linkCode(encodeLinkCode(m_linkKey.publicKey, slot));
+        });
+        return;
+    }
     if (m_signUpDone) {
         m_client.registerAccount(m_account->username, m_account->identity,
                                  Protocol::publicPart(*m_keys->latestSignedPreKey()),
@@ -181,11 +199,16 @@ void Messenger::onConnected()
                        downloadPending();
                        shareProfileWithAll();
                        fetchAvatars();
+                       refreshMyDevices();
                    });
 }
 
 void Messenger::onConnectionLost(const QString &why)
 {
+    if (m_linkDone) {
+        finishLinking(false, why);
+        return;
+    }
     if (m_signUpDone) {
         finishSignUp(false, why);
         return;
@@ -323,6 +346,8 @@ void Messenger::fetchSessions(const QString &to, const Done &done)
         QList<quint32> devices;
         for (const ChatClient::DeviceBundle &bundle : *bundles) {
             devices.append(bundle.device);
+            if (to == m_account->username && bundle.device == m_account->device)
+                continue; // this device itself
             if (m_keys->session(to, bundle.device))
                 continue;
             if (m_keys->checkIdentity(to, bundle.bundle.identityKey) == KeyStore::Trust::Changed)
@@ -425,11 +450,17 @@ void Messenger::deliver(const ChatStore::Message &message)
         return;
     }
     m_inFlight.insert(id);
-    const Done finished = [this, id](bool ok, const QString &error) {
+    Protocol::Content copy = content; // for my other devices: whom it went to
+    if (group)
+        copy.group = c.peer;
+    else
+        copy.sentTo = c.peer;
+    const Done finished = [this, id, copy](bool ok, const QString &error) {
         m_inFlight.remove(id);
         if (ok) {
             if (m_store->message(id).status == QLatin1String("sending")) // a receipt may have come first
                 m_store->setStatus(id, QStringLiteral("sent"));
+            syncToMyDevices(copy);
         } else {
             deliveryFailed(id, error, error);
         }
@@ -642,15 +673,22 @@ void Messenger::markRead(qint64 conversation)
         const QHash<QString, QStringList> byAuthor = m_store->unseenUidsByAuthor(conversation);
         m_store->markRead(conversation);
         if (m_state == State::Online && !c.left) {
-            for (auto it = byAuthor.cbegin(); it != byAuthor.cend(); ++it)
+            QStringList all;
+            for (auto it = byAuthor.cbegin(); it != byAuthor.cend(); ++it) {
                 sendReceipt(it.key(), Protocol::Content::Receipt::Read, it.value());
+                all << it.value();
+            }
+            if (!all.isEmpty())
+                syncToMyDevices(Protocol::Content::receiptOf(Protocol::Content::Receipt::Read, all));
         }
         return;
     }
     const QStringList ids = m_store->unseenUids(conversation);
     m_store->markRead(conversation);
-    if (!ids.isEmpty() && c.kind == QLatin1String("direct") && m_state == State::Online)
+    if (!ids.isEmpty() && c.kind == QLatin1String("direct") && m_state == State::Online) {
         sendReceipt(c.peer, Protocol::Content::Receipt::Read, ids);
+        syncToMyDevices(Protocol::Content::receiptOf(Protocol::Content::Receipt::Read, ids));
+    }
 }
 
 void Messenger::acceptRequest(qint64 conversation)
@@ -695,7 +733,9 @@ void Messenger::receive(const Protocol::Envelope &envelope)
 {
     const auto message = Protocol::decodeCipherMessage(envelope.message);
     std::optional<QByteArray> plaintext;
-    if (message && hasAccount() && envelope.from != m_account->username)
+    // From anyone, my other devices too; never from this one.
+    const bool self = hasAccount() && envelope.from == m_account->username && envelope.fromDevice == m_account->device;
+    if (message && hasAccount() && !self)
         plaintext = decrypt(envelope, *message);
     std::optional<Protocol::Content> content;
     if (plaintext)
@@ -725,6 +765,9 @@ std::optional<QByteArray> Messenger::decrypt(const Protocol::Envelope &envelope,
         [this](quint32 id) { return m_keys->oneTimePreKey(id); });
     if (!accepted)
         return std::nullopt;
+    // A device of mine has my identity key, or it is not one.
+    if (envelope.from == m_account->username && accepted->session.remoteIdentityKey() != m_account->identity.publicKey())
+        return std::nullopt;
     if (m_keys->checkIdentity(envelope.from, accepted->session.remoteIdentityKey()) == KeyStore::Trust::Changed)
         emit safetyNumberChanged(envelope.from);
     m_keys->saveSession(envelope.from, envelope.fromDevice, accepted->session);
@@ -739,6 +782,12 @@ std::optional<QByteArray> Messenger::decrypt(const Protocol::Envelope &envelope,
 void Messenger::handleContent(const QString &from, const Protocol::Envelope &envelope,
                               const Protocol::Content &content)
 {
+    if (from == username()) {
+        if (!m_myDevices.contains(envelope.fromDevice))
+            m_myDevices << envelope.fromDevice; // a device of mine I had not heard of
+        handleSync(content);
+        return;
+    }
     if (m_store->isBlocked(from))
         return; // dropped, and they learn nothing
     if (content.type == Protocol::Content::Type::Profile) {
@@ -870,6 +919,8 @@ QStringList Messenger::knownPeople() const
         else if (c.kind == QLatin1String("group"))
             people << othersIn(c.id);
     }
+    if (haveOtherDevices())
+        people << username(); // my other devices: my profile
     people.removeDuplicates();
     return people;
 }
@@ -1020,6 +1071,7 @@ void Messenger::sendGroupUpdate(const ChatStore::Group &group, const QStringList
     QStringList recipients = to;
     recipients.removeAll(username());
     fanOut(recipients, update, [](bool, const QString &) {});
+    syncToMyDevices(update);
 }
 
 void Messenger::createGroup(const QString &name, const QStringList &members, const GroupDone &done)
@@ -1133,6 +1185,7 @@ void Messenger::leaveGroup(qint64 conversation)
         return;
     const Protocol::Content leave = Protocol::Content::leave(group.id);
     fanOut(othersIn(conversation), leave, [](bool, const QString &) {});
+    syncToMyDevices(leave);
     m_store->setLeft(conversation);
 }
 
@@ -1152,7 +1205,7 @@ void Messenger::handleGroupUpdate(const QString &from, const Protocol::Content &
         if (!mine || content.groupAdmin != from)
             return;
         const qint64 direct = m_store->directConversation(from);
-        const bool known = direct != 0 && !m_store->conversation(direct).request;
+        const bool known = from == username() || (direct != 0 && !m_store->conversation(direct).request);
         m_store->addGroup(group, !known);
         return;
     }
@@ -1184,5 +1237,365 @@ void Messenger::handleLeave(const QString &from, const Protocol::Content &conten
         sendGroupUpdate(group, group.members);
     } else {
         m_store->updateGroup(group); // the same revision: the admin's next update still counts
+    }
+}
+
+// --- Linked devices ---
+
+QString Messenger::encodeLinkCode(const QByteArray &publicKey, const QString &slot)
+{
+    const QByteArray raw = publicKey + QByteArray::fromHex(slot.toLatin1());
+    return QString::fromLatin1(raw.toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
+}
+
+bool Messenger::decodeLinkCode(const QString &code, QByteArray *publicKey, QString *slot)
+{
+    const QString trimmed = code.simplified().remove(QLatin1Char(' '));
+    auto decoded = QByteArray::fromBase64Encoding(trimmed.toLatin1(), QByteArray::Base64UrlEncoding
+                                                                          | QByteArray::OmitTrailingEquals
+                                                                          | QByteArray::AbortOnBase64DecodingErrors);
+    if (!decoded || decoded.decoded.size() != Crypto::KeySize + 16)
+        return false;
+    *publicKey = decoded.decoded.left(Crypto::KeySize);
+    *slot = QString::fromLatin1(decoded.decoded.mid(Crypto::KeySize).toHex());
+    return true;
+}
+
+void Messenger::linkThisDevice(const QUrl &server, const LinkCode &showCode, const Done &done)
+{
+    if (hasAccount() || m_signUpDone || m_linkDone) {
+        done(false, tr("There is an account already."));
+        return;
+    }
+    m_client.close();
+    m_keys->forgetAccount();
+    m_linkKey = Crypto::DhKeyPair::generate(); // one time: only for this link
+    m_linkCode = showCode;
+    m_linkDone = done;
+    QString error;
+    // The server for the account's keys; this device's own entry comes once linked.
+    m_account = KeyStore::Account{QString(), 0, server, Crypto::IdentityKeyPair(), false};
+    if (!m_client.open(server, &error)) {
+        finishLinking(false, error);
+        return;
+    }
+    setState(State::Connecting);
+}
+
+void Messenger::cancelLinking()
+{
+    if (m_linkDone)
+        finishLinking(false, tr("Cancelled."));
+}
+
+void Messenger::finishLinking(bool ok, const QString &error)
+{
+    const Done done = std::exchange(m_linkDone, {});
+    m_linkCode = {};
+    m_linkKey = Crypto::DhKeyPair();
+    if (!ok) {
+        m_keys->forgetAccount();
+        m_account.reset();
+        setState(State::NoAccount);
+        m_client.close();
+    } else {
+        m_running = true;
+        m_delay = m_firstDelay;
+        setState(State::Online);
+        refreshMyDevices();
+    }
+    if (done)
+        done(ok, error);
+}
+
+void Messenger::onProvision(const QByteArray &sealed)
+{
+    if (!m_linkDone)
+        return;
+    // Only what was sealed to this device's one-time key: the server cannot make one.
+    const auto opened = Crypto::openSealed(m_linkKey, sealed);
+    const QJsonObject json = opened ? QJsonDocument::fromJson(*opened).object() : QJsonObject();
+    const QString name = json.value(QStringLiteral("username")).toString();
+    const auto secret = Protocol::Json::bytes(json.value(QStringLiteral("identity")), 64);
+    const Crypto::IdentityKeyPair identity = secret ? Crypto::IdentityKeyPair::fromSecretKey(*secret)
+                                                    : Crypto::IdentityKeyPair();
+    if (!opened || json.value(QStringLiteral("v")).toInt() != 1 || !Protocol::isValidUsername(name)
+        || !identity.isValid()) {
+        finishLinking(false, tr("What came was not an account."));
+        return;
+    }
+    const QString profileName = Protocol::cleanDisplayName(json.value(QStringLiteral("name")).toString());
+    const auto avatar = Protocol::Json::bytes(json.value(QStringLiteral("avatar")), -1, int(MaxAvatarBytes));
+
+    // Kept before the server hears of it, as at sign-up.
+    KeyStore::Account account{name, 0, m_account->server, identity, false};
+    m_keys->saveAccount(account);
+    const X3dh::SignedPreKey signedPreKey = X3dh::makeSignedPreKey(identity, m_keys->takePreKeyIds(1));
+    const QList<X3dh::OneTimePreKey> preKeys = X3dh::makeOneTimePreKeys(m_keys->takePreKeyIds(PreKeyBatch), PreKeyBatch);
+    m_keys->addSignedPreKey(signedPreKey, now(), true);
+    m_keys->addOneTimePreKeys(preKeys);
+    m_account = account;
+    const QJsonObject state = json;
+    m_client.addDevice(name, identity, Protocol::publicPart(signedPreKey), Protocol::publicParts(preKeys),
+                       [this, account, profileName, avatar, state](const ChatClient::Result &result) {
+                           const auto device = Protocol::Json::integer(result.data.value(QStringLiteral("device")), 2,
+                                                                       std::numeric_limits<quint32>::max());
+                           if (!result.ok || !device) {
+                               finishLinking(false, result.error == QLatin1String("too-many-devices")
+                                                        ? tr("That account has as many devices as it may.")
+                                                        : result.message);
+                               return;
+                           }
+                           KeyStore::Account linked = account;
+                           linked.device = quint32(*device);
+                           linked.registered = true;
+                           m_keys->saveAccount(linked);
+                           m_account = linked;
+                           m_serverPreKeys = PreKeyBatch;
+                           if (!profileName.isEmpty() || avatar) {
+                               m_store->setMyProfile(profileName, avatar.value_or(QByteArray()));
+                               m_store->setProfileSent(username(), m_store->myProfileVersion()); // no echo
+                           }
+                           takeLinkedState(state);
+                           finishLinking(true, QString());
+                       });
+}
+
+void Messenger::linkDevice(const QString &code, const Done &done)
+{
+    QByteArray key;
+    QString slot;
+    if (!decodeLinkCode(code, &key, &slot)) {
+        done(false, tr("That is not a link code."));
+        return;
+    }
+    if (!hasAccount() || m_state != State::Online) {
+        done(false, tr("Not connected to the server."));
+        return;
+    }
+    const ChatStore::Profile mine = m_store->myProfile();
+    QJsonObject json{{QStringLiteral("v"), 1},
+                     {QStringLiteral("username"), username()},
+                     {QStringLiteral("identity"), Protocol::Json::base64(m_account->identity.secretKey())},
+                     {QStringLiteral("name"), mine.name}};
+    if (!mine.avatar.isEmpty())
+        json.insert(QStringLiteral("avatar"), Protocol::Json::base64(mine.avatar));
+    // Whom I have accepted, my groups, whom I blocked: the same trust there
+    // (but none of the messages).
+    QJsonArray contacts;
+    QJsonArray groups;
+    for (const ChatStore::Conversation &c : m_store->conversations()) {
+        if (c.request || c.left)
+            continue;
+        if (c.kind == QLatin1String("direct")) {
+            contacts.append(c.peer);
+        } else if (c.kind == QLatin1String("group")) {
+            const ChatStore::Group g = m_store->group(c.id);
+            groups.append(QJsonObject{{QStringLiteral("id"), g.id},
+                                      {QStringLiteral("name"), g.name},
+                                      {QStringLiteral("admin"), g.admin},
+                                      {QStringLiteral("members"), QJsonArray::fromStringList(g.members)},
+                                      {QStringLiteral("revision"), g.revision}});
+        }
+    }
+    json.insert(QStringLiteral("contacts"), contacts);
+    json.insert(QStringLiteral("groups"), groups);
+    json.insert(QStringLiteral("blocked"), QJsonArray::fromStringList(m_store->blocked()));
+    QByteArray plain = QJsonDocument(json).toJson(QJsonDocument::Compact);
+    const QByteArray sealed = Crypto::sealTo(key, plain);
+    Crypto::wipe(plain);
+    if (sealed.isEmpty()) {
+        done(false, tr("That is not a link code."));
+        return;
+    }
+    m_client.sendProvisioning(slot, sealed, [this, done](const ChatClient::Result &result) {
+        if (!result.ok) {
+            done(false, result.error == QLatin1String("not-found")
+                            ? tr("No computer is waiting with that code (it lasts ten minutes).")
+                            : result.message);
+            return;
+        }
+        // The new one joins in a moment: then it is one of mine.
+        QTimer::singleShot(2000, this, &Messenger::refreshMyDevices);
+        done(true, QString());
+    });
+}
+
+void Messenger::listDevices(const DevicesDone &done)
+{
+    if (m_state != State::Online) {
+        done({}, tr("Not connected to the server."));
+        return;
+    }
+    m_client.listDevices([done](const ChatClient::Result &result) {
+        QList<quint32> devices;
+        const QJsonValue list = result.data.value(QStringLiteral("devices"));
+        if (!result.ok || !list.isArray()) {
+            done({}, result.ok ? tr("A bad answer.") : result.message);
+            return;
+        }
+        for (const QJsonValue &item : list.toArray()) {
+            const auto device = Protocol::Json::integer(item.toObject().value(QStringLiteral("device")), 1, 1000);
+            if (device)
+                devices << quint32(*device);
+        }
+        done(devices, QString());
+    });
+}
+
+void Messenger::removeDevice(quint32 device, const Done &done)
+{
+    if (m_state != State::Online) {
+        done(false, tr("Not connected to the server."));
+        return;
+    }
+    m_client.removeDevice(device, [this, device, done](const ChatClient::Result &result) {
+        if (result.ok) {
+            m_keys->removeSession(username(), device);
+            m_myDevices.removeAll(device);
+        }
+        done(result.ok, result.message);
+    });
+}
+
+void Messenger::refreshMyDevices()
+{
+    listDevices([this](const QList<quint32> &devices, const QString &error) {
+        if (error.isEmpty())
+            m_myDevices = devices;
+    });
+}
+
+bool Messenger::haveOtherDevices() const
+{
+    for (quint32 device : m_myDevices) {
+        if (m_account && device != m_account->device)
+            return true;
+    }
+    return false;
+}
+
+void Messenger::syncToMyDevices(const Protocol::Content &content)
+{
+    if (!haveOtherDevices() || m_state != State::Online)
+        return;
+    sendContent(username(), content, [](bool, const QString &) {});
+}
+
+void Messenger::handleSync(const Protocol::Content &content)
+{
+    switch (content.type) {
+    case Protocol::Content::Type::Text: {
+        // Mine, sent from another of my devices: shown here as mine.
+        qint64 conversation = 0;
+        if (!content.group.isEmpty()) {
+            conversation = m_store->groupConversation(content.group);
+            if (conversation == 0 || !m_store->isMember(conversation, username()))
+                return;
+        } else if (!content.sentTo.isEmpty()) {
+            conversation = m_store->directConversation(content.sentTo);
+            if (conversation == 0)
+                conversation = m_store->addConversation(QStringLiteral("direct"), content.sentTo, content.sentTo);
+            else
+                m_store->setAccepted(conversation); // I wrote to them
+        }
+        if (conversation == 0 || m_store->hasMessage(conversation, content.id))
+            return;
+        const ChatStore::Message message = m_store->addMessage(
+            conversation, content.body, QString(), QDateTime::fromMSecsSinceEpoch(content.sentAt, QTimeZone::utc()),
+            content.id, QStringLiteral("sent"));
+        for (const Attachment::Pointer &pointer : content.attachments) {
+            ChatStore::StoredAttachment a;
+            a.message = message.id;
+            a.name = pointer.name;
+            a.type = pointer.type;
+            a.size = pointer.size;
+            a.key = pointer.key;
+            a.digest = pointer.digest;
+            a.remoteId = pointer.id;
+            a.state = QStringLiteral("download");
+            m_store->addAttachment(a);
+        }
+        downloadPending();
+        return;
+    }
+    case Protocol::Content::Type::Receipt:
+        // Read on another of my devices.
+        if (content.receipt == Protocol::Content::Receipt::Read)
+            m_store->markSeenUids(content.receiptFor);
+        return;
+    case Protocol::Content::Type::Profile:
+        applyMyProfile(content.name, content.avatar);
+        return;
+    case Protocol::Content::Type::Group:
+        handleGroupUpdate(username(), content); // I am its admin, on another device
+        return;
+    case Protocol::Content::Type::Leave:
+        if (const qint64 conversation = m_store->groupConversation(content.group))
+            m_store->setLeft(conversation);
+        return;
+    }
+}
+
+void Messenger::applyMyProfile(const QString &name, const std::optional<Attachment::Pointer> &avatar)
+{
+    const auto store = [this, name](const QByteArray &picture) {
+        m_store->setMyProfile(name, picture);
+        // Already everywhere: not sent back to my devices (no echo).
+        m_store->setProfileSent(username(), m_store->myProfileVersion());
+    };
+    if (!avatar || avatar->size > MaxAvatarBytes) {
+        store(QByteArray());
+        return;
+    }
+    const Attachment::Pointer wanted = *avatar;
+    m_client.downloadAttachment(wanted.id, Attachment::blobSize(wanted.size), {},
+                                [this, wanted, store](const QByteArray &blob, const ChatClient::Result &result) {
+                                    const auto image = result.ok ? Attachment::decrypt(blob, wanted.key, wanted.digest,
+                                                                                       wanted.size)
+                                                                 : std::nullopt;
+                                    store(image && !imageType(*image).isEmpty() ? *image : m_store->myProfile().avatar);
+                                });
+}
+
+void Messenger::takeLinkedState(const QJsonObject &json)
+{
+    // From my own device, sealed to this one; still checked like anything else.
+    for (const QJsonValue &value : json.value(QStringLiteral("contacts")).toArray()) {
+        const QString peer = value.toString();
+        if (Protocol::isValidUsername(peer) && peer != username() && m_store->directConversation(peer) == 0)
+            m_store->addConversation(QStringLiteral("direct"), peer, peer);
+    }
+    for (const QJsonValue &value : json.value(QStringLiteral("blocked")).toArray()) {
+        if (Protocol::isValidUsername(value.toString()))
+            m_store->block(value.toString());
+    }
+    int count = 0;
+    for (const QJsonValue &value : json.value(QStringLiteral("groups")).toArray()) {
+        if (++count > 1000)
+            break;
+        const QJsonObject g = value.toObject();
+        // The same checks as a group update from its admin.
+        Protocol::Content update = Protocol::Content::groupUpdate(
+            g.value(QStringLiteral("id")).toString(), g.value(QStringLiteral("name")).toString(),
+            g.value(QStringLiteral("admin")).toString(),
+            [&] {
+                QStringList members;
+                for (const QJsonValue &m : g.value(QStringLiteral("members")).toArray())
+                    members << m.toString();
+                return members;
+            }(),
+            g.value(QStringLiteral("revision")).toInt());
+        const auto checked = Protocol::decodeContent(Protocol::encodeContent(update));
+        if (!checked || !checked->groupMembers.contains(username())
+            || m_store->groupConversation(checked->group) != 0)
+            continue;
+        ChatStore::Group group;
+        group.id = checked->group;
+        group.name = checked->groupName;
+        group.admin = checked->groupAdmin;
+        group.members = checked->groupMembers;
+        group.revision = checked->groupRevision;
+        m_store->addGroup(group, false);
     }
 }

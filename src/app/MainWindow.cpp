@@ -552,6 +552,12 @@ void MainWindow::buildMenus()
         if (dialog.exec() == QDialog::Accepted && dialog.conversation())
             openConversation(dialog.conversation());
     });
+    m_devicesAction = file->addAction(tr("Linked Devices…"), this, [this] {
+        if (!m_messenger)
+            return;
+        DevicesDialog dialog(m_messenger, this);
+        dialog.exec();
+    });
     m_profileAction = file->addAction(tr("Profile…"), this, [this] {
         if (!m_messenger)
             return;
@@ -812,6 +818,8 @@ void MainWindow::updateConnection()
         m_profileAction->setEnabled(account);
     if (m_newGroupAction)
         m_newGroupAction->setEnabled(account);
+    if (m_devicesAction)
+        m_devicesAction->setEnabled(account);
 }
 
 void MainWindow::showNotice(const QString &text)

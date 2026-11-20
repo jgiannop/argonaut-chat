@@ -7,6 +7,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
+#include <QSet>
 #include <QJsonObject>
 #include <QRegularExpression>
 #include <QSqlError>
@@ -881,4 +882,29 @@ QHash<QString, QStringList> ChatStore::unseenUidsByAuthor(qint64 conversation) c
     while (q.next())
         out[q.value(0).toString()] << q.value(1).toString();
     return out;
+}
+
+void ChatStore::markSeenUids(const QStringList &uids)
+{
+    QSet<qint64> conversations;
+    QSqlQuery find(m_db);
+    find.prepare(QStringLiteral("SELECT conversation FROM messages WHERE uid = ? AND author <> '' AND seen = 0"));
+    QSqlQuery mark(m_db);
+    mark.prepare(QStringLiteral("UPDATE messages SET seen = 1 WHERE uid = ? AND author <> ''"));
+    for (const QString &uid : uids) {
+        if (uid.isEmpty())
+            continue;
+        find.bindValue(0, uid);
+        if (find.exec()) {
+            while (find.next())
+                conversations.insert(find.value(0).toLongLong());
+        }
+        mark.bindValue(0, uid);
+        mark.exec();
+    }
+    if (conversations.isEmpty())
+        return;
+    for (qint64 conversation : std::as_const(conversations))
+        emit messagesChanged(conversation);
+    emit conversationsChanged();
 }

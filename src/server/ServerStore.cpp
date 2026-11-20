@@ -416,3 +416,58 @@ void ServerStore::remove(const QString &to, quint32 toDevice, const QList<qint64
     }
     m_db.commit();
 }
+
+// --- Linked devices ---
+
+quint32 ServerStore::addDevice(const QString &username, const QByteArray &identityKey,
+                               const Protocol::PublicSignedPreKey &signedPreKey)
+{
+    if (!accountExists(username))
+        return 0;
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT COALESCE(MAX(device), 0) + 1 FROM devices WHERE username = ?"));
+    q.addBindValue(username);
+    if (!q.exec() || !q.next())
+        return 0;
+    const quint32 device = q.value(0).toUInt();
+    q.prepare(QStringLiteral("INSERT INTO devices (username, device, identity_key, signed_prekey_id, signed_prekey,"
+                             " signed_prekey_signature, created) VALUES (?, ?, ?, ?, ?, ?, ?)"));
+    q.addBindValue(username);
+    q.addBindValue(qint64(device));
+    q.addBindValue(identityKey);
+    q.addBindValue(qint64(signedPreKey.id));
+    q.addBindValue(signedPreKey.key);
+    q.addBindValue(signedPreKey.signature);
+    q.addBindValue(QDateTime::currentMSecsSinceEpoch());
+    return q.exec() ? device : 0;
+}
+
+bool ServerStore::removeDevice(const QString &username, quint32 device)
+{
+    if (!m_db.transaction())
+        return false;
+    QSqlQuery q(m_db);
+    for (const char *sql : {"DELETE FROM one_time_prekeys WHERE username = ? AND device = ?",
+                            "DELETE FROM queue WHERE to_user = ? AND to_device = ?",
+                            "DELETE FROM devices WHERE username = ? AND device = ?"}) {
+        q.prepare(QString::fromLatin1(sql));
+        q.addBindValue(username);
+        q.addBindValue(qint64(device));
+        if (!q.exec()) {
+            m_db.rollback();
+            return false;
+        }
+    }
+    const bool removed = q.numRowsAffected() == 1;
+    m_db.commit();
+    return removed;
+}
+
+qint64 ServerStore::deviceCreated(const QString &username, quint32 device) const
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT created FROM devices WHERE username = ? AND device = ?"));
+    q.addBindValue(username);
+    q.addBindValue(qint64(device));
+    return q.exec() && q.next() ? q.value(0).toLongLong() : 0;
+}

@@ -170,6 +170,30 @@ people). The server sends one thing unasked: `{"op":"deliver","envelope":{…}}`
 
 Any request may also be answered `rate-limited`, with `retryAfter` (ms).
 
+| `provision-open` | (not signed in) | `id` (a slot) | the connection may wait 10 minutes unsigned in |
+| `provision-send` | `id`, `message` (≤ 768 KiB) | | `not-found` (no device waiting there; one message per slot) |
+| `add-device` | as `register`, with the account's `identityKey`; signature for device 0 | `device` | `denied`, `too-many-devices` (5) |
+| `devices` | | `devices`: `[{device, created}]` | |
+| `remove-device` | `device` | | `denied` (the first device removes others; any removes itself; the first stays) |
+
+### Linked devices
+
+One account, one identity key, up to 5 computers. The new computer opens a
+slot and shows a **code**: base64url of its one-time X25519 public key (32
+bytes) and the slot (16 bytes), 64 characters. On a computer of the account
+the user types that code; it sends the account, sealed to that key with
+libsodium's sealed box (the server cannot read or forge it), into the slot:
+`{"v":1, "username", "identity" (the secret key), "name", "avatar"?,
+"contacts": [accepted people], "groups": [{id, name, admin, members,
+revision}], "blocked": [...]}`. The new computer joins with `add-device`,
+starts with the same trust but no history.
+
+Messages to someone go to all their devices (the server insists). What I
+send goes also to my other devices, as a text with `sentTo` (or its
+`group`); reading sends them a read receipt (marks those messages seen);
+group updates, leaving and my profile go to them too. A device of mine
+must have my identity key.
+
 Attachments are blobs the server cannot read, kept in `attachments/` next
 to its database for 30 days (unfinished uploads: a day), and handed to
 anyone signed in who knows the random id: the id is only ever in the

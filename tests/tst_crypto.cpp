@@ -82,6 +82,21 @@ private slots:
                  std::optional<QByteArray>(QByteArray()));
     }
 
+    void sealedBoxes()
+    {
+        const auto pair = Crypto::DhKeyPair::generate();
+        const QByteArray sealed = Crypto::sealTo(pair.publicKey, "the account's keys");
+        QVERIFY(!sealed.contains("account"));
+        QCOMPARE(Crypto::openSealed(pair, sealed), std::optional<QByteArray>("the account's keys"));
+        QVERIFY(Crypto::sealTo(pair.publicKey, "x") != Crypto::sealTo(pair.publicKey, "x"));
+        QVERIFY(!Crypto::openSealed(Crypto::DhKeyPair::generate(), sealed)); // another key
+        QByteArray changed = sealed;
+        changed[changed.size() - 1] = char(changed.at(changed.size() - 1) ^ 1);
+        QVERIFY(!Crypto::openSealed(pair, changed));
+        QVERIFY(!Crypto::openSealed(pair, "short"));
+        QVERIFY(Crypto::sealTo("not a key", "x").isEmpty());
+    }
+
     void x3dhAgrees_data()
     {
         QTest::addColumn<bool>("oneTime");

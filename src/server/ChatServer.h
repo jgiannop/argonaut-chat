@@ -40,6 +40,12 @@ class ServerStore;
 // in who knows the random id ("download"). Kept 30 days, unfinished ones a
 // day; 5 GB in all at most.
 //
+// Linked devices: a new device opens a slot ("provision-open") and shows
+// the user a code with the slot and a one-time public key; a signed-in
+// device of the account passes a message, sealed to that key, into the slot
+// ("provision-send"); the new device then joins the account ("add-device"),
+// proving it holds the account's identity key. At most MaxDevices.
+//
 // Behind a reverse proxy every connection comes from this computer; with
 // setTrustProxy(true) the address is the last one in X-Forwarded-For, and
 // only for connections from loopback (the proxy).
@@ -75,6 +81,11 @@ public:
         qint64 unfinishedUploadKeepMs = 24LL * 3600 * 1000;
     };
     static constexpr int MaxChunkBytes = 512 * 1024;
+    // Linked devices: at most this many per account; a new device waits
+    // (not signed in) at most ProvisioningTimeoutMs for its message.
+    static constexpr int MaxDevices = 5;
+    static constexpr int ProvisioningTimeoutMs = 10 * 60 * 1000;
+    static constexpr int MaxProvisionBytes = 768 * 1024;
 
     explicit ChatServer(ServerStore *store, QObject *parent = nullptr);
     ~ChatServer() override;
@@ -102,6 +113,7 @@ private:
         quint32 device = 0;
         int failedSignIns = 0;
         QSet<qint64> inFlight; // pushed, not yet acknowledged
+        QString provisioning;  // a new device waiting to be linked: its slot
         qint64 lastHeard = 0;  // m_clock's ms
         bool signedIn() const { return !username.isEmpty(); }
     };
@@ -122,6 +134,11 @@ private:
     QJsonObject upload(const Client &client, const QJsonObject &request);
     QJsonObject uploadChunk(const Client &client, const QJsonObject &request);
     QJsonObject download(const Client &client, const QJsonObject &request);
+    QJsonObject provisionOpen(QWebSocket *socket, Client &client);
+    QJsonObject provisionSend(const QJsonObject &request);
+    QJsonObject addDevice(QWebSocket *socket, Client &client, const QJsonObject &request);
+    QJsonObject listDevices(const Client &client);
+    QJsonObject removeDevice(const Client &client, const QJsonObject &request);
 
     QJsonObject signInFailed(QWebSocket *socket, Client &client, const QString &error, const QString &message);
     void signIn(QWebSocket *socket, Client &client, const QString &username, quint32 device);
@@ -139,6 +156,7 @@ private:
     QHash<QWebSocket *, Client> m_clients;
     QHash<QString, QWebSocket *> m_online; // deviceKey -> its connection
     QHash<QString, int> m_perAddress;      // open connections
+    QHash<QString, QWebSocket *> m_provisioning; // slot -> the new device waiting on it
     Limits m_limits;
     RateLimiter m_limiter;
     QTimer m_prune;
