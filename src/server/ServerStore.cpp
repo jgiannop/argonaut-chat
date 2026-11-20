@@ -210,7 +210,7 @@ int ServerStore::oneTimePreKeyCount(const QString &username, quint32 device) con
     return q.exec() && q.next() ? q.value(0).toInt() : 0;
 }
 
-std::optional<X3dh::PreKeyBundle> ServerStore::takeBundle(const QString &username, quint32 device)
+std::optional<X3dh::PreKeyBundle> ServerStore::takeBundle(const QString &username, quint32 device, bool withOneTime)
 {
     QSqlQuery q(m_db);
     q.prepare(QStringLiteral("SELECT identity_key, signed_prekey_id, signed_prekey, signed_prekey_signature"
@@ -229,7 +229,7 @@ std::optional<X3dh::PreKeyBundle> ServerStore::takeBundle(const QString &usernam
                              " ORDER BY rowid LIMIT 1"));
     q.addBindValue(username);
     q.addBindValue(qint64(device));
-    if (q.exec() && q.next()) {
+    if (withOneTime && q.exec() && q.next()) {
         const qint64 rowid = q.value(0).toLongLong();
         bundle.oneTimePreKeyId = q.value(1).toUInt();
         bundle.oneTimePreKey = q.value(2).toByteArray();

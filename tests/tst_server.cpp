@@ -1,11 +1,13 @@
 #include "ChatClient.h"
 #include "ChatServer.h"
+#include "RateLimiter.h"
 #include "ServerStore.h"
 #include "Session.h"
 #include "TestSupport.h"
 
 #include <QCoreApplication>
 #include <QJsonArray>
+#include <QNetworkRequest>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
@@ -100,6 +102,14 @@ private slots:
         m_store = std::make_unique<ServerStore>(m_dir.filePath(QStringLiteral("server-%1.sqlite").arg(++m_count)));
         QVERIFY(m_store->isOpen());
         m_server = std::make_unique<ChatServer>(m_store.get());
+        // Limits that never get in the way here; rateLimits() sets its own.
+        ChatServer::Limits generous;
+        const RateLimiter::Rule plenty{1e6, 1e6};
+        generous.requestsPerConnection = generous.signUpsPerAddress = generous.challengesPerAddress = plenty;
+        generous.sendsPerAccount = generous.keyFetchesPerAccount = generous.preKeyUploadsPerAccount = plenty;
+        generous.oneTimePreKeysPerDevice = plenty;
+        m_server->setLimits(generous);
+        m_server->setClock([this] { return m_now; });
         QVERIFY2(m_server->listen(), qPrintable(m_server->errorString()));
         m_url = QUrl(QStringLiteral("ws://127.0.0.1:%1").arg(m_server->port()));
     }
@@ -354,6 +364,121 @@ private slots:
         QCOMPARE(m_store->oneTimePreKeyCount("bob", 1), ServerStore::MaxOneTimePreKeys);
     }
 
+    void rateLimiter()
+    {
+        qint64 now = 0;
+        RateLimiter limiter([&now] { return now; });
+        const RateLimiter::Rule rule{3, 1}; // a burst of 3, then one a second
+        for (int i = 0; i < 3; ++i)
+            QVERIFY(limiter.take("a", rule));
+        qint64 retry = 0;
+        QVERIFY(!limiter.take("a", rule, &retry));
+        QCOMPARE(retry, 1000);
+        QVERIFY(limiter.take("b", rule)); // another key, its own bucket
+        now += 500;
+        QVERIFY(!limiter.take("a", rule, &retry));
+        QCOMPARE(retry, 500);
+        now += 500;
+        QVERIFY(limiter.take("a", rule));
+        QVERIFY(!limiter.take("a", rule));
+        // Full again after a while: forgotten.
+        now += 10000;
+        limiter.prune();
+        QCOMPARE(limiter.size(), 0);
+    }
+
+    void rateLimits()
+    {
+        ChatServer::Limits limits = m_server->limits();
+        limits.signUpsPerAddress = {2, 1.0 / 3600};
+        limits.sendsPerAccount = {3, 1};
+        limits.keyFetchesPerAccount = {4, 1.0 / 60};
+        limits.oneTimePreKeysPerDevice = {2, 1.0 / 3600};
+        m_server->setLimits(limits);
+
+        // Two sign-ups from here, then wait an hour.
+        Person alice(QStringLiteral("alice"));
+        Person bob(QStringLiteral("bob"));
+        Person carol(QStringLiteral("carol"));
+        QVERIFY(join(alice));
+        QVERIFY(join(bob));
+        QVERIFY(connectTo(carol.client));
+        ChatClient::Result result = signUp(carol);
+        QCOMPARE(result.error, QString("rate-limited"));
+        QVERIFY(result.data.value("retryAfter").toDouble() > 0);
+        m_now += 3600 * 1000;
+        QVERIFY(signUp(carol).ok);
+
+        // One-time prekeys: two, then bundles without, though Bob has more.
+        QList<bool> withOneTime;
+        for (int i = 0; i < 3; ++i) {
+            const auto bundles = ChatClient::bundles(wait([&](auto done) { alice.client.fetchKeys("bob", done); }));
+            QVERIFY(bundles);
+            withOneTime << bundles->first().bundle.oneTimePreKeyId.has_value();
+        }
+        QCOMPARE(withOneTime, (QList<bool>{true, true, false}));
+        QCOMPARE(m_store->oneTimePreKeyCount("bob", 1), 3);
+        // Key fetches per account: the fourth went, the fifth waits.
+        QVERIFY(wait([&](auto done) { alice.client.fetchKeys("bob", done); }).ok);
+        QCOMPARE(wait([&](auto done) { alice.client.fetchKeys("bob", done); }).error, QString("rate-limited"));
+
+        // Sends: a burst of three, then one a second.
+        const QByteArray cipher = Protocol::encodeCipherMessage({false, {}, {}, 0, {}, QByteArray(60, 'x')});
+        for (int i = 0; i < 3; ++i)
+            QVERIFY(wait([&](auto done) { alice.client.send("bob", {{1, cipher}}, done); }).ok);
+        result = wait([&](auto done) { alice.client.send("bob", {{1, cipher}}, done); });
+        QCOMPARE(result.error, QString("rate-limited"));
+        QCOMPARE(result.data.value("retryAfter").toInt(), 1000);
+        // Others are not held back by Alice.
+        QVERIFY(wait([&](auto done) { bob.client.send("alice", {{1, cipher}}, done); }).ok);
+        m_now += 1000;
+        QVERIFY(wait([&](auto done) { alice.client.send("bob", {{1, cipher}}, done); }).ok);
+    }
+
+    void connectionsPerAddress()
+    {
+        ChatServer::Limits limits = m_server->limits();
+        limits.connectionsPerAddress = 2;
+        m_server->setLimits(limits);
+
+        auto openFrom = [this](const QByteArray &forwardedFor) {
+            auto socket = std::make_unique<QWebSocket>();
+            QNetworkRequest request(m_url);
+            if (!forwardedFor.isEmpty())
+                request.setRawHeader("X-Forwarded-For", forwardedFor);
+            socket->open(request);
+            return socket;
+        };
+        auto settled = [this](int count) {
+            return QTest::qWaitFor([&] { return m_server->connectionCount() == count; }, kWait);
+        };
+
+        // Without a trusted proxy, everyone here is 127.0.0.1: the third goes.
+        auto a = openFrom("198.51.100.1");
+        auto b = openFrom("198.51.100.2");
+        QVERIFY(settled(2));
+        auto c = openFrom("198.51.100.3");
+        QTRY_COMPARE_WITH_TIMEOUT(c->state(), QAbstractSocket::UnconnectedState, kWait);
+        QCOMPARE(m_server->connectionCount(), 2);
+        a.reset();
+        b.reset();
+        c.reset();
+        QVERIFY(settled(0));
+
+        // Behind a trusted proxy, the address it forwards counts (the last one).
+        m_server->setTrustProxy(true);
+        auto d = openFrom("10.0.0.9, 198.51.100.1");
+        auto e = openFrom("198.51.100.1");
+        auto f = openFrom("198.51.100.2");
+        QVERIFY(settled(3));
+        auto g = openFrom("198.51.100.1");
+        QTRY_COMPARE_WITH_TIMEOUT(g->state(), QAbstractSocket::UnconnectedState, kWait);
+        QCOMPARE(m_server->connectionCount(), 3);
+        // Rubbish in the header: the proxy's own address.
+        auto h = openFrom("not an address");
+        QVERIFY(settled(4));
+    }
+
     void clientRefusesPlainRemote()
     {
         ChatClient client;
@@ -407,6 +532,7 @@ private:
 
     QTemporaryDir m_dir;
     int m_count = 0;
+    qint64 m_now = 1000000; // the server's limiter clock
     std::unique_ptr<ServerStore> m_store;
     std::unique_ptr<ChatServer> m_server;
     QUrl m_url;

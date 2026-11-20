@@ -16,6 +16,11 @@ Messenger::Messenger(ChatStore *store, KeyStore *keys, QObject *parent)
     }
     m_state = hasAccount() ? State::Offline : State::NoAccount;
 
+    m_retry.setSingleShot(true);
+    connect(&m_retry, &QTimer::timeout, this, [this] {
+        if (m_state == State::Online)
+            flushOutbox();
+    });
     m_reconnect.setSingleShot(true);
     connect(&m_reconnect, &QTimer::timeout, this, &Messenger::connectNow);
     connect(&m_client, &ChatClient::connected, this, &Messenger::onConnected);
@@ -137,6 +142,8 @@ void Messenger::onConnected()
                                      QString why = result.message;
                                      if (result.error == QLatin1String("taken"))
                                          why = tr("That username is taken.");
+                                     else if (result.error == QLatin1String("rate-limited"))
+                                         why = tr("Too many sign-ups from here; try again later.");
                                      finishSignUp(result.ok, result.ok ? QString() : why);
                                  });
         return;
@@ -221,7 +228,8 @@ void Messenger::startConversation(const QString &username,
     }
     fetchSessions(name, [this, name, done](bool ok, const QString &error) {
         if (!ok) {
-            done(0, error);
+            done(0, error == QLatin1String("rate-limited") ? tr("Too many new chats at once; try again later.")
+                                                           : error);
             return;
         }
         const qint64 existing = m_store->directConversation(name);
@@ -234,6 +242,11 @@ void Messenger::fetchSessions(const QString &to, const Done &done)
     m_client.fetchKeys(to, [this, to, done](const ChatClient::Result &result) {
         if (result.error == QLatin1String("not-found")) {
             done(false, tr("There is nobody called %1.").arg(to));
+            return;
+        }
+        if (result.error == QLatin1String("rate-limited")) {
+            m_retryAfterMs = qint64(result.data.value(QStringLiteral("retryAfter")).toDouble());
+            done(false, QStringLiteral("rate-limited"));
             return;
         }
         const auto bundles = ChatClient::bundles(result);
@@ -309,6 +322,10 @@ void Messenger::deliver(const ChatStore::Message &message)
         if (ok) {
             if (status == QLatin1String("sending")) // a receipt may have come first
                 m_store->setStatus(id, QStringLiteral("sent"));
+        } else if (error == QLatin1String("rate-limited")) {
+            // Too many at once: the outbox goes again when the server says.
+            if (!m_retry.isActive())
+                m_retry.start(int(qBound(qint64(1000), m_retryAfterMs, qint64(10 * 60 * 1000))));
         } else if (error != QLatin1String("disconnected")) {
             m_store->setStatus(id, QStringLiteral("failed"));
             emit problem(error);
@@ -361,6 +378,9 @@ void Messenger::sendContent(const QString &to, const Protocol::Content &content,
                     done(false, error);
             });
         } else if (result.error == QLatin1String("disconnected")) {
+            done(false, result.error);
+        } else if (result.error == QLatin1String("rate-limited")) {
+            m_retryAfterMs = qint64(result.data.value(QStringLiteral("retryAfter")).toDouble());
             done(false, result.error);
         } else if (result.error == QLatin1String("not-found")) {
             done(false, tr("There is nobody called %1 any more.").arg(to));

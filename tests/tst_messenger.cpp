@@ -210,6 +210,28 @@ private slots:
         QCOMPARE(bob.keys->oneTimePreKeyCount(), 2 * Messenger::PreKeyBatch);
     }
 
+    void waitsWhenRateLimited()
+    {
+        Device alice(file("alice"));
+        Device bob(file("bob"));
+        QVERIFY(signUp(alice, "alice"));
+        QVERIFY(signUp(bob, "bob"));
+        const qint64 toBob = startConversation(alice, "bob");
+        ChatServer::Limits limits = m_server->limits();
+        limits.sendsPerAccount = {2, 4}; // a burst of 2, then 4 a second
+        m_server->setLimits(limits);
+
+        QList<qint64> sent;
+        for (int i = 0; i < 6; ++i)
+            sent << alice.messenger->send(toBob, QStringLiteral("message %1").arg(i));
+        // All arrive in the end, none marked as not sent.
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("alice") > 0, kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.store->messages(bob.store->directConversation("alice")).size(), 6, 3 * kWait);
+        for (qint64 id : sent)
+            QVERIFY(alice.store->message(id).status != QLatin1String("failed"));
+        QTRY_VERIFY_WITH_TIMEOUT(alice.store->outbox().isEmpty(), kWait);
+    }
+
     void keyStoreTrust()
     {
         Device alice(file("alice"));

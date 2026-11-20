@@ -42,8 +42,8 @@ public:
     bool addOneTimePreKeys(const QString &username, quint32 device,
                            const QList<Protocol::PublicOneTimePreKey> &keys);
     int oneTimePreKeyCount(const QString &username, quint32 device) const;
-    // A device's bundle; its one-time prekey (if any is left) is taken out.
-    std::optional<X3dh::PreKeyBundle> takeBundle(const QString &username, quint32 device);
+    // A device's bundle; its one-time prekey (if any is left, and `withOneTime`) is taken out.
+    std::optional<X3dh::PreKeyBundle> takeBundle(const QString &username, quint32 device, bool withOneTime = true);
 
     // Queued for one device; the envelope's id. 0 if the queue is full.
     qint64 queue(const QString &to, quint32 toDevice, const QString &from, quint32 fromDevice,

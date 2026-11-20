@@ -33,7 +33,7 @@ program: [docs/how-signal-works.md](docs/how-signal-works.md).
 
 ## Not there yet
 
-Rate limits on the server, PQXDH (the
+PQXDH (the
 post-quantum start), contacts and profiles, groups, attachments, linked
 devices, calls.
 
@@ -60,8 +60,9 @@ XDG_DATA_HOME=/tmp/alice ./build/debug/argonaut-chat
 XDG_DATA_HOME=/tmp/bob ./build/debug/argonaut-chat
 ```
 
-On a server, run it behind a reverse proxy that does TLS (Caddy or nginx);
-the app accepts only `wss://` addresses, except to the same computer.
+On a server, run it behind a reverse proxy that does TLS (Caddy or nginx),
+with `--trust-proxy` so its rate limits see the real addresses; the app
+accepts only `wss://` addresses, except to the same computer.
 
 ## License
 

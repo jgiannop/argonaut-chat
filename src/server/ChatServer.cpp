@@ -45,6 +45,9 @@ ChatServer::ChatServer(ServerStore *store, QObject *parent)
     , m_store(store)
 {
     connect(&m_server, &QWebSocketServer::newConnection, this, &ChatServer::onNewConnection);
+    m_prune.setInterval(5 * 60 * 1000);
+    connect(&m_prune, &QTimer::timeout, this, [this] { m_limiter.prune(); });
+    m_prune.start();
 }
 
 ChatServer::~ChatServer()
@@ -80,13 +83,45 @@ QString ChatServer::deviceKey(const QString &username, quint32 device)
     return username + QLatin1Char('/') + QString::number(device);
 }
 
+QString ChatServer::addressOf(QWebSocket *socket) const
+{
+    const QHostAddress peer = socket->peerAddress();
+    if (m_trustProxy && peer.isLoopback()) {
+        // The proxy appends the address it saw: the last one is the one to trust.
+        const QByteArray header = socket->request().rawHeader("X-Forwarded-For");
+        const QHostAddress forwarded(QString::fromLatin1(header.split(',').last().trimmed()));
+        if (!forwarded.isNull())
+            return forwarded.toString();
+    }
+    return peer.toString();
+}
+
+std::optional<QJsonObject> ChatServer::limit(const QString &key, const RateLimiter::Rule &rule)
+{
+    qint64 retryAfter = 0;
+    if (m_limiter.take(key, rule, &retryAfter))
+        return std::nullopt;
+    return fail(QStringLiteral("rate-limited"), QStringLiteral("Too many requests; try again later."),
+                {{QStringLiteral("retryAfter"), double(qMin<qint64>(retryAfter, qint64(1) << 40))}});
+}
+
 void ChatServer::onNewConnection()
 {
     while (QWebSocket *socket = m_server.nextPendingConnection()) {
         socket->setParent(nullptr);
+        const QString address = addressOf(socket);
+        if (m_clients.size() >= m_limits.maxConnections
+            || m_perAddress.value(address) >= m_limits.connectionsPerAddress) {
+            socket->close(QWebSocketProtocol::CloseCodePolicyViolated, QStringLiteral("Too many connections."));
+            socket->deleteLater();
+            continue;
+        }
         socket->setMaxAllowedIncomingMessageSize(quint64(MaxRequestBytes));
         socket->setMaxAllowedIncomingFrameSize(quint64(MaxRequestBytes));
-        m_clients.insert(socket, Client());
+        Client client;
+        client.address = address;
+        m_clients.insert(socket, client);
+        ++m_perAddress[address];
         connect(socket, &QWebSocket::textMessageReceived, this,
                 [this, socket](const QString &text) { onText(socket, text); });
         connect(socket, &QWebSocket::binaryMessageReceived, socket,
@@ -107,6 +142,8 @@ void ChatServer::onDisconnected(QWebSocket *socket)
         const QString key = deviceKey(it->username, it->device);
         if (it->signedIn() && m_online.value(key) == socket)
             m_online.remove(key);
+        if (--m_perAddress[it->address] <= 0)
+            m_perAddress.remove(it->address);
         m_clients.erase(it);
     }
     socket->deleteLater();
@@ -138,10 +175,20 @@ void ChatServer::onText(QWebSocket *socket, const QString &text)
 
 QJsonObject ChatServer::handle(QWebSocket *socket, Client &client, const QString &op, const QJsonObject &request)
 {
-    if (op == QLatin1String("challenge"))
+    if (auto limited = limit(QStringLiteral("connection:%1").arg(quintptr(socket)), m_limits.requestsPerConnection))
+        return *limited;
+    if (op == QLatin1String("challenge")) {
+        if (auto limited = limit(QStringLiteral("challenge:") + client.address, m_limits.challengesPerAddress))
+            return *limited;
         return challenge(client);
-    if (op == QLatin1String("register"))
+    }
+    if (op == QLatin1String("register")) {
+        if (!client.signedIn()) {
+            if (auto limited = limit(QStringLiteral("signup:") + client.address, m_limits.signUpsPerAddress))
+                return *limited;
+        }
         return registerAccount(socket, client, request);
+    }
     if (op == QLatin1String("login"))
         return login(socket, client, request);
     if (!client.signedIn()) {
@@ -150,14 +197,23 @@ QJsonObject ChatServer::handle(QWebSocket *socket, Client &client, const QString
             return fail(QStringLiteral("unauthenticated"), QStringLiteral("Sign in first."));
         return fail(QStringLiteral("unknown-op"), QStringLiteral("No such request."));
     }
-    if (op == QLatin1String("keys"))
+    if (op == QLatin1String("keys")) {
+        if (auto limited = limit(QStringLiteral("keys:") + client.username, m_limits.keyFetchesPerAccount))
+            return *limited;
         return keys(request);
-    if (op == QLatin1String("send"))
+    }
+    if (op == QLatin1String("send")) {
+        if (auto limited = limit(QStringLiteral("send:") + client.username, m_limits.sendsPerAccount))
+            return *limited;
         return send(client, request);
+    }
     if (op == QLatin1String("ack"))
         return ack(socket, client, request);
-    if (op == QLatin1String("prekeys"))
+    if (op == QLatin1String("prekeys")) {
+        if (auto limited = limit(QStringLiteral("prekeys:") + client.username, m_limits.preKeyUploadsPerAccount))
+            return *limited;
         return prekeys(client, request);
+    }
     return fail(QStringLiteral("unknown-op"), QStringLiteral("No such request."));
 }
 
@@ -256,7 +312,10 @@ QJsonObject ChatServer::keys(const QJsonObject &request)
         return fail(QStringLiteral("not-found"), QStringLiteral("No such user."));
     QJsonArray out;
     for (quint32 device : devices) {
-        const auto bundle = m_store->takeBundle(username, device);
+        // A one-time prekey only so often per device; then without.
+        const bool oneTime = m_limiter.take(QStringLiteral("onetime:") + deviceKey(username, device),
+                                            m_limits.oneTimePreKeysPerDevice);
+        const auto bundle = m_store->takeBundle(username, device, oneTime);
         if (bundle)
             out.append(QJsonObject{{QStringLiteral("device"), double(device)},
                                    {QStringLiteral("bundle"), Protocol::bundleToJson(*bundle)}});

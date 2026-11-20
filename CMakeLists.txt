@@ -54,6 +54,7 @@ install(TARGETS argonaut-chat RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 # The relay server: a separate program, sharing chat_core (protocol, crypto).
 qt_add_library(chat_server STATIC
     src/server/ChatServer.cpp src/server/ChatServer.h
+    src/server/RateLimiter.cpp src/server/RateLimiter.h
     src/server/ServerStore.cpp src/server/ServerStore.h
 )
 target_include_directories(chat_server PUBLIC src/server)

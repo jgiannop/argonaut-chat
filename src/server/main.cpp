@@ -28,7 +28,11 @@ int main(int argc, char **argv)
     const QCommandLineOption databaseOption(
         QStringLiteral("database"), QStringLiteral("The database file (default %1).").arg(ServerStore::defaultFile()),
         QStringLiteral("file"));
-    parser.addOptions({listenOption, portOption, databaseOption});
+    const QCommandLineOption trustProxyOption(
+        QStringLiteral("trust-proxy"),
+        QStringLiteral("Behind a reverse proxy on this computer: take the client's address from X-Forwarded-For "
+                       "(for the rate limits)."));
+    parser.addOptions({listenOption, portOption, databaseOption, trustProxyOption});
     parser.process(app);
 
     const QHostAddress address(parser.value(listenOption));
@@ -48,6 +52,7 @@ int main(int argc, char **argv)
         return 1;
     }
     ChatServer server(&store);
+    server.setTrustProxy(parser.isSet(trustProxyOption));
     if (!server.listen(address, quint16(port))) {
         std::fprintf(stderr, "argonaut-chat-server: cannot listen: %s\n", qPrintable(server.errorString()));
         return 1;

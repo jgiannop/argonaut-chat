@@ -103,6 +103,8 @@ private:
     Done m_signUpDone; // while signing up
     QList<X3dh::OneTimePreKey> m_signUpPreKeys;
     QTimer m_reconnect;
+    QTimer m_retry; // the outbox again, after the server said "too many"
+    qint64 m_retryAfterMs = 0;
     int m_firstDelay = 1000;
     int m_delay = 1000;
     int m_serverPreKeys = 0;

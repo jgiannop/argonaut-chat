@@ -1,11 +1,16 @@
 #pragma once
 
+#include "RateLimiter.h"
+
 #include <QHash>
 #include <QHostAddress>
 #include <QJsonObject>
 #include <QObject>
 #include <QSet>
+#include <QTimer>
 #include <QWebSocketServer>
+
+#include <optional>
 
 class QWebSocket;
 class ServerStore;
@@ -18,6 +23,16 @@ class ServerStore;
 // Every connection is a stranger until it signs in by signing a nonce with
 // its identity key (no passwords). Every request is checked; a connection
 // that sends something that is not a request is closed.
+//
+// Rate limits (Limits): connections, sign-ups and sign-in tries per address;
+// sends, key fetches and prekey uploads per account; requests per
+// connection. Over a limit the answer is "rate-limited" with "retryAfter"
+// (ms). One-time prekeys are handed out at most so often per device, then
+// bundles come without one: nobody can use up someone's stock.
+//
+// Behind a reverse proxy every connection comes from this computer; with
+// setTrustProxy(true) the address is the last one in X-Forwarded-For, and
+// only for connections from loopback (the proxy).
 class ChatServer : public QObject
 {
     Q_OBJECT
@@ -30,8 +45,27 @@ public:
     static constexpr int SignInTimeoutMs = 30000;
     static constexpr int DeliverBatch = 500;    // envelopes in flight per device
 
+    struct Limits
+    {
+        int maxConnections = 10000;
+        int connectionsPerAddress = 50;
+        RateLimiter::Rule requestsPerConnection{200, 20};
+        RateLimiter::Rule signUpsPerAddress{5, 5.0 / 3600};
+        RateLimiter::Rule challengesPerAddress{30, 0.5};
+        RateLimiter::Rule sendsPerAccount{120, 2};
+        RateLimiter::Rule keyFetchesPerAccount{100, 100.0 / 3600};
+        RateLimiter::Rule preKeyUploadsPerAccount{10, 10.0 / 3600};
+        RateLimiter::Rule oneTimePreKeysPerDevice{50, 50.0 / 3600};
+    };
+
     explicit ChatServer(ServerStore *store, QObject *parent = nullptr);
     ~ChatServer() override;
+
+    void setLimits(const Limits &limits) { m_limits = limits; }
+    const Limits &limits() const { return m_limits; }
+    // Tests: the limiter's clock (ms).
+    void setClock(RateLimiter::Clock clock) { m_limiter.setClock(std::move(clock)); }
+    void setTrustProxy(bool trust) { m_trustProxy = trust; }
 
     // Port 0: any free port (see port()).
     bool listen(const QHostAddress &address = QHostAddress::LocalHost, quint16 port = 0);
@@ -43,6 +77,7 @@ private:
     struct Client
     {
         QByteArray nonce;  // the challenge given, used once
+        QString address;   // where it comes from (the proxy's X-Forwarded-For, if trusted)
         QString username;  // empty until signed in
         quint32 device = 0;
         int failedSignIns = 0;
@@ -70,9 +105,17 @@ private:
     void deliverTo(const QString &username, quint32 device, qint64 envelopeId);
 
     static QString deviceKey(const QString &username, quint32 device);
+    QString addressOf(QWebSocket *socket) const;
+    // Takes a token; on failure, the answer to send.
+    std::optional<QJsonObject> limit(const QString &key, const RateLimiter::Rule &rule);
 
     QWebSocketServer m_server;
     ServerStore *m_store;
     QHash<QWebSocket *, Client> m_clients;
     QHash<QString, QWebSocket *> m_online; // deviceKey -> its connection
+    QHash<QString, int> m_perAddress;      // open connections
+    Limits m_limits;
+    RateLimiter m_limiter;
+    QTimer m_prune;
+    bool m_trustProxy = false;
 };

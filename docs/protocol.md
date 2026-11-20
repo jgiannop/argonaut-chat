@@ -103,6 +103,8 @@ people). The server sends one thing unasked: `{"op":"deliver","envelope":{…}}`
 | `ack` | `ids` (≤ 1000) | | only the device's own messages |
 | `prekeys` | `signedPreKey`?, `oneTimePreKeys` | `prekeys` | `denied` (a signature that is not the device's) |
 
+Any request may also be answered `rate-limited`, with `retryAfter` (ms).
+
 - **Signing in** (`register`, `login`): the `signature` is the identity key's
   Ed25519 signature of `"ArgonautChat sign-in v1" 0x00 · nonce · device (4,
   big endian) · username`. No passwords. A nonce serves one try; after 5
@@ -125,6 +127,24 @@ people). The server sends one thing unasked: `{"op":"deliver","envelope":{…}}`
   accepts `wss://` anywhere, `ws://` only to this computer, and never ignores
   a TLS error.
 
-Not yet: rate limits (sign-ups and key fetches per address: a stranger
-could use up someone's one-time prekeys), linked devices (device numbers
-above 1), deleting an account.
+- **Rate limits** (token buckets: a burst, then a steady rate):
+
+  | what | per | burst | then |
+  |---|---|---|---|
+  | open connections | address | 50 at once | |
+  | requests | connection | 200 | 20 a second |
+  | sign-ups | address | 5 | 5 an hour |
+  | challenges (sign-in tries) | address | 30 | 30 a minute |
+  | sends | account | 120 | 2 a second |
+  | key fetches | account | 100 | 100 an hour |
+  | prekey uploads | account | 10 | 10 an hour |
+  | one-time prekeys handed out | device | 50 | 50 an hour |
+
+  Over the last one, bundles come without a one-time prekey (X3DH works
+  without), so nobody can use up someone's stock. The app keeps rate-limited
+  messages in its outbox and sends them after `retryAfter`.
+- **Addresses behind a proxy**: with `--trust-proxy`, a connection from
+  loopback (the proxy) counts as the last address in its `X-Forwarded-For`;
+  without it, or from anywhere else, the header is ignored.
+
+Not yet: linked devices (device numbers above 1), deleting an account.
