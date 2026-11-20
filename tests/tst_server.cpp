@@ -1,0 +1,416 @@
+#include "ChatClient.h"
+#include "ChatServer.h"
+#include "ServerStore.h"
+#include "Session.h"
+#include "TestSupport.h"
+
+#include <QCoreApplication>
+#include <QJsonArray>
+#include <QSignalSpy>
+#include <QTemporaryDir>
+#include <QTest>
+#include <QWebSocket>
+
+#include <memory>
+
+namespace {
+
+constexpr int kWait = 5000;
+
+// One person with one device, as the app will be.
+struct Person
+{
+    explicit Person(const QString &username)
+        : name(username)
+    {
+        signedPreKey = X3dh::makeSignedPreKey(identity, 1);
+        oneTime = X3dh::makeOneTimePreKeys(1, 5);
+        QObject::connect(&client, &ChatClient::envelopeReceived,
+                         [this](const Protocol::Envelope &envelope) { inbox.append(envelope); });
+    }
+
+    QString name;
+    Crypto::IdentityKeyPair identity = Crypto::IdentityKeyPair::generate();
+    X3dh::SignedPreKey signedPreKey;
+    QList<X3dh::OneTimePreKey> oneTime;
+    ChatClient client;
+    QList<Protocol::Envelope> inbox;
+    std::optional<Session> session;
+
+    // The plaintext of a message from someone, starting the session if needed.
+    QString read(const Protocol::Envelope &envelope)
+    {
+        const auto message = Protocol::decodeCipherMessage(envelope.message);
+        if (!message)
+            return QStringLiteral("<bad message>");
+        std::optional<QByteArray> plaintext;
+        if (session)
+            plaintext = session->decrypt(*message);
+        if (!plaintext && message->preKey) {
+            auto accepted = Session::accept(
+                identity, *message,
+                [this](quint32 id) -> std::optional<X3dh::SignedPreKey> {
+                    return id == signedPreKey.id ? std::optional(signedPreKey) : std::nullopt;
+                },
+                [this](quint32 id) -> std::optional<X3dh::OneTimePreKey> {
+                    for (const auto &key : oneTime) {
+                        if (key.id == id)
+                            return key;
+                    }
+                    return std::nullopt;
+                });
+            if (accepted) {
+                session = accepted->session;
+                plaintext = accepted->plaintext;
+                if (accepted->usedOneTimePreKey)
+                    oneTime.removeIf([&](const auto &key) { return key.id == *accepted->usedOneTimePreKey; });
+            }
+        }
+        if (!plaintext)
+            return QStringLiteral("<failed>");
+        const auto content = Protocol::decodeContent(*plaintext);
+        return content ? content->body : QStringLiteral("<bad content>");
+    }
+};
+
+// Waits for the answer to one request.
+ChatClient::Result wait(const std::function<void(const ChatClient::Callback &)> &call)
+{
+    std::optional<ChatClient::Result> got;
+    call([&got](const ChatClient::Result &result) { got = result; });
+    (void)QTest::qWaitFor([&got] { return got.has_value(); }, kWait);
+    if (!got) {
+        ChatClient::Result timeout;
+        timeout.error = QStringLiteral("timeout");
+        return timeout;
+    }
+    return *got;
+}
+
+} // namespace
+
+class TestServer : public QObject
+{
+    Q_OBJECT
+
+private slots:
+    void init()
+    {
+        QVERIFY(m_dir.isValid());
+        m_store = std::make_unique<ServerStore>(m_dir.filePath(QStringLiteral("server-%1.sqlite").arg(++m_count)));
+        QVERIFY(m_store->isOpen());
+        m_server = std::make_unique<ChatServer>(m_store.get());
+        QVERIFY2(m_server->listen(), qPrintable(m_server->errorString()));
+        m_url = QUrl(QStringLiteral("ws://127.0.0.1:%1").arg(m_server->port()));
+    }
+
+    void cleanup()
+    {
+        m_server.reset();
+        m_store.reset();
+    }
+
+    void signUpAndSignIn()
+    {
+        Person alice(QStringLiteral("alice"));
+        QVERIFY(join(alice));
+        QCOMPARE(m_store->devices("alice"), QList<quint32>{1});
+
+        // The name is taken.
+        Person other(QStringLiteral("alice"));
+        QVERIFY(connectTo(other.client));
+        ChatClient::Result result = signUp(other);
+        QCOMPARE(result.error, QString("taken"));
+
+        // Alice from another connection, with her key.
+        ChatClient again;
+        QVERIFY(connectTo(again));
+        result = wait([&](auto done) { again.login("alice", 1, alice.identity, done); });
+        QVERIFY2(result.ok, qPrintable(result.message));
+        QCOMPARE(result.data.value("prekeys").toInt(), 5);
+        // ... which pushes the first one out.
+        QTRY_VERIFY_WITH_TIMEOUT(!alice.client.isConnected(), kWait);
+
+        // Someone else's key: refused, and the same answer as for no account.
+        ChatClient mallory;
+        QVERIFY(connectTo(mallory));
+        const auto wrongKey = Crypto::IdentityKeyPair::generate();
+        result = wait([&](auto done) { mallory.login("alice", 1, wrongKey, done); });
+        QCOMPARE(result.error, QString("denied"));
+        result = wait([&](auto done) { mallory.login("nobody", 1, wrongKey, done); });
+        QCOMPARE(result.error, QString("denied"));
+        // Without a challenge.
+        result = wait([&](auto done) { mallory.request("login", {{"username", "alice"}, {"device", 1}}, done); });
+        QCOMPARE(result.error, QString("no-challenge"));
+        // Nothing before signing in.
+        result = wait([&](auto done) { mallory.fetchKeys("alice", done); });
+        QCOMPARE(result.error, QString("unauthenticated"));
+        result = wait([&](auto done) { mallory.request("nonsense", {}, done); });
+        QCOMPARE(result.error, QString("unknown-op"));
+    }
+
+    void signUpIsChecked()
+    {
+        Person eve(QStringLiteral("eve"));
+        QVERIFY(connectTo(eve.client));
+        auto signUpWith = [&](const QString &username, const QByteArray &signedName,
+                              const X3dh::SignedPreKey &signedPreKey) {
+            return wait([&](auto done) {
+                eve.client.request("challenge", {}, [&, done](const ChatClient::Result &challenge) {
+                    const QByteArray nonce = QByteArray::fromBase64(challenge.data.value("nonce").toString().toLatin1());
+                    eve.client.request(
+                        "register",
+                        {{"username", username},
+                         {"identityKey", Protocol::Json::base64(eve.identity.publicKey())},
+                         {"signedPreKey", Protocol::signedPreKeyToJson(Protocol::publicPart(signedPreKey))},
+                         {"signature", Protocol::Json::base64(eve.identity.sign(
+                                           Protocol::authMessage(nonce, QString::fromLatin1(signedName), 1)))}},
+                        done);
+                });
+            });
+        };
+        // Signed for another name.
+        QCOMPARE(signUpWith("eve", "mallory", eve.signedPreKey).error, QString("denied"));
+        // A signed prekey signed by another key.
+        const auto stranger = Crypto::IdentityKeyPair::generate();
+        QCOMPARE(signUpWith("eve", "eve", X3dh::makeSignedPreKey(stranger, 1)).error, QString("denied"));
+        // A name that is not one.
+        QCOMPARE(signUpWith("Eve", "Eve", eve.signedPreKey).error, QString("bad-username"));
+        // Too many failures: the connection goes.
+        signUpWith("eve", "mallory", eve.signedPreKey);
+        signUpWith("eve", "mallory", eve.signedPreKey);
+        QTRY_VERIFY_WITH_TIMEOUT(!eve.client.isConnected(), kWait);
+        QVERIFY(!m_store->accountExists("eve"));
+
+        // Done right, it works.
+        Person eve2(QStringLiteral("eve"));
+        QVERIFY(join(eve2));
+    }
+
+    // Alice and Bob through the real server, encrypted end to end.
+    void exchangeMessages()
+    {
+        Person alice(QStringLiteral("alice"));
+        Person bob(QStringLiteral("bob"));
+        QVERIFY(join(alice));
+        QVERIFY(join(bob));
+
+        const ChatClient::Result keys = wait([&](auto done) { alice.client.fetchKeys("bob", done); });
+        const auto bundles = ChatClient::bundles(keys);
+        QVERIFY(bundles);
+        QCOMPARE(bundles->size(), 1);
+        QCOMPARE(bundles->first().device, 1u);
+        QCOMPARE(bundles->first().bundle.identityKey, bob.identity.publicKey());
+        QVERIFY(bundles->first().bundle.oneTimePreKeyId);
+        alice.session = Session::initiate(alice.identity, bundles->first().bundle);
+        QVERIFY(alice.session);
+
+        QVERIFY(sendText(alice, "bob", "Hello Bob"));
+        QTRY_COMPARE_WITH_TIMEOUT(bob.inbox.size(), 1, kWait);
+        Protocol::Envelope envelope = bob.inbox.takeFirst();
+        QCOMPARE(envelope.from, QString("alice"));
+        QCOMPARE(envelope.fromDevice, 1u);
+        QVERIFY(!envelope.message.contains("Hello")); // the server only ever had this
+        QCOMPARE(bob.read(envelope), QString("Hello Bob"));
+        QVERIFY(wait([&](auto done) { bob.client.acknowledge({envelope.id}, done); }).ok);
+        QCOMPARE(m_store->queuedCount("bob", 1), 0);
+
+        QVERIFY(sendText(bob, "alice", "Hi Alice"));
+        QTRY_COMPARE_WITH_TIMEOUT(alice.inbox.size(), 1, kWait);
+        envelope = alice.inbox.takeFirst();
+        QCOMPARE(alice.read(envelope), QString("Hi Alice"));
+        QVERIFY(wait([&](auto done) { alice.client.acknowledge({envelope.id}, done); }).ok);
+
+        // Bob goes offline; the server keeps Alice's messages for him.
+        bob.client.close();
+        QTRY_VERIFY_WITH_TIMEOUT(!bob.client.isConnected(), kWait);
+        QVERIFY(sendText(alice, "bob", "one"));
+        QVERIFY(sendText(alice, "bob", "two"));
+        QCOMPARE(m_store->queuedCount("bob", 1), 2);
+
+        QVERIFY(connectTo(bob.client));
+        QVERIFY(wait([&](auto done) { bob.client.login("bob", 1, bob.identity, done); }).ok);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.inbox.size(), 2, kWait);
+        QCOMPARE(bob.read(bob.inbox.at(0)), QString("one"));
+        QCOMPARE(bob.read(bob.inbox.at(1)), QString("two"));
+        // Only the first is acknowledged: the second comes again next time.
+        QVERIFY(wait([&](auto done) { bob.client.acknowledge({bob.inbox.at(0).id}, done); }).ok);
+        const QString unacknowledged = bob.inbox.at(1).id;
+        bob.inbox.clear();
+        bob.client.close();
+        QTRY_VERIFY_WITH_TIMEOUT(!bob.client.isConnected(), kWait);
+        QVERIFY(connectTo(bob.client));
+        QVERIFY(wait([&](auto done) { bob.client.login("bob", 1, bob.identity, done); }).ok);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.inbox.size(), 1, kWait);
+        QCOMPARE(bob.inbox.first().id, unacknowledged);
+        QVERIFY(wait([&](auto done) { bob.client.acknowledge({unacknowledged}, done); }).ok);
+        QCOMPARE(m_store->queuedCount("bob", 1), 0);
+
+        // Acknowledging someone else's message does nothing to it.
+        QVERIFY(sendText(bob, "alice", "for Alice"));
+        QTRY_COMPARE_WITH_TIMEOUT(alice.inbox.size(), 1, kWait);
+        QVERIFY(wait([&](auto done) { bob.client.acknowledge({alice.inbox.first().id}, done); }).ok);
+        QCOMPARE(m_store->queuedCount("alice", 1), 1);
+    }
+
+    void sendIsChecked()
+    {
+        Person alice(QStringLiteral("alice"));
+        Person bob(QStringLiteral("bob"));
+        QVERIFY(join(alice));
+        QVERIFY(join(bob));
+        const QByteArray cipher = Protocol::encodeCipherMessage({false, {}, {}, 0, {}, QByteArray(60, 'x')});
+
+        // Bob has device 1 only: the server says so.
+        ChatClient::Result result = wait([&](auto done) { alice.client.send("bob", {{2, cipher}}, done); });
+        QCOMPARE(result.error, QString("devices"));
+        QCOMPARE(result.data.value("devices").toArray(), QJsonArray{1});
+        result = wait([&](auto done) { alice.client.send("bob", {{1, cipher}, {2, cipher}}, done); });
+        QCOMPARE(result.error, QString("devices"));
+        // Nobody.
+        result = wait([&](auto done) { alice.client.send("nobody", {{1, cipher}}, done); });
+        QCOMPARE(result.error, QString("not-found"));
+        // Not a CipherMessage, nothing at all.
+        result = wait([&](auto done) { alice.client.send("bob", {{1, QByteArray("\x07rubbish")}}, done); });
+        QCOMPARE(result.error, QString("bad-request"));
+        result = wait([&](auto done) { alice.client.send("bob", {}, done); });
+        QCOMPARE(result.error, QString("bad-request"));
+        result = wait([&](auto done) { alice.client.request("send", {{"to", "bob"}, {"messages", "x"}}, done); });
+        QCOMPARE(result.error, QString("bad-request"));
+        result = wait([&](auto done) { alice.client.request("ack", {{"ids", QJsonArray{1}}}, done); });
+        QCOMPARE(result.error, QString("bad-request"));
+        QCOMPARE(m_store->queuedCount("bob", 1), 0);
+        QVERIFY(bob.inbox.isEmpty());
+    }
+
+    void rubbishClosesTheConnection_data()
+    {
+        QTest::addColumn<QString>("text");
+        QTest::addColumn<bool>("binary");
+        QTest::newRow("not json") << QString("hello?") << false;
+        QTest::newRow("an array") << QString("[1,2]") << false;
+        QTest::newRow("no rid") << QString(R"({"op":"challenge"})") << false;
+        QTest::newRow("no op") << QString(R"({"rid":1})") << false;
+        QTest::newRow("negative rid") << QString(R"({"rid":-1,"op":"challenge"})") << false;
+        QTest::newRow("binary") << QString("binary") << true;
+    }
+
+    void rubbishClosesTheConnection()
+    {
+        QFETCH(QString, text);
+        QFETCH(bool, binary);
+        QWebSocket socket;
+        QSignalSpy closed(&socket, &QWebSocket::disconnected);
+        socket.open(m_url);
+        QTRY_COMPARE_WITH_TIMEOUT(socket.state(), QAbstractSocket::ConnectedState, kWait);
+        if (binary)
+            socket.sendBinaryMessage(text.toUtf8());
+        else
+            socket.sendTextMessage(text);
+        QTRY_COMPARE_WITH_TIMEOUT(closed.size(), 1, kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(m_server->connectionCount(), 0, kWait);
+    }
+
+    void preKeys()
+    {
+        Person alice(QStringLiteral("alice"));
+        Person bob(QStringLiteral("bob"));
+        bob.oneTime = X3dh::makeOneTimePreKeys(1, 2);
+        QVERIFY(join(alice));
+        QVERIFY(join(bob));
+
+        // Each fetch takes one; then there are none, and X3DH goes without.
+        QList<std::optional<quint32>> ids;
+        for (int i = 0; i < 3; ++i) {
+            const auto bundles = ChatClient::bundles(wait([&](auto done) { alice.client.fetchKeys("bob", done); }));
+            QVERIFY(bundles);
+            ids << bundles->first().bundle.oneTimePreKeyId;
+        }
+        QVERIFY(ids == (QList<std::optional<quint32>>{1u, 2u, std::nullopt}));
+        QCOMPARE(wait([&](auto done) { alice.client.fetchKeys("nobody", done); }).error, QString("not-found"));
+
+        // Bob tops them up, and changes his signed prekey.
+        const auto more = X3dh::makeOneTimePreKeys(3, 3);
+        const auto newSigned = X3dh::makeSignedPreKey(bob.identity, 2);
+        ChatClient::Result result = wait([&](auto done) {
+            bob.client.uploadPreKeys(Protocol::publicPart(newSigned), Protocol::publicParts(more), done);
+        });
+        QVERIFY2(result.ok, qPrintable(result.message));
+        QCOMPARE(result.data.value("prekeys").toInt(), 3);
+        const auto bundles = ChatClient::bundles(wait([&](auto done) { alice.client.fetchKeys("bob", done); }));
+        QCOMPARE(bundles->first().bundle.signedPreKeyId, 2u);
+        QCOMPARE(bundles->first().bundle.signedPreKey, newSigned.pair.publicKey);
+        // A signed prekey signed by someone else is refused.
+        const auto forged = X3dh::makeSignedPreKey(Crypto::IdentityKeyPair::generate(), 3);
+        result = wait([&](auto done) { bob.client.uploadPreKeys(Protocol::publicPart(forged), {}, done); });
+        QCOMPARE(result.error, QString("denied"));
+        // Never more than the limit kept.
+        for (quint32 first = 100; first < 100 + 3 * Protocol::MaxOneTimePreKeysPerUpload;
+             first += Protocol::MaxOneTimePreKeysPerUpload) {
+            const auto batch = X3dh::makeOneTimePreKeys(first, Protocol::MaxOneTimePreKeysPerUpload);
+            result = wait([&](auto done) { bob.client.uploadPreKeys({}, Protocol::publicParts(batch), done); });
+            QVERIFY(result.ok);
+        }
+        QCOMPARE(m_store->oneTimePreKeyCount("bob", 1), ServerStore::MaxOneTimePreKeys);
+    }
+
+    void clientRefusesPlainRemote()
+    {
+        ChatClient client;
+        QString error;
+        QVERIFY(!client.open(QUrl("ws://example.com:8790"), &error));
+        QVERIFY(!error.isEmpty());
+        QVERIFY(!client.open(QUrl("http://127.0.0.1:8790")));
+        QVERIFY(!client.open(QUrl("not a url")));
+        QVERIFY(client.open(QUrl("ws://localhost:1")));
+        client.close();
+        // Requests while not connected fail at once.
+        QCOMPARE(wait([&](auto done) { client.fetchKeys("bob", done); }).error, QString("disconnected"));
+    }
+
+private:
+    bool connectTo(ChatClient &client)
+    {
+        if (!client.open(m_url))
+            return false;
+        return QTest::qWaitFor([&client] { return client.isConnected(); }, kWait);
+    }
+
+    ChatClient::Result signUp(Person &person)
+    {
+        return wait([&](auto done) {
+            person.client.registerAccount(person.name, person.identity, Protocol::publicPart(person.signedPreKey),
+                                          Protocol::publicParts(person.oneTime), done);
+        });
+    }
+
+    bool join(Person &person)
+    {
+        if (!connectTo(person.client))
+            return false;
+        const ChatClient::Result result = signUp(person);
+        if (!result.ok)
+            qWarning() << "sign-up failed:" << result.error << result.message;
+        return result.ok && result.data.value("device").toInt() == 1;
+    }
+
+    static bool sendText(Person &from, const QString &to, const QString &text)
+    {
+        const QByteArray message = from.session->encrypt(Protocol::encodeContent(Protocol::Content::text(text)));
+        if (message.isEmpty())
+            return false;
+        const ChatClient::Result result = wait([&](auto done) { from.client.send(to, {{1, message}}, done); });
+        if (!result.ok)
+            qWarning() << "send failed:" << result.error << result.message;
+        return result.ok;
+    }
+
+    QTemporaryDir m_dir;
+    int m_count = 0;
+    std::unique_ptr<ServerStore> m_store;
+    std::unique_ptr<ChatServer> m_server;
+    QUrl m_url;
+};
+
+CHAT_TEST_MAIN(TestServer, QCoreApplication)
+#include "tst_server.moc"

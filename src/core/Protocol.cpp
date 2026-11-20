@@ -18,14 +18,28 @@ constexpr int kPreKeyHeaderSize = 1 + 32 + 32 + 4 + 1 + 4;
 // Envelope times and sent times: up to the year 9999.
 constexpr qint64 kMaxTime = 253402300799999;
 
-QString toBase64(const QByteArray &bytes)
+void appendUint32(QByteArray &out, quint32 value)
 {
-    return QString::fromLatin1(bytes.toBase64());
+    char bytes[4];
+    qToBigEndian(value, bytes);
+    out.append(bytes, 4);
 }
 
-// Strict base64; nothing if it is not, or if it is not `size` bytes
-// (size < 0: any size up to `maxSize`).
-std::optional<QByteArray> fromBase64(const QJsonValue &value, int size, int maxSize = 0)
+QString receiptName(Content::Receipt kind)
+{
+    return kind == Content::Receipt::Read ? QStringLiteral("read") : QStringLiteral("delivered");
+}
+
+} // namespace
+
+namespace Json {
+
+QString base64(const QByteArray &data)
+{
+    return QString::fromLatin1(data.toBase64());
+}
+
+std::optional<QByteArray> bytes(const QJsonValue &value, int size, int maxSize)
 {
     if (!value.isString())
         return std::nullopt;
@@ -40,7 +54,6 @@ std::optional<QByteArray> fromBase64(const QJsonValue &value, int size, int maxS
     return decoded.decoded;
 }
 
-// A whole number in [min, max]; JSON numbers are doubles, so up to 2^53.
 std::optional<qint64> integer(const QJsonValue &value, qint64 min, qint64 max)
 {
     if (!value.isDouble())
@@ -62,19 +75,81 @@ std::optional<quint32> uint32(const QJsonValue &value)
     return quint32(*i);
 }
 
-void appendUint32(QByteArray &out, quint32 value)
+} // namespace Json
+
+using Json::base64;
+
+PublicSignedPreKey publicPart(const X3dh::SignedPreKey &key)
 {
-    char bytes[4];
-    qToBigEndian(value, bytes);
-    out.append(bytes, 4);
+    return {key.id, key.pair.publicKey, key.signature};
 }
 
-QString receiptName(Content::Receipt kind)
+QList<PublicOneTimePreKey> publicParts(const QList<X3dh::OneTimePreKey> &keys)
 {
-    return kind == Content::Receipt::Read ? QStringLiteral("read") : QStringLiteral("delivered");
+    QList<PublicOneTimePreKey> out;
+    for (const X3dh::OneTimePreKey &key : keys)
+        out.append({key.id, key.pair.publicKey});
+    return out;
 }
 
-} // namespace
+QJsonObject signedPreKeyToJson(const PublicSignedPreKey &key)
+{
+    return {{QStringLiteral("id"), double(key.id)},
+            {QStringLiteral("key"), base64(key.key)},
+            {QStringLiteral("signature"), base64(key.signature)}};
+}
+
+std::optional<PublicSignedPreKey> signedPreKeyFromJson(const QJsonValue &json)
+{
+    if (!json.isObject())
+        return std::nullopt;
+    const QJsonObject object = json.toObject();
+    const auto id = Json::uint32(object.value(QStringLiteral("id")));
+    const auto key = Json::bytes(object.value(QStringLiteral("key")), Crypto::KeySize);
+    const auto signature = Json::bytes(object.value(QStringLiteral("signature")), Crypto::SignatureSize);
+    if (!id || !key || !signature)
+        return std::nullopt;
+    return PublicSignedPreKey{*id, *key, *signature};
+}
+
+QJsonArray oneTimePreKeysToJson(const QList<PublicOneTimePreKey> &keys)
+{
+    QJsonArray out;
+    for (const PublicOneTimePreKey &key : keys)
+        out.append(QJsonObject{{QStringLiteral("id"), double(key.id)}, {QStringLiteral("key"), base64(key.key)}});
+    return out;
+}
+
+std::optional<QList<PublicOneTimePreKey>> oneTimePreKeysFromJson(const QJsonValue &json)
+{
+    if (!json.isArray() || json.toArray().size() > MaxOneTimePreKeysPerUpload)
+        return std::nullopt;
+    QList<PublicOneTimePreKey> keys;
+    for (const QJsonValue &item : json.toArray()) {
+        const auto id = Json::uint32(item.toObject().value(QStringLiteral("id")));
+        const auto key = Json::bytes(item.toObject().value(QStringLiteral("key")), Crypto::KeySize);
+        if (!item.isObject() || !id || !key)
+            return std::nullopt;
+        for (const PublicOneTimePreKey &other : keys) {
+            if (other.id == *id)
+                return std::nullopt;
+        }
+        keys.append({*id, *key});
+    }
+    return keys;
+}
+
+QByteArray authMessage(const QByteArray &nonce, const QString &username, quint32 device)
+{
+    QByteArray out = QByteArrayLiteral("ArgonautChat sign-in v1");
+    out += '\0';
+    out += nonce;
+    char number[4];
+    qToBigEndian(device, number);
+    out.append(number, 4);
+    out += username.toUtf8();
+    return out;
+}
 
 QString normalizeUsername(const QString &username)
 {
@@ -188,12 +263,12 @@ std::optional<Content> decodeContent(const QByteArray &padded)
     if (error.error != QJsonParseError::NoError || !document.isObject())
         return std::nullopt;
     const QJsonObject json = document.object();
-    if (integer(json.value(QStringLiteral("v")), 1, 1000) != Version)
+    if (Json::integer(json.value(QStringLiteral("v")), 1, 1000) != Version)
         return std::nullopt;
 
     Content content;
     content.id = json.value(QStringLiteral("id")).toString();
-    const auto sent = integer(json.value(QStringLiteral("sent")), 0, kMaxTime);
+    const auto sent = Json::integer(json.value(QStringLiteral("sent")), 0, kMaxTime);
     if (!isValidMessageId(content.id) || !sent)
         return std::nullopt;
     content.sentAt = *sent;
@@ -281,16 +356,16 @@ std::optional<CipherMessage> decodeCipherMessage(const QByteArray &data)
 QJsonObject bundleToJson(const X3dh::PreKeyBundle &bundle)
 {
     QJsonObject json{
-        {QStringLiteral("identityKey"), toBase64(bundle.identityKey)},
+        {QStringLiteral("identityKey"), base64(bundle.identityKey)},
         {QStringLiteral("signedPreKey"),
          QJsonObject{{QStringLiteral("id"), double(bundle.signedPreKeyId)},
-                     {QStringLiteral("key"), toBase64(bundle.signedPreKey)},
-                     {QStringLiteral("signature"), toBase64(bundle.signature)}}},
+                     {QStringLiteral("key"), base64(bundle.signedPreKey)},
+                     {QStringLiteral("signature"), base64(bundle.signature)}}},
     };
     if (bundle.oneTimePreKeyId) {
         json.insert(QStringLiteral("oneTimePreKey"),
                     QJsonObject{{QStringLiteral("id"), double(*bundle.oneTimePreKeyId)},
-                                {QStringLiteral("key"), toBase64(bundle.oneTimePreKey)}});
+                                {QStringLiteral("key"), base64(bundle.oneTimePreKey)}});
     }
     return json;
 }
@@ -298,11 +373,11 @@ QJsonObject bundleToJson(const X3dh::PreKeyBundle &bundle)
 std::optional<X3dh::PreKeyBundle> bundleFromJson(const QJsonObject &json)
 {
     X3dh::PreKeyBundle bundle;
-    const auto identity = fromBase64(json.value(QStringLiteral("identityKey")), Crypto::KeySize);
+    const auto identity = Json::bytes(json.value(QStringLiteral("identityKey")), Crypto::KeySize);
     const QJsonObject signedKey = json.value(QStringLiteral("signedPreKey")).toObject();
-    const auto signedId = uint32(signedKey.value(QStringLiteral("id")));
-    const auto signedPub = fromBase64(signedKey.value(QStringLiteral("key")), Crypto::KeySize);
-    const auto signature = fromBase64(signedKey.value(QStringLiteral("signature")), Crypto::SignatureSize);
+    const auto signedId = Json::uint32(signedKey.value(QStringLiteral("id")));
+    const auto signedPub = Json::bytes(signedKey.value(QStringLiteral("key")), Crypto::KeySize);
+    const auto signature = Json::bytes(signedKey.value(QStringLiteral("signature")), Crypto::SignatureSize);
     if (!identity || !signedId || !signedPub || !signature)
         return std::nullopt;
     bundle.identityKey = *identity;
@@ -314,8 +389,8 @@ std::optional<X3dh::PreKeyBundle> bundleFromJson(const QJsonObject &json)
     if (!oneTime.isUndefined() && !oneTime.isNull()) {
         if (!oneTime.isObject())
             return std::nullopt;
-        const auto id = uint32(oneTime.toObject().value(QStringLiteral("id")));
-        const auto key = fromBase64(oneTime.toObject().value(QStringLiteral("key")), Crypto::KeySize);
+        const auto id = Json::uint32(oneTime.toObject().value(QStringLiteral("id")));
+        const auto key = Json::bytes(oneTime.toObject().value(QStringLiteral("key")), Crypto::KeySize);
         if (!id || !key)
             return std::nullopt;
         bundle.oneTimePreKeyId = *id;
@@ -330,7 +405,7 @@ QJsonObject envelopeToJson(const Envelope &envelope)
             {QStringLiteral("from"), envelope.from},
             {QStringLiteral("device"), double(envelope.fromDevice)},
             {QStringLiteral("time"), double(envelope.serverTime)},
-            {QStringLiteral("message"), toBase64(envelope.message)}};
+            {QStringLiteral("message"), base64(envelope.message)}};
 }
 
 std::optional<Envelope> envelopeFromJson(const QJsonObject &json)
@@ -347,9 +422,9 @@ std::optional<Envelope> envelopeFromJson(const QJsonObject &json)
     if (!isValidUsername(from))
         return std::nullopt;
     envelope.from = from;
-    const auto device = integer(json.value(QStringLiteral("device")), 1, std::numeric_limits<quint32>::max());
-    const auto time = integer(json.value(QStringLiteral("time")), 0, kMaxTime);
-    const auto message = fromBase64(json.value(QStringLiteral("message")), -1, MaxCipherMessageBytes);
+    const auto device = Json::integer(json.value(QStringLiteral("device")), 1, std::numeric_limits<quint32>::max());
+    const auto time = Json::integer(json.value(QStringLiteral("time")), 0, kMaxTime);
+    const auto message = Json::bytes(json.value(QStringLiteral("message")), -1, MaxCipherMessageBytes);
     if (!device || !time || !message)
         return std::nullopt;
     envelope.fromDevice = quint32(*device);

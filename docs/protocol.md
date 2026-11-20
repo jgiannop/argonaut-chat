@@ -82,17 +82,49 @@ An **envelope** (a message as the server hands it over):
 the message is safely stored; `time` is when the server got it; `message` is
 an encoded CipherMessage (at most 192 KiB).
 
-## The server's requests (step 3, to be fixed then)
+## The server's requests
 
-Over one WebSocket, JSON objects with an `op`, and a request number `rid`
-that the answer repeats. A first sketch:
+`argonaut-chat-server` (`src/server`), reached through `ChatClient`
+(`src/core`). One WebSocket per device; text frames of JSON only (a binary
+frame, or anything that is not a JSON object with a whole-number `rid` and a
+string `op`, closes the connection). Requests are at most 4 MiB.
 
-- `register` `{username, device, identityKey, signedPreKey, oneTimePreKeys[]}`
-- `challenge` → `{nonce}`; `login` `{username, device, signature}` (the nonce
-  signed by the identity key: no passwords)
-- `keys` `{username}` → a bundle for each of their devices (and one
-  one-time prekey of each taken)
-- `send` `{to, messages: [{device, message}]}`: one CipherMessage per device
-- `deliver` (from the server) an envelope; `ack` `{ids}`
-- `prekeys` `{signedPreKey?, oneTimePreKeys[]}` to top up; the server says
-  when few are left.
+Every request carries `rid`, which its answer repeats, with `"ok": true` and
+its fields, or `"ok": false` with `error` (a code) and `message` (for
+people). The server sends one thing unasked: `{"op":"deliver","envelope":{…}}`.
+
+| op | fields | answer | |
+|---|---|---|---|
+| `challenge` | | `nonce` (32 bytes) | for one sign-in or sign-up try |
+| `register` | `username`, `identityKey`, `signedPreKey`, `oneTimePreKeys` (≤ 100), `signature` | `device` (1) | `taken`, `bad-username`, `denied` |
+| `login` | `username`, `device`, `signature` | `prekeys` (one-time prekeys left) | `denied` |
+| `keys` | `username` | `devices`: `[{device, bundle}]` | `not-found`; takes one one-time prekey per device |
+| `send` | `to`, `messages`: `[{device, message}]` | | `devices` (with the right list), `not-found`, `full` |
+| `ack` | `ids` (≤ 1000) | | only the device's own messages |
+| `prekeys` | `signedPreKey`?, `oneTimePreKeys` | `prekeys` | `denied` (a signature that is not the device's) |
+
+- **Signing in** (`register`, `login`): the `signature` is the identity key's
+  Ed25519 signature of `"ArgonautChat sign-in v1" 0x00 · nonce · device (4,
+  big endian) · username`. No passwords. A nonce serves one try; after 5
+  failed tries the connection is closed, and one that has not signed in
+  within 30 seconds too. An unknown account and a wrong key get the same
+  answer. `register` also checks the signed prekey's signature. Signing in
+  again as the same device closes the older connection.
+- **`send`**: one CipherMessage for each of the recipient's devices, no more,
+  no fewer (not for the sending device itself); otherwise `devices` lists
+  them, so the sender can fetch the missing keys. Each must decode as a
+  CipherMessage; the server cannot read it.
+- **Delivery**: queued messages are pushed after signing in, new ones at
+  once, at most 500 unacknowledged at a time. A message is deleted only
+  when its device acknowledges it; until then it comes again on every
+  sign-in. At most 10000 are queued per device.
+- **One-time prekeys**: at most 200 kept per device (the oldest dropped).
+  When none are left, bundles come without one.
+- **TLS**: the server speaks plain WebSockets and listens on 127.0.0.1 by
+  default; a reverse proxy (Caddy, nginx) in front does TLS. `ChatClient`
+  accepts `wss://` anywhere, `ws://` only to this computer, and never ignores
+  a TLS error.
+
+Not yet: rate limits (sign-ups and key fetches per address: a stranger
+could use up someone's one-time prekeys), linked devices (device numbers
+above 1), deleting an account.

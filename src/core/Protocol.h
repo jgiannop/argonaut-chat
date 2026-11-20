@@ -3,6 +3,7 @@
 #include "X3dh.h"
 
 #include <QByteArray>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QString>
 #include <QStringList>
@@ -85,6 +86,48 @@ QByteArray encodeCipherMessage(const CipherMessage &message);
 std::optional<CipherMessage> decodeCipherMessage(const QByteArray &data);
 
 // Layer 3: binary fields in standard base64.
+
+// Strict JSON readers for data from strangers: nothing if the value is not
+// exactly what is asked.
+namespace Json {
+// Standard base64 of exactly `size` bytes; size < 0: 1 to `maxSize` bytes.
+std::optional<QByteArray> bytes(const QJsonValue &value, int size, int maxSize = 0);
+// A whole number in [min, max] (JSON numbers are doubles: up to 2^53).
+std::optional<qint64> integer(const QJsonValue &value, qint64 min, qint64 max);
+std::optional<quint32> uint32(const QJsonValue &value);
+QString base64(const QByteArray &bytes);
+} // namespace Json
+
+// Prekeys as they are uploaded: the public halves only.
+struct PublicSignedPreKey
+{
+    quint32 id = 0;
+    QByteArray key;
+    QByteArray signature;
+};
+
+struct PublicOneTimePreKey
+{
+    quint32 id = 0;
+    QByteArray key;
+};
+
+constexpr int MaxOneTimePreKeysPerUpload = 100;
+
+PublicSignedPreKey publicPart(const X3dh::SignedPreKey &key);
+QList<PublicOneTimePreKey> publicParts(const QList<X3dh::OneTimePreKey> &keys);
+QJsonObject signedPreKeyToJson(const PublicSignedPreKey &key);
+// The signature is not checked here (it needs the identity key).
+std::optional<PublicSignedPreKey> signedPreKeyFromJson(const QJsonValue &json);
+QJsonArray oneTimePreKeysToJson(const QList<PublicOneTimePreKey> &keys);
+// At most MaxOneTimePreKeysPerUpload, ids all different.
+std::optional<QList<PublicOneTimePreKey>> oneTimePreKeysFromJson(const QJsonValue &json);
+
+// Signing in: the server sends a random nonce, the device signs this text
+// with its identity key. Bound to the purpose, the nonce and the account.
+constexpr int AuthNonceSize = 32;
+QByteArray authMessage(const QByteArray &nonce, const QString &username, quint32 device);
+
 QJsonObject bundleToJson(const X3dh::PreKeyBundle &bundle);
 std::optional<X3dh::PreKeyBundle> bundleFromJson(const QJsonObject &json);
 
