@@ -22,6 +22,10 @@
 //   - Receiving: decrypted, kept, then acknowledged (so the server forgets
 //     it), and a delivered receipt goes back. Twice the same message is kept
 //     once. A new identity key for someone is noticed (safetyNumberChanged).
+//   - Message requests: the first message from someone I have not written to
+//     opens a conversation as a request. Until I accept it they get no
+//     receipts (not even delivered), so they cannot tell I exist or read it.
+//     Blocked people's messages are dropped without a word.
 //   - The connection comes back by itself, sooner first, then slower.
 //
 // Note to Self never leaves this computer.
@@ -58,8 +62,16 @@ public:
     void startConversation(const QString &username, const std::function<void(qint64 conversation, const QString &error)> &done);
     // Mine: kept at once, sent when it can be. Note to Self stays here.
     qint64 send(qint64 conversation, const QString &text);
-    // Opened: their messages are seen, and they get read receipts.
+    // Opened: their messages are seen, and they get read receipts (not for a request).
     void markRead(qint64 conversation);
+    // A message request: accepted (they get the receipts now), deleted, or
+    // deleted with its sender blocked.
+    void acceptRequest(qint64 conversation);
+    void deleteConversation(qint64 conversation);
+    void block(const QString &username);
+    void unblock(const QString &username);
+    bool isBlocked(const QString &username) const { return m_store->isBlocked(username); }
+    QStringList blocked() const { return m_store->blocked(); }
 
     // The 60 digits to compare with them; empty while their key is unknown.
     QString safetyNumber(const QString &username) const;

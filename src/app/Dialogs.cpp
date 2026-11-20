@@ -1,5 +1,6 @@
 #include "Dialogs.h"
 
+#include "ChatStore.h"
 #include "Messenger.h"
 #include "Protocol.h"
 #include "SafetyNumber.h"
@@ -9,6 +10,7 @@
 #include <QFormLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QPointer>
 #include <QPushButton>
 #include <QVBoxLayout>
@@ -154,4 +156,39 @@ void SafetyNumberDialog::update()
     const bool verified = m_messenger->isVerified(m_username);
     m_state->setText(verified ? tr("✓ You have verified it.") : tr("Not verified."));
     m_verify->setText(verified ? tr("Clear Verification") : tr("Mark as Verified"));
+}
+
+BlockedDialog::BlockedDialog(Messenger *messenger, QWidget *parent)
+    : QDialog(parent)
+    , m_messenger(messenger)
+{
+    setWindowTitle(tr("Blocked People"));
+    auto *layout = new QVBoxLayout(this);
+    auto *intro = new QLabel(tr("Their messages are dropped, and they are not told."), this);
+    intro->setWordWrap(true);
+    layout->addWidget(intro);
+    m_list = new QListWidget(this);
+    m_list->setObjectName(QStringLiteral("blockedList"));
+    layout->addWidget(m_list);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, this);
+    m_unblock = buttons->addButton(tr("Unblock"), QDialogButtonBox::ActionRole);
+    m_unblock->setObjectName(QStringLiteral("unblockButton"));
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    connect(m_list, &QListWidget::currentRowChanged, this, [this](int row) { m_unblock->setEnabled(row >= 0); });
+    connect(m_unblock, &QPushButton::clicked, this, [this] {
+        if (QListWidgetItem *item = m_list->currentItem()) {
+            m_messenger->unblock(item->text());
+            reload();
+        }
+    });
+    reload();
+    resize(320, 360);
+}
+
+void BlockedDialog::reload()
+{
+    m_list->clear();
+    m_list->addItems(m_messenger->blocked());
+    m_unblock->setEnabled(false);
 }

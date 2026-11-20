@@ -134,6 +134,88 @@ private slots:
             window.grab().save(qEnvironmentVariable("CHAT_TEST_GRAB"));
         }
     }
+
+    // Strangers write first: requests, accepted or blocked from the window.
+    void messageRequests()
+    {
+        ServerStore serverStore(QDir::homePath() + QStringLiteral("/server2.sqlite"));
+        ChatServer server(&serverStore);
+        QVERIFY(server.listen());
+        const QUrl url(QStringLiteral("ws://127.0.0.1:%1").arg(server.port()));
+        auto signUp = [&](Messenger &m, const QString &name) {
+            std::optional<bool> ok;
+            m.signUp(url, name, [&](bool done, const QString &) { ok = done; });
+            return QTest::qWaitFor([&] { return ok.has_value(); }, 5000) && *ok;
+        };
+
+        ChatStore store(QDir::homePath() + QStringLiteral("/me.sqlite"));
+        KeyStore keys(&store);
+        Messenger me(&store, &keys);
+        QVERIFY(signUp(me, QStringLiteral("myself")));
+        MainWindow window(&store, &me);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+
+        ChatStore annaStore(QDir::homePath() + QStringLiteral("/anna.sqlite"));
+        KeyStore annaKeys(&annaStore);
+        Messenger anna(&annaStore, &annaKeys);
+        QVERIFY(signUp(anna, QStringLiteral("anna")));
+        ChatStore spamStore(QDir::homePath() + QStringLiteral("/spam.sqlite"));
+        KeyStore spamKeys(&spamStore);
+        Messenger spam(&spamStore, &spamKeys);
+        QVERIFY(signUp(spam, QStringLiteral("spammer")));
+
+        auto writeTo = [](Messenger &from, ChatStore &fromStore, const QString &text) {
+            std::optional<qint64> conversation;
+            from.startConversation(QStringLiteral("myself"), [&](qint64 id, const QString &) { conversation = id; });
+            if (!QTest::qWaitFor([&] { return conversation.has_value(); }, 5000) || *conversation == 0)
+                return qint64(0);
+            return from.send(*conversation, text) ? *conversation : 0;
+        };
+        const qint64 annaToMe = writeTo(anna, annaStore, QStringLiteral("Hi, it's Anna"));
+        QVERIFY(annaToMe > 0);
+        QTRY_VERIFY_WITH_TIMEOUT(store.directConversation(QStringLiteral("anna")) > 0, 5000);
+        const qint64 fromAnna = store.directConversation(QStringLiteral("anna"));
+        QTRY_COMPARE_WITH_TIMEOUT(store.messages(fromAnna).size(), 1, 5000);
+
+        // Opened: the request bar, not the composer; Anna still sees only ✓.
+        window.openConversation(fromAnna);
+        QVERIFY(window.requestBar()->isVisible());
+        QVERIFY(!window.composer()->isVisible());
+        QCOMPARE(window.messages()->count(), 1);
+        if (qEnvironmentVariableIsSet("CHAT_TEST_GRAB")) {
+            window.resize(1000, 640);
+            QTest::qWait(200);
+            window.grab().save(qEnvironmentVariable("CHAT_TEST_GRAB"));
+        }
+        const qint64 annaMessage = annaStore.messages(annaToMe).first().id;
+        QTest::qWait(200);
+        QCOMPARE(annaStore.message(annaMessage).status, QStringLiteral("sent"));
+
+        // Accepted: a chat like any other, and Anna sees it read.
+        window.findChild<QPushButton *>(QStringLiteral("acceptButton"))->click();
+        QVERIFY(!window.requestBar()->isVisible());
+        QVERIFY(window.composer()->isVisible());
+        QVERIFY(!store.conversation(fromAnna).request);
+        QTRY_COMPARE_WITH_TIMEOUT(annaStore.message(annaMessage).status, QStringLiteral("read"), 5000);
+
+        // The spammer: blocked from the bar, then unblocked in Blocked People.
+        QVERIFY(writeTo(spam, spamStore, QStringLiteral("Buy now")) > 0);
+        QTRY_VERIFY_WITH_TIMEOUT(store.directConversation(QStringLiteral("spammer")) > 0, 5000);
+        window.openConversation(store.directConversation(QStringLiteral("spammer")));
+        QVERIFY(window.requestBar()->isVisible());
+        window.blockRequest(false);
+        QCOMPARE(store.directConversation(QStringLiteral("spammer")), 0);
+        QCOMPARE(window.currentConversation(), store.noteToSelf());
+        BlockedDialog blocked(&me, &window);
+        QCOMPARE(blocked.list()->count(), 1);
+        QCOMPARE(blocked.list()->item(0)->text(), QStringLiteral("spammer"));
+        QVERIFY(!blocked.unblockButton()->isEnabled());
+        blocked.list()->setCurrentRow(0);
+        blocked.unblockButton()->click();
+        QCOMPARE(blocked.list()->count(), 0);
+        QVERIFY(!me.isBlocked(QStringLiteral("spammer")));
+    }
 };
 
 CHAT_TEST_MAIN(TestMainWindow, QApplication)

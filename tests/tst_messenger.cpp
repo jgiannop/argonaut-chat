@@ -98,18 +98,26 @@ private slots:
         QVERIFY(hello > 0);
         QCOMPARE(alice.store->message(hello).status, QString("sending"));
 
-        // Bob has it, in a conversation with Alice; Alice sees ✓✓.
+        // Bob has it, as a message request from Alice.
         QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("alice") > 0, kWait);
         const qint64 toAlice = bob.store->directConversation("alice");
         QTRY_COMPARE_WITH_TIMEOUT(bob.last(toAlice), QString("Hello Bob"), kWait);
-        QCOMPARE(bob.store->conversation(toAlice).unread, 1);
-        QTRY_COMPARE_WITH_TIMEOUT(alice.store->message(hello).status, QString("delivered"), kWait);
-        QCOMPARE(m_serverStore->queuedCount("bob", 1), 0); // acknowledged
-
-        // Bob reads it: Alice sees it read.
+        QVERIFY(bob.store->conversation(toAlice).request);
+        QTRY_COMPARE_WITH_TIMEOUT(m_serverStore->queuedCount("bob", 1), 0, kWait); // acknowledged
+        // Until he accepts, Alice learns nothing: ✓, not ✓✓, even when he looks.
         bob.messenger->markRead(toAlice);
+        QTest::qWait(300);
+        QCOMPARE(alice.store->message(hello).status, QString("sent"));
+        QCOMPARE(bob.store->conversation(toAlice).unread, 1);
+
+        // He accepts: Alice sees it read.
+        bob.messenger->acceptRequest(toAlice);
+        QVERIFY(!bob.store->conversation(toAlice).request);
         QCOMPARE(bob.store->conversation(toAlice).unread, 0);
         QTRY_COMPARE_WITH_TIMEOUT(alice.store->message(hello).status, QString("read"), kWait);
+        // From now on, delivered receipts as usual.
+        const qint64 again = alice.messenger->send(toBob, "again");
+        QTRY_COMPARE_WITH_TIMEOUT(alice.store->message(again).status, QString("delivered"), kWait);
 
         // And answers.
         bob.messenger->send(toAlice, QString::fromUtf8("Hi Alice 👋"));
@@ -159,9 +167,10 @@ private slots:
         QVERIFY(bob.messenger->hasAccount());
         bob.messenger->start();
         QTRY_COMPARE_WITH_TIMEOUT(bob.messenger->state(), Messenger::State::Online, kWait);
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("alice") > 0, kWait);
         const qint64 toAlice = bob.store->directConversation("alice");
-        QTRY_COMPARE_WITH_TIMEOUT(bob.last(bob.store->directConversation("alice")), QString("while you were away"),
-                                  kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(toAlice), QString("while you were away"), kWait);
+        bob.messenger->acceptRequest(toAlice);
 
         // Alice is back: the outbox goes.
         alice.messenger->start();
@@ -230,6 +239,55 @@ private slots:
         for (qint64 id : sent)
             QVERIFY(alice.store->message(id).status != QLatin1String("failed"));
         QTRY_VERIFY_WITH_TIMEOUT(alice.store->outbox().isEmpty(), kWait);
+    }
+
+    void requestsAndBlocking()
+    {
+        Device alice(file("alice"));
+        Device bob(file("bob"));
+        QVERIFY(signUp(alice, "alice"));
+        QVERIFY(signUp(bob, "bob"));
+        const qint64 toBob = startConversation(alice, "bob");
+        QVERIFY(!alice.store->conversation(toBob).request); // mine: accepted from the start
+
+        // Deleted: the next message is a new request.
+        alice.messenger->send(toBob, "one");
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("alice") > 0, kWait);
+        bob.messenger->deleteConversation(bob.store->directConversation("alice"));
+        QCOMPARE(bob.store->directConversation("alice"), 0);
+        alice.messenger->send(toBob, "two");
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("alice") > 0, kWait);
+        qint64 request = bob.store->directConversation("alice");
+        QVERIFY(bob.store->conversation(request).request);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(request), QString("two"), kWait);
+        QCOMPARE(bob.store->messages(request).size(), 1);
+
+        // Blocked: the request goes, and her messages are dropped without a word.
+        bob.messenger->block("alice");
+        QVERIFY(bob.messenger->isBlocked("alice"));
+        QCOMPARE(bob.store->directConversation("alice"), 0);
+        const qint64 three = alice.messenger->send(toBob, "three");
+        QTRY_COMPARE_WITH_TIMEOUT(alice.store->message(three).status, QString("sent"), kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(m_serverStore->queuedCount("bob", 1), 0, kWait);
+        QTest::qWait(200);
+        QCOMPARE(bob.store->directConversation("alice"), 0);
+        QCOMPARE(alice.store->message(three).status, QString("sent")); // no ✓✓: she learns nothing
+        QString error;
+        QCOMPARE(startConversation(bob, "alice", &error), 0);
+        QVERIFY(error.contains("blocked"));
+        QCOMPARE(bob.store->blocked(), QStringList{"alice"});
+
+        // Unblocked: she can reach him again.
+        bob.messenger->unblock("alice");
+        alice.messenger->send(toBob, "four");
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("alice") > 0, kWait);
+        request = bob.store->directConversation("alice");
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(request), QString("four"), kWait);
+
+        // Answering a request accepts it.
+        bob.messenger->send(request, "hello you");
+        QVERIFY(!bob.store->conversation(request).request);
+        QTRY_COMPARE_WITH_TIMEOUT(alice.last(toBob), QString("hello you"), kWait);
     }
 
     void keyStoreTrust()

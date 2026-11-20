@@ -218,7 +218,12 @@ void Messenger::startConversation(const QString &username,
         done(m_store->noteToSelf(), QString());
         return;
     }
+    if (m_store->isBlocked(name)) {
+        done(0, tr("You have blocked %1. Unblock them first (File › Blocked People).").arg(name));
+        return;
+    }
     if (const qint64 existing = m_store->directConversation(name)) {
+        acceptRequest(existing); // writing to them is accepting them
         done(existing, QString());
         return;
     }
@@ -285,6 +290,8 @@ qint64 Messenger::send(qint64 conversation, const QString &text)
         return 0;
     if (c.kind != QLatin1String("direct"))
         return m_store->addMessage(conversation, text).id;
+    if (c.request)
+        acceptRequest(conversation);
     const Protocol::Content content = Protocol::Content::text(text);
     const ChatStore::Message message =
         m_store->addMessage(conversation, text, QString(), QDateTime::fromMSecsSinceEpoch(content.sentAt, Qt::UTC),
@@ -401,11 +408,41 @@ void Messenger::sendReceipt(const QString &to, Protocol::Content::Receipt kind, 
 
 void Messenger::markRead(qint64 conversation)
 {
+    const ChatStore::Conversation c = m_store->conversation(conversation);
+    if (c.request)
+        return; // seen only once accepted: until then they learn nothing
     const QStringList ids = m_store->unseenUids(conversation);
     m_store->markRead(conversation);
-    const ChatStore::Conversation c = m_store->conversation(conversation);
     if (!ids.isEmpty() && c.kind == QLatin1String("direct") && m_state == State::Online)
         sendReceipt(c.peer, Protocol::Content::Receipt::Read, ids);
+}
+
+void Messenger::acceptRequest(qint64 conversation)
+{
+    const ChatStore::Conversation c = m_store->conversation(conversation);
+    if (!c.request)
+        return;
+    m_store->setAccepted(conversation);
+    markRead(conversation); // read covers delivered
+}
+
+void Messenger::deleteConversation(qint64 conversation)
+{
+    m_store->deleteConversation(conversation);
+}
+
+void Messenger::block(const QString &username)
+{
+    m_store->block(username);
+    if (const qint64 conversation = m_store->directConversation(username)) {
+        if (m_store->conversation(conversation).request)
+            m_store->deleteConversation(conversation);
+    }
+}
+
+void Messenger::unblock(const QString &username)
+{
+    m_store->unblock(username);
 }
 
 // --- Receiving ---
@@ -458,6 +495,8 @@ std::optional<QByteArray> Messenger::decrypt(const Protocol::Envelope &envelope,
 void Messenger::handleContent(const QString &from, const Protocol::Envelope &envelope,
                               const Protocol::Content &content)
 {
+    if (m_store->isBlocked(from))
+        return; // dropped, and they learn nothing
     qint64 conversation = m_store->directConversation(from);
     if (content.type == Protocol::Content::Type::Receipt) {
         if (conversation)
@@ -466,14 +505,16 @@ void Messenger::handleContent(const QString &from, const Protocol::Envelope &env
                                                                                        : QStringLiteral("delivered"));
         return;
     }
+    // Someone new: a message request.
     if (!conversation)
-        conversation = m_store->addConversation(QStringLiteral("direct"), from, from);
+        conversation = m_store->addConversation(QStringLiteral("direct"), from, from, true);
     if (conversation == 0 || m_store->hasMessage(conversation, content.id))
         return;
     // Their clock, unless it is far ahead of the server's.
     const qint64 sentAt = content.sentAt > envelope.serverTime + 5 * 60 * 1000 ? envelope.serverTime : content.sentAt;
     m_store->addMessage(conversation, content.body, from, QDateTime::fromMSecsSinceEpoch(sentAt, Qt::UTC), content.id);
-    sendReceipt(from, Protocol::Content::Receipt::Delivered, {content.id});
+    if (!m_store->conversation(conversation).request)
+        sendReceipt(from, Protocol::Content::Receipt::Delivered, {content.id});
 }
 
 // --- Safety numbers ---

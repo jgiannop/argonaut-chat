@@ -31,7 +31,7 @@
 
 namespace {
 
-enum Role { IdRole = Qt::UserRole + 1, OutgoingRole, TimeRole, StatusRole, LastTextRole, UnreadRole };
+enum Role { IdRole = Qt::UserRole + 1, OutgoingRole, TimeRole, StatusRole, LastTextRole, UnreadRole, RequestRole };
 
 QString shortTime(const QDateTime &when)
 {
@@ -96,8 +96,10 @@ public:
         p->drawText(QRect(text.left(), text.top(), text.width(), nameMetrics.height()), Qt::AlignRight | Qt::AlignVCenter, time);
         const QString last = index.data(LastTextRole).toString().simplified();
         int lastWidth = text.width();
-        if (unread > 0) {
-            const QString count = QString::number(unread);
+        // A message request: marked, and no count (it is not "unread" until accepted).
+        const bool request = index.data(RequestRole).toBool();
+        if (unread > 0 || request) {
+            const QString count = request ? QCoreApplication::translate("MainWindow", "Request") : QString::number(unread);
             const int w = qMax(20, plain.horizontalAdvance(count) + 10);
             const QRect badge(text.right() - w, text.bottom() - 19, w, 20);
             QPainterPath pill;
@@ -287,9 +289,40 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
     m_send->setEnabled(false);
     composerLayout->addWidget(m_compose, 1);
     composerLayout->addWidget(m_send);
+    // In place of the composer for a message request.
+    m_requestBar = new QWidget(chat);
+    m_requestBar->setObjectName(QStringLiteral("requestBar"));
+    auto *requestLayout = new QVBoxLayout(m_requestBar);
+    requestLayout->setContentsMargins(16, 12, 16, 12);
+    m_requestText = new QLabel(m_requestBar);
+    m_requestText->setObjectName(QStringLiteral("requestText"));
+    m_requestText->setWordWrap(true);
+    m_requestText->setAlignment(Qt::AlignCenter);
+    auto *requestButtons = new QHBoxLayout;
+    requestButtons->addStretch();
+    m_blockButton = new QPushButton(tr("Block"), m_requestBar);
+    m_blockButton->setObjectName(QStringLiteral("blockButton"));
+    m_deleteButton = new QPushButton(tr("Delete"), m_requestBar);
+    m_deleteButton->setObjectName(QStringLiteral("deleteButton"));
+    m_acceptButton = new QPushButton(tr("Accept"), m_requestBar);
+    m_acceptButton->setObjectName(QStringLiteral("acceptButton"));
+    for (QPushButton *button : {m_blockButton, m_deleteButton, m_acceptButton}) {
+        button->setCursor(Qt::PointingHandCursor);
+        requestButtons->addWidget(button);
+    }
+    requestButtons->addStretch();
+    requestLayout->addWidget(m_requestText);
+    requestLayout->addLayout(requestButtons);
+    m_requestBar->hide();
+    connect(m_acceptButton, &QPushButton::clicked, this, &MainWindow::acceptRequest);
+    connect(m_deleteButton, &QPushButton::clicked, this, [this] { deleteRequest(true); });
+    connect(m_blockButton, &QPushButton::clicked, this, [this] { blockRequest(true); });
+    m_composer = composer;
+
     chatLayout->addWidget(header);
     chatLayout->addWidget(m_messages, 1);
     chatLayout->addWidget(composer);
+    chatLayout->addWidget(m_requestBar);
 
     auto *split = new QSplitter(Qt::Horizontal, this);
     split->addWidget(sidebar);
@@ -342,6 +375,12 @@ void MainWindow::buildMenus()
     m_newChatAction = file->addAction(tr("New Chat…"), this, &MainWindow::newChat);
     m_newChatAction->setShortcut(QKeySequence::New);
     m_signUpAction = file->addAction(tr("Sign Up…"), this, &MainWindow::showSignUp);
+    m_blockedAction = file->addAction(tr("Blocked People…"), this, [this] {
+        if (!m_messenger)
+            return;
+        BlockedDialog dialog(m_messenger, this);
+        dialog.exec();
+    });
     file->addSeparator();
     QAction *quit = file->addAction(tr("Quit"), this, &QWidget::close);
     quit->setShortcut(QKeySequence::Quit);
@@ -383,7 +422,8 @@ void MainWindow::reloadConversations()
         item->setData(IdRole, c.id);
         item->setData(LastTextRole, c.lastText);
         item->setData(TimeRole, c.lastText.isEmpty() ? QString() : shortTime(c.lastActivity));
-        item->setData(UnreadRole, c.id == m_current ? 0 : c.unread);
+        item->setData(UnreadRole, c.id == m_current || c.request ? 0 : c.unread);
+        item->setData(RequestRole, c.request);
         if (c.id == m_current)
             current = item;
     }
@@ -394,6 +434,14 @@ void MainWindow::reloadConversations()
 void MainWindow::openConversation(qint64 id)
 {
     m_current = id;
+    // The list shows which one is open, however it was opened.
+    {
+        const QSignalBlocker block(m_conversations);
+        for (int i = 0; i < m_conversations->count(); ++i) {
+            if (m_conversations->item(i)->data(IdRole).toLongLong() == id)
+                m_conversations->setCurrentRow(i);
+        }
+    }
     updateHeader();
     markCurrentRead();
     reloadMessages();
@@ -418,6 +466,8 @@ void MainWindow::updateHeader()
     m_title->setText(c.title);
     if (c.kind == QLatin1String("self"))
         m_subtitle->setText(tr("Notes you keep for yourself, on this computer"));
+    else if (direct && c.request)
+        m_subtitle->setText(tr("@%1 · message request").arg(c.peer));
     else if (direct && m_messenger && m_messenger->safetyNumberHasChanged(c.peer))
         m_subtitle->setText(tr("⚠ Your safety number with %1 has changed: check it").arg(c.peer));
     else if (direct && m_messenger && m_messenger->isVerified(c.peer))
@@ -427,6 +477,51 @@ void MainWindow::updateHeader()
     m_safety->setVisible(direct && m_messenger);
     if (m_safetyAction)
         m_safetyAction->setEnabled(direct && m_messenger);
+    // A request: answer it before writing.
+    const bool request = direct && c.request && m_messenger;
+    m_composer->setVisible(!request);
+    m_requestBar->setVisible(request);
+    if (request)
+        m_requestText->setText(tr("<b>%1</b> wants to chat with you. They won't know you have seen their messages "
+                                  "until you accept.")
+                                   .arg(c.peer.toHtmlEscaped()));
+}
+
+void MainWindow::acceptRequest()
+{
+    if (!m_messenger || m_current == 0)
+        return;
+    m_messenger->acceptRequest(m_current);
+    updateHeader();
+    m_compose->setFocus();
+}
+
+void MainWindow::deleteRequest(bool ask)
+{
+    const ChatStore::Conversation c = m_store->conversation(m_current);
+    if (!m_messenger || c.kind != QLatin1String("direct"))
+        return;
+    if (ask && QMessageBox::question(this, tr("Delete"),
+                                     tr("Delete this conversation with %1? They can write to you again.").arg(c.peer))
+                   != QMessageBox::Yes)
+        return;
+    m_messenger->deleteConversation(c.id);
+    openConversation(m_store->noteToSelf());
+}
+
+void MainWindow::blockRequest(bool ask)
+{
+    const ChatStore::Conversation c = m_store->conversation(m_current);
+    if (!m_messenger || c.kind != QLatin1String("direct"))
+        return;
+    if (ask && QMessageBox::question(this, tr("Block"),
+                                     tr("Block %1? Their messages will be dropped, and they will not know. "
+                                        "You can unblock them in File › Blocked People.")
+                                         .arg(c.peer))
+                   != QMessageBox::Yes)
+        return;
+    m_messenger->block(c.peer);
+    openConversation(m_store->noteToSelf());
 }
 
 void MainWindow::updateConnection()
@@ -453,6 +548,8 @@ void MainWindow::updateConnection()
         m_signUpAction->setVisible(m_messenger && !account);
     if (m_newChatAction)
         m_newChatAction->setEnabled(account);
+    if (m_blockedAction)
+        m_blockedAction->setEnabled(account);
 }
 
 void MainWindow::showNotice(const QString &text)

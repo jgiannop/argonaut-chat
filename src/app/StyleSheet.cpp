@@ -16,6 +16,11 @@ QWidget#chatHeader { background: @window; border-bottom: 1px solid @border; }
 QLabel#chatTitle { color: @fg; font-weight: bold; font-size: 15px; }
 QLabel#chatSubtitle { color: @dimFg; }
 QListView#messageList { border: none; outline: 0; }
+QWidget#requestBar { background: @window; border-top: 1px solid @border; }
+QLabel#requestText { color: @fg; }
+QWidget#requestBar QPushButton { background: @pathBg; color: @fg; border: none; border-radius: 16px; padding: 7px 18px; }
+QWidget#requestBar QPushButton:hover { background: @hover; }
+QWidget#requestBar QPushButton#acceptButton { background: @accent; color: #ffffff; font-weight: bold; }
 QWidget#composer { background: @window; border-top: 1px solid @border; }
 QPlainTextEdit#composeField { background: @pathBg; color: @fg; border: none; border-radius: 18px; padding: 6px 12px;
     selection-background-color: @accent; }

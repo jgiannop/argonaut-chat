@@ -35,6 +35,12 @@ public:
     QLabel *noticeLabel() const { return m_notice; }
     QToolButton *safetyNumberButton() const { return m_safety; }
     void openConversation(qint64 id);
+    QWidget *requestBar() const { return m_requestBar; }
+    QWidget *composer() const { return m_composer; }
+    // The open message request (the bar's buttons; `ask`: confirm first).
+    void acceptRequest();
+    void deleteRequest(bool ask);
+    void blockRequest(bool ask);
     // Finds them on the server and opens the conversation (New Chat).
     void startChatWith(const QString &username);
     void showSignUp();
@@ -64,6 +70,13 @@ private:
     QAction *m_signUpAction = nullptr;
     QAction *m_newChatAction = nullptr;
     QAction *m_safetyAction = nullptr;
+    QAction *m_blockedAction = nullptr;
+    QWidget *m_composer = nullptr;
+    QWidget *m_requestBar = nullptr;
+    QLabel *m_requestText = nullptr;
+    QPushButton *m_acceptButton = nullptr;
+    QPushButton *m_deleteButton = nullptr;
+    QPushButton *m_blockButton = nullptr;
     QListWidget *m_conversations = nullptr;
     QListWidget *m_messages = nullptr;
     QLabel *m_title = nullptr;

@@ -123,6 +123,36 @@ private slots:
         QVERIFY(store.addMessage(1, QStringLiteral("new"), QString(), QDateTime::currentDateTimeUtc(),
                                  QStringLiteral("u1")).id > 0);
         QVERIFY(store.hasMessage(1, QStringLiteral("u1")));
+        QVERIFY(!store.conversation(1).request); // old conversations: accepted
+    }
+
+    void requestsAndBlocked()
+    {
+        ChatStore store(QDir::homePath() + QStringLiteral("/requests.sqlite"));
+        const qint64 anna = store.addConversation(QStringLiteral("direct"), QStringLiteral("anna"),
+                                                  QStringLiteral("anna"), true);
+        store.addMessage(anna, QStringLiteral("hi"), QStringLiteral("anna"));
+        QVERIFY(store.conversation(anna).request);
+        QSignalSpy changed(&store, &ChatStore::conversationsChanged);
+        store.setAccepted(anna);
+        QVERIFY(!store.conversation(anna).request);
+        QCOMPARE(changed.size(), 1);
+        store.setAccepted(anna); // already: nothing
+        QCOMPARE(changed.size(), 1);
+
+        store.deleteConversation(anna);
+        QCOMPARE(store.directConversation(QStringLiteral("anna")), 0);
+        QVERIFY(store.messages(anna).isEmpty());
+        store.deleteConversation(store.noteToSelf()); // never Note to Self
+        QVERIFY(store.conversation(store.noteToSelf()).id != 0);
+
+        store.block(QStringLiteral("spammer"));
+        store.block(QStringLiteral("spammer"));
+        store.block(QStringLiteral("another"));
+        QVERIFY(store.isBlocked(QStringLiteral("spammer")));
+        QCOMPARE(store.blocked(), (QStringList{QStringLiteral("another"), QStringLiteral("spammer")}));
+        store.unblock(QStringLiteral("spammer"));
+        QVERIFY(!store.isBlocked(QStringLiteral("spammer")));
     }
 
     void encrypted()

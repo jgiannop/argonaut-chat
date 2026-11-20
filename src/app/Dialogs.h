@@ -6,6 +6,7 @@ class Messenger;
 class QDialogButtonBox;
 class QLabel;
 class QLineEdit;
+class QListWidget;
 class QPushButton;
 
 // The first start: which server, and the username people will find you by.
@@ -57,4 +58,23 @@ private:
     QLabel *m_number = nullptr;
     QLabel *m_state = nullptr;
     QPushButton *m_verify = nullptr;
+};
+
+// The people whose messages are dropped, to unblock.
+class BlockedDialog : public QDialog
+{
+    Q_OBJECT
+
+public:
+    explicit BlockedDialog(Messenger *messenger, QWidget *parent = nullptr);
+
+    QListWidget *list() const { return m_list; }
+    QPushButton *unblockButton() const { return m_unblock; }
+
+private:
+    void reload();
+
+    Messenger *m_messenger;
+    QListWidget *m_list = nullptr;
+    QPushButton *m_unblock = nullptr;
 };

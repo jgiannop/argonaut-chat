@@ -93,6 +93,16 @@ void ChatStore::createTables()
     if (!hasUid)
         q.exec(QStringLiteral("ALTER TABLE messages ADD COLUMN uid TEXT NOT NULL DEFAULT ''"));
     q.exec(QStringLiteral("CREATE INDEX IF NOT EXISTS messages_by_uid ON messages(conversation, uid)"));
+    // Added with message requests.
+    bool hasState = false;
+    q.exec(QStringLiteral("PRAGMA table_info(conversations)"));
+    while (q.next())
+        hasState = hasState || q.value(1).toString() == QLatin1String("state");
+    if (!hasState)
+        q.exec(QStringLiteral("ALTER TABLE conversations ADD COLUMN state TEXT NOT NULL DEFAULT 'accepted'"));
+    q.exec(QStringLiteral("CREATE TABLE IF NOT EXISTS blocked ("
+                          " username TEXT PRIMARY KEY,"
+                          " since INTEGER NOT NULL)"));
 }
 
 namespace {
@@ -129,7 +139,7 @@ QList<ChatStore::Conversation> ChatStore::conversations() const
 {
     QList<Conversation> out;
     QSqlQuery q(m_db);
-    q.exec(QStringLiteral("SELECT c.id, c.kind, c.title, c.peer, c.last_activity,"
+    q.exec(QStringLiteral("SELECT c.id, c.kind, c.title, c.peer, c.last_activity, c.state,"
                           " (SELECT body FROM messages m WHERE m.conversation = c.id ORDER BY sent_at DESC, id DESC LIMIT 1),"
                           " (SELECT COUNT(*) FROM messages m WHERE m.conversation = c.id AND m.seen = 0 AND m.author <> '')"
                           " FROM conversations c ORDER BY c.last_activity DESC, c.id DESC"));
@@ -140,8 +150,9 @@ QList<ChatStore::Conversation> ChatStore::conversations() const
         c.title = q.value(2).toString();
         c.peer = q.value(3).toString();
         c.lastActivity = QDateTime::fromMSecsSinceEpoch(q.value(4).toLongLong(), Qt::UTC);
-        c.lastText = q.value(5).toString();
-        c.unread = q.value(6).toInt();
+        c.request = q.value(5).toString() == QLatin1String("request");
+        c.lastText = q.value(6).toString();
+        c.unread = q.value(7).toInt();
         out.append(c);
     }
     return out;
@@ -175,22 +186,84 @@ qint64 ChatStore::directConversation(const QString &peer) const
     return 0;
 }
 
-qint64 ChatStore::addConversation(const QString &kind, const QString &title, const QString &peer)
+qint64 ChatStore::addConversation(const QString &kind, const QString &title, const QString &peer, bool request)
 {
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     QSqlQuery q(m_db);
-    q.prepare(QStringLiteral("INSERT INTO conversations (kind, title, peer, created, last_activity) VALUES (?, ?, ?, ?, ?)"));
+    q.prepare(QStringLiteral("INSERT INTO conversations (kind, title, peer, created, last_activity, state)"
+                             " VALUES (?, ?, ?, ?, ?, ?)"));
     q.addBindValue(text(kind));
     q.addBindValue(text(title));
     q.addBindValue(text(peer));
     q.addBindValue(now);
     q.addBindValue(now);
+    q.addBindValue(request ? QStringLiteral("request") : QStringLiteral("accepted"));
     if (!q.exec()) {
         m_error = q.lastError().text();
         return 0;
     }
     emit conversationsChanged();
     return q.lastInsertId().toLongLong();
+}
+
+void ChatStore::setAccepted(qint64 conversation)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("UPDATE conversations SET state = 'accepted' WHERE id = ? AND state <> 'accepted'"));
+    q.addBindValue(conversation);
+    if (q.exec() && q.numRowsAffected() > 0)
+        emit conversationsChanged();
+}
+
+void ChatStore::deleteConversation(qint64 conversation)
+{
+    if (!m_db.transaction())
+        return;
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("DELETE FROM messages WHERE conversation = ?"));
+    q.addBindValue(conversation);
+    q.exec();
+    q.prepare(QStringLiteral("DELETE FROM conversations WHERE id = ? AND kind <> 'self'"));
+    q.addBindValue(conversation);
+    q.exec();
+    m_db.commit();
+    emit messagesChanged(conversation);
+    emit conversationsChanged();
+}
+
+void ChatStore::block(const QString &username)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("INSERT OR IGNORE INTO blocked (username, since) VALUES (?, ?)"));
+    q.addBindValue(text(username));
+    q.addBindValue(QDateTime::currentMSecsSinceEpoch());
+    q.exec();
+}
+
+void ChatStore::unblock(const QString &username)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("DELETE FROM blocked WHERE username = ?"));
+    q.addBindValue(text(username));
+    q.exec();
+}
+
+bool ChatStore::isBlocked(const QString &username) const
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT 1 FROM blocked WHERE username = ?"));
+    q.addBindValue(text(username));
+    return q.exec() && q.next();
+}
+
+QStringList ChatStore::blocked() const
+{
+    QStringList out;
+    QSqlQuery q(m_db);
+    q.exec(QStringLiteral("SELECT username FROM blocked ORDER BY username"));
+    while (q.next())
+        out << q.value(0).toString();
+    return out;
 }
 
 ChatStore::Message ChatStore::addMessage(qint64 conversation, const QString &body, const QString &author,

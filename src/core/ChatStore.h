@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QSqlDatabase>
 #include <QString>
+#include <QStringList>
 
 // The conversations and their messages, kept on this computer only, as
 // Signal keeps them (see docs/how-signal-works.md): one SQLite file,
@@ -29,6 +30,7 @@ public:
         QDateTime lastActivity;
         QString lastText; // the newest message, for the list
         int unread = 0;
+        bool request = false; // a message request: someone I have not accepted yet
     };
 
     struct Message
@@ -57,7 +59,11 @@ public:
     Conversation conversation(qint64 id) const;
     // Note to Self: always there (made the first time).
     qint64 noteToSelf();
-    qint64 addConversation(const QString &kind, const QString &title, const QString &peer);
+    // `request`: started by them, not accepted by me yet.
+    qint64 addConversation(const QString &kind, const QString &title, const QString &peer, bool request = false);
+    void setAccepted(qint64 conversation);
+    // The conversation and all its messages.
+    void deleteConversation(qint64 conversation);
     // The direct conversation with this username; 0 if there is none.
     qint64 directConversation(const QString &peer) const;
 
@@ -80,6 +86,12 @@ public:
     // The wire ids of theirs not seen yet (for read receipts).
     QStringList unseenUids(qint64 conversation) const;
     void markRead(qint64 conversation);
+
+    // People whose messages are dropped.
+    void block(const QString &username);
+    void unblock(const QString &username);
+    bool isBlocked(const QString &username) const;
+    QStringList blocked() const;
 
     // The open database, for KeyStore (the same file).
     QSqlDatabase database() const { return m_db; }

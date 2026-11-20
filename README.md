@@ -20,6 +20,9 @@ program: [docs/how-signal-works.md](docs/how-signal-works.md).
   username (no phone number), start a chat by someone's username, ✓ sent,
   ✓✓ delivered, white ✓✓ read. Messages wait on the server while the other
   person is offline, and in an outbox while you are.
+- **Message requests**: a stranger's first message waits as a request;
+  until you accept, they get no receipts at all. Delete it, or block them
+  (their messages are then dropped, and they are not told).
 - **Safety numbers**: 60 digits to compare with someone; a warning when
   theirs changes.
 - **The relay server**, `argonaut-chat-server`: accounts, public keys and
