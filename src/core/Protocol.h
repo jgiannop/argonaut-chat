@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Attachment.h"
 #include "X3dh.h"
 
 #include <QByteArray>
@@ -31,6 +32,7 @@ constexpr int MaxTextBytes = 64 * 1024;        // a text message's body, UTF-8
 constexpr int MaxContentBytes = 128 * 1024;    // a padded Content
 constexpr int MaxCipherMessageBytes = 192 * 1024;
 constexpr int MaxReceiptIds = 1000;
+constexpr int MaxAttachments = 10; // per message
 constexpr int PaddingBlock = 160;
 
 // Usernames: 3 to 32 characters, a-z 0-9 _ and ., starting with a letter, no
@@ -52,7 +54,8 @@ struct Content
     Type type = Type::Text;
     QString id;         // this message's id
     qint64 sentAt = 0;  // ms since the epoch, UTC, as the sender's clock says
-    QString body;       // Text
+    QString body;       // Text (with attachments: their caption, maybe empty)
+    QList<Attachment::Pointer> attachments; // Text
     Receipt receipt = Receipt::Delivered;
     QStringList receiptFor; // Receipt: the ids of the messages it is for
 

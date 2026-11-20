@@ -35,6 +35,11 @@ class ServerStore;
 // itself); one not heard from in two minutes is dropped, so dead connections
 // (a laptop closed, a router that forgot) do not linger.
 //
+// Attachments: encrypted blobs (Attachment.h) uploaded in chunks over the
+// same connection ("upload", "upload-chunk") and downloaded by anyone signed
+// in who knows the random id ("download"). Kept 30 days, unfinished ones a
+// day; 5 GB in all at most.
+//
 // Behind a reverse proxy every connection comes from this computer; with
 // setTrustProxy(true) the address is the last one in X-Forwarded-For, and
 // only for connections from loopback (the proxy).
@@ -61,7 +66,15 @@ public:
         RateLimiter::Rule keyFetchesPerAccount{100, 100.0 / 3600};
         RateLimiter::Rule preKeyUploadsPerAccount{10, 10.0 / 3600};
         RateLimiter::Rule oneTimePreKeysPerDevice{50, 50.0 / 3600};
+        // Attachments: uploads per account, and bytes up and down per account a day.
+        RateLimiter::Rule attachmentUploadsPerAccount{100, 100.0 / 3600};
+        RateLimiter::Rule uploadBytesPerAccount{1e9, 1e9 / 86400};
+        RateLimiter::Rule downloadBytesPerAccount{5e9, 5e9 / 86400};
+        qint64 maxStoredAttachmentBytes = 5LL * 1000 * 1000 * 1000;
+        qint64 attachmentKeepMs = 30LL * 24 * 3600 * 1000;
+        qint64 unfinishedUploadKeepMs = 24LL * 3600 * 1000;
     };
+    static constexpr int MaxChunkBytes = 512 * 1024;
 
     explicit ChatServer(ServerStore *store, QObject *parent = nullptr);
     ~ChatServer() override;
@@ -106,6 +119,9 @@ private:
     QJsonObject send(const Client &client, const QJsonObject &request);
     QJsonObject ack(QWebSocket *socket, Client &client, const QJsonObject &request);
     QJsonObject prekeys(const Client &client, const QJsonObject &request);
+    QJsonObject upload(const Client &client, const QJsonObject &request);
+    QJsonObject uploadChunk(const Client &client, const QJsonObject &request);
+    QJsonObject download(const Client &client, const QJsonObject &request);
 
     QJsonObject signInFailed(QWebSocket *socket, Client &client, const QString &error, const QString &message);
     void signIn(QWebSocket *socket, Client &client, const QString &username, quint32 device);
@@ -116,7 +132,7 @@ private:
     static QString deviceKey(const QString &username, quint32 device);
     QString addressOf(QWebSocket *socket) const;
     // Takes a token; on failure, the answer to send.
-    std::optional<QJsonObject> limit(const QString &key, const RateLimiter::Rule &rule);
+    std::optional<QJsonObject> limit(const QString &key, const RateLimiter::Rule &rule, double cost = 1);
 
     QWebSocketServer m_server;
     ServerStore *m_store;
@@ -126,6 +142,7 @@ private:
     Limits m_limits;
     RateLimiter m_limiter;
     QTimer m_prune;
+    QTimer m_cleanup; // old attachments, hourly
     QTimer m_keepAlive;
     QElapsedTimer m_clock;
     bool m_trustProxy = false;

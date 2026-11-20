@@ -1,9 +1,13 @@
+#include "Attachment.h"
 #include "ChatServer.h"
 #include "Messenger.h"
 #include "ServerStore.h"
 #include "TestSupport.h"
 
 #include <QCoreApplication>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
@@ -58,7 +62,7 @@ class TestMessenger : public QObject
 private slots:
     void init()
     {
-        m_serverStore = std::make_unique<ServerStore>(m_dir.filePath(QStringLiteral("server-%1.sqlite").arg(++m_count)));
+        m_serverStore = std::make_unique<ServerStore>(m_dir.filePath(QStringLiteral("server-%1/server.sqlite").arg(++m_count)));
         m_server = std::make_unique<ChatServer>(m_serverStore.get());
         QVERIFY(m_server->listen());
         m_url = QUrl(QStringLiteral("ws://127.0.0.1:%1").arg(m_server->port()));
@@ -349,6 +353,122 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(bob.keys->signedPreKeys().last().uploaded, kWait);
     }
 
+    void files()
+    {
+        Device alice(file("alice"));
+        Device bob(file("bob"));
+        QVERIFY(signUp(alice, "alice"));
+        QVERIFY(signUp(bob, "bob"));
+        const qint64 toBob = startConversation(alice, "bob");
+        const QByteArray photo = Crypto::randomBytes(1200 * 1024);
+        const QString path = writeFile("holiday photo.jpg", photo);
+
+        // Sent with a caption: up, then the message with its key.
+        QString error;
+        const qint64 sent = alice.messenger->sendFile(toBob, path, "look!", &error);
+        QVERIFY2(sent > 0, qPrintable(error));
+        QTRY_COMPARE_WITH_TIMEOUT(alice.store->message(sent).status, QString("sent"), kWait);
+        const auto mine = alice.store->attachments(sent);
+        QCOMPARE(mine.size(), 1);
+        QCOMPARE(mine.first().state, QString("sent"));
+        QCOMPARE(mine.first().name, QString("holiday photo.jpg"));
+        QCOMPARE(mine.first().size, photo.size());
+
+        // Bob: a request, so nothing fetched yet.
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("alice") > 0, kWait);
+        const qint64 fromAlice = bob.store->directConversation("alice");
+        QTRY_COMPARE_WITH_TIMEOUT(bob.store->messages(fromAlice).size(), 1, kWait);
+        const ChatStore::Message got = bob.store->messages(fromAlice).first();
+        QCOMPARE(got.body, QString("look!"));
+        auto theirs = bob.store->attachments(got.id);
+        QCOMPARE(theirs.size(), 1);
+        QCOMPARE(theirs.first().state, QString("download"));
+        QVERIFY(bob.store->pendingDownloads().isEmpty());
+        QVERIFY(!bob.messenger->attachmentData(theirs.first().id));
+
+        // Accepted: fetched, checked, and the same bytes.
+        bob.messenger->acceptRequest(fromAlice);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.store->attachment(theirs.first().id).state, QString("ready"), kWait);
+        const qint64 attachment = theirs.first().id;
+        QCOMPARE(bob.messenger->attachmentData(attachment), std::optional<QByteArray>(photo));
+        QCOMPARE(bob.store->attachment(attachment).type, QString("image/jpeg"));
+        const QString saved = m_dir.filePath("saved.jpg");
+        QVERIFY(bob.messenger->saveAttachment(attachment, saved));
+        QFile savedFile(saved);
+        QVERIFY(savedFile.open(QIODevice::ReadOnly));
+        QCOMPARE(savedFile.readAll(), photo);
+        // Nowhere in the clear: not on the server, not in Bob's folder.
+        const QByteArray sample = photo.mid(5000, 64);
+        for (const QString &folder : {m_serverStore->attachmentFolder(), bob.store->attachmentFolder(),
+                                      alice.store->attachmentFolder()}) {
+            for (const QString &name : QDir(folder).entryList(QDir::Files)) {
+                QFile blob(folder + "/" + name);
+                QVERIFY(blob.open(QIODevice::ReadOnly));
+                QVERIFY2(!blob.readAll().contains(sample), qPrintable(folder + "/" + name));
+            }
+        }
+        QTRY_COMPARE_WITH_TIMEOUT(alice.store->message(sent).status, QString("read"), kWait);
+
+        // Note to Self: here only.
+        const int onServer = QDir(m_serverStore->attachmentFolder()).entryList(QDir::Files).size();
+        const qint64 note = alice.messenger->sendFile(alice.store->noteToSelf(), path, QString());
+        QCOMPARE(alice.store->message(note).status, QString("sent"));
+        QCOMPARE(alice.store->attachments(note).first().state, QString("ready"));
+        QCOMPARE(alice.messenger->attachmentData(alice.store->attachments(note).first().id),
+                 std::optional<QByteArray>(photo));
+        QCOMPARE(QDir(m_serverStore->attachmentFolder()).entryList(QDir::Files).size(), onServer);
+
+        // Too large.
+        QFile big(m_dir.filePath("big.bin"));
+        QVERIFY(big.open(QIODevice::WriteOnly));
+        QVERIFY(big.resize(Attachment::MaxFileBytes + 1));
+        big.close();
+        QCOMPARE(alice.messenger->sendFile(toBob, big.fileName(), QString(), &error), 0);
+        QVERIFY(error.contains("25 MB"));
+
+        // Offline: it waits in the outbox, then goes.
+        alice.messenger->stop();
+        const qint64 later = alice.messenger->sendFile(toBob, writeFile("notes.txt", "some notes"), QString());
+        QCOMPARE(alice.store->attachments(later).first().state, QString("upload"));
+        QCOMPARE(alice.store->message(later).status, QString("sending"));
+        alice.messenger->start();
+        QTRY_COMPARE_WITH_TIMEOUT(alice.store->message(later).status, QString("delivered"), kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.store->messages(fromAlice).size(), 2, kWait);
+        const qint64 notes = bob.store->attachments(bob.store->messages(fromAlice).last().id).first().id;
+        QTRY_COMPARE_WITH_TIMEOUT(bob.store->attachment(notes).state, QString("ready"), kWait);
+        QCOMPARE(bob.messenger->attachmentData(notes), std::optional<QByteArray>("some notes"));
+        QCOMPARE(bob.store->attachment(notes).type, QString("text/plain"));
+
+        // Changed on the server while Bob was away: caught, not kept.
+        bob.close();
+        alice.messenger->sendFile(toBob, writeFile("contract.pdf", Crypto::randomBytes(3000)), QString());
+        QTRY_VERIFY_WITH_TIMEOUT(QDir(m_serverStore->attachmentFolder()).entryList(QDir::Files).size() == onServer + 2,
+                                 kWait);
+        QTest::qWait(300); // the upload's last chunk is in
+        QString newest;
+        for (const QFileInfo &info : QDir(m_serverStore->attachmentFolder()).entryInfoList(QDir::Files, QDir::Time))
+            if (newest.isEmpty())
+                newest = info.filePath();
+        QFile stored(newest);
+        QVERIFY(stored.open(QIODevice::ReadWrite));
+        QByteArray bytes = stored.readAll();
+        bytes[100] = char(bytes.at(100) ^ 1);
+        QVERIFY(stored.seek(0));
+        stored.write(bytes);
+        stored.close();
+        bob.open();
+        bob.messenger->start();
+        QTRY_COMPARE_WITH_TIMEOUT(bob.store->messages(fromAlice).size(), 3, kWait);
+        const qint64 contract = bob.store->attachments(bob.store->messages(fromAlice).last().id).first().id;
+        QTRY_COMPARE_WITH_TIMEOUT(bob.store->attachment(contract).state, QString("failed"), kWait);
+        QVERIFY(!bob.messenger->attachmentData(contract));
+
+        // Deleting the conversation deletes its files.
+        QVERIFY(!QDir(bob.store->attachmentFolder()).entryList(QDir::Files).isEmpty());
+        bob.messenger->deleteConversation(fromAlice);
+        QVERIFY(QDir(bob.store->attachmentFolder()).entryList(QDir::Files).isEmpty());
+    }
+
     void keyStoreTrust()
     {
         Device alice(file("alice"));
@@ -367,7 +487,16 @@ private slots:
     }
 
 private:
-    QString file(const QString &name) { return m_dir.filePath(QStringLiteral("%1-%2.sqlite").arg(name).arg(++m_count)); }
+    QString writeFile(const QString &name, const QByteArray &data)
+    {
+        const QString path = m_dir.filePath(name);
+        QFile out(path);
+        if (out.open(QIODevice::WriteOnly))
+            out.write(data);
+        return path;
+    }
+
+    QString file(const QString &name) { return m_dir.filePath(QStringLiteral("%1-%2/chat.sqlite").arg(name).arg(++m_count)); }
 
     bool signUp(Device &device, const QString &username, QString *error = nullptr)
     {

@@ -70,6 +70,14 @@ public:
     void uploadPreKeys(const std::optional<Protocol::PublicSignedPreKey> &signedPreKey,
                        const QList<Protocol::PublicOneTimePreKey> &oneTimePreKeys, const Callback &done);
 
+    // Attachments (encrypted blobs, Attachment.h), in chunks, one at a time.
+    using Progress = std::function<void(qint64 done, qint64 total)>;
+    void uploadAttachment(const QByteArray &blob, const Progress &progress,
+                          const std::function<void(const QString &id, const Result &result)> &done);
+    // `size`: the blob's size the message promised; another size is refused.
+    void downloadAttachment(const QString &id, qint64 size, const Progress &progress,
+                            const std::function<void(const QByteArray &blob, const Result &result)> &done);
+
     // Tests: the ping interval and how long past it a silence is tolerated.
     void setKeepAlive(int intervalMs, int timeoutMs);
 

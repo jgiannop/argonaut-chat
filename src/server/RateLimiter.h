@@ -21,8 +21,9 @@ public:
 
     explicit RateLimiter(Clock clock = {});
 
-    // True and a token taken; false and, in `retryAfterMs`, when the next one comes.
-    bool take(const QString &key, const Rule &rule, qint64 *retryAfterMs = nullptr);
+    // True and `cost` tokens taken (bytes, say; 1 for a request); false and,
+    // in `retryAfterMs`, when there will be enough.
+    bool take(const QString &key, const Rule &rule, qint64 *retryAfterMs = nullptr, double cost = 1);
     // Without taking.
     bool wouldAllow(const QString &key, const Rule &rule);
     // Forgets the buckets that have been full for a while (memory).

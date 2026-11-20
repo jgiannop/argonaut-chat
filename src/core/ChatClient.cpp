@@ -1,11 +1,14 @@
 #include "ChatClient.h"
 
+#include "Attachment.h"
+
 #include <QHostAddress>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QSslError>
 
 #include <limits>
+#include <memory>
 #include <utility>
 
 namespace {
@@ -257,4 +260,83 @@ void ChatClient::uploadPreKeys(const std::optional<Protocol::PublicSignedPreKey>
     if (signedPreKey)
         fields.insert(QStringLiteral("signedPreKey"), Protocol::signedPreKeyToJson(*signedPreKey));
     request(QStringLiteral("prekeys"), fields, done);
+}
+
+void ChatClient::uploadAttachment(const QByteArray &blob, const Progress &progress,
+                                  const std::function<void(const QString &, const Result &)> &done)
+{
+    request(QStringLiteral("upload"), {{QStringLiteral("size"), double(blob.size())}},
+            [this, blob, progress, done](const Result &started) {
+                const QString id = started.data.value(QStringLiteral("id")).toString();
+                if (!started.ok || !Attachment::isValidId(id)) {
+                    done(QString(), started.ok ? failure(QStringLiteral("server"), tr("A bad answer.")) : started);
+                    return;
+                }
+                const int chunk = int(qBound(qint64(16 * 1024), qint64(started.data.value(QStringLiteral("chunk")).toDouble()),
+                                             qint64(512 * 1024)));
+                // One chunk, then the next when the server has it.
+                auto next = std::make_shared<std::function<void(qint64)>>();
+                *next = [this, blob, id, chunk, progress, done, next](qint64 offset) {
+                    if (offset >= blob.size()) {
+                        done(id, Result{true, {}, {}, {}});
+                        *next = nullptr; // no cycle left behind
+                        return;
+                    }
+                    const QByteArray part = blob.mid(offset, chunk);
+                    request(QStringLiteral("upload-chunk"),
+                            {{QStringLiteral("id"), id},
+                             {QStringLiteral("offset"), double(offset)},
+                             {QStringLiteral("data"), Protocol::Json::base64(part)}},
+                            [blob, offset, part, progress, done, next](const Result &result) {
+                                if (!result.ok) {
+                                    done(QString(), result);
+                                    *next = nullptr;
+                                    return;
+                                }
+                                if (progress)
+                                    progress(offset + part.size(), blob.size());
+                                (*next)(offset + part.size());
+                            });
+                };
+                (*next)(0);
+            });
+}
+
+void ChatClient::downloadAttachment(const QString &id, qint64 size, const Progress &progress,
+                                    const std::function<void(const QByteArray &, const Result &)> &done)
+{
+    if (!Attachment::isValidId(id) || size <= 0 || size > Attachment::blobSize(Attachment::MaxFileBytes)) {
+        done({}, failure(QStringLiteral("bad-request"), tr("Not an attachment.")));
+        return;
+    }
+    auto blob = std::make_shared<QByteArray>();
+    blob->reserve(int(size));
+    auto next = std::make_shared<std::function<void()>>();
+    *next = [this, id, size, progress, done, blob, next] {
+        if (blob->size() >= size) {
+            done(*blob, Result{true, {}, {}, {}});
+            *next = nullptr;
+            return;
+        }
+        request(QStringLiteral("download"),
+                {{QStringLiteral("id"), id},
+                 {QStringLiteral("offset"), double(blob->size())},
+                 {QStringLiteral("length"), double(qMin(qint64(512 * 1024), size - blob->size()))}},
+                [size, progress, done, blob, next](const Result &result) {
+                    const auto data = Protocol::Json::bytes(result.data.value(QStringLiteral("data")), -1, 512 * 1024);
+                    const auto total = Protocol::Json::integer(result.data.value(QStringLiteral("size")), 1,
+                                                               std::numeric_limits<qint32>::max());
+                    if (!result.ok || !data || !total || *total != size || blob->size() + data->size() > size) {
+                        done({}, result.ok ? failure(QStringLiteral("server"), tr("The attachment is not what was sent."))
+                                           : result);
+                        *next = nullptr;
+                        return;
+                    }
+                    blob->append(*data);
+                    if (progress)
+                        progress(blob->size(), size);
+                    (*next)();
+                });
+    };
+    (*next)();
 }

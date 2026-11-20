@@ -1,4 +1,5 @@
 #include "ChatClient.h"
+#include "Attachment.h"
 #include "ChatServer.h"
 #include "RateLimiter.h"
 #include "ServerStore.h"
@@ -6,6 +7,8 @@
 #include "TestSupport.h"
 
 #include <QCoreApplication>
+#include <QDir>
+#include <QFile>
 #include <QJsonArray>
 #include <QNetworkRequest>
 #include <QSignalSpy>
@@ -135,7 +138,7 @@ private slots:
     void init()
     {
         QVERIFY(m_dir.isValid());
-        m_store = std::make_unique<ServerStore>(m_dir.filePath(QStringLiteral("server-%1.sqlite").arg(++m_count)));
+        m_store = std::make_unique<ServerStore>(m_dir.filePath(QStringLiteral("server-%1/server.sqlite").arg(++m_count)));
         QVERIFY(m_store->isOpen());
         m_server = std::make_unique<ChatServer>(m_store.get());
         // Limits that never get in the way here; rateLimits() sets its own.
@@ -144,6 +147,8 @@ private slots:
         generous.requestsPerConnection = generous.signUpsPerAddress = generous.challengesPerAddress = plenty;
         generous.sendsPerAccount = generous.keyFetchesPerAccount = generous.preKeyUploadsPerAccount = plenty;
         generous.oneTimePreKeysPerDevice = plenty;
+        generous.attachmentUploadsPerAccount = plenty;
+        generous.uploadBytesPerAccount = generous.downloadBytesPerAccount = {1e12, 1e12}; // bytes
         m_server->setLimits(generous);
         m_server->setClock([this] { return m_now; });
         QVERIFY2(m_server->listen(), qPrintable(m_server->errorString()));
@@ -544,6 +549,123 @@ private slots:
         QCOMPARE(m_server->connectionCount(), 1);
         relay.freeze();
         QTRY_COMPARE_WITH_TIMEOUT(m_server->connectionCount(), 0, kWait);
+    }
+
+    void attachments()
+    {
+        Person alice(QStringLiteral("alice"));
+        Person bob(QStringLiteral("bob"));
+        QVERIFY(join(alice));
+        QVERIFY(join(bob));
+        const QByteArray file = Crypto::randomBytes(1300 * 1024); // three chunks and a bit
+        const auto sealed = Attachment::encrypt(file);
+
+        // Up, with progress.
+        QList<qint64> progress;
+        std::optional<QString> id;
+        alice.client.uploadAttachment(
+            sealed->blob, [&](qint64 done, qint64) { progress << done; },
+            [&](const QString &uploaded, const ChatClient::Result &result) {
+                QVERIFY2(result.ok, qPrintable(result.message));
+                id = uploaded;
+            });
+        QTRY_VERIFY_WITH_TIMEOUT(id.has_value(), kWait);
+        QVERIFY(Attachment::isValidId(*id));
+        QCOMPARE(progress.last(), sealed->blob.size());
+        QVERIFY(progress.size() >= 3);
+        // On the server: only the encrypted bytes, in a private folder.
+        QFile stored(m_store->attachmentFolder() + "/" + *id);
+        QVERIFY(stored.open(QIODevice::ReadOnly));
+        QCOMPARE(stored.readAll(), sealed->blob);
+        QCOMPARE(QFileInfo(m_store->attachmentFolder()).permissions() & (QFile::ReadGroup | QFile::ReadOther),
+                 QFile::Permissions());
+
+        // Down, by someone else, and decrypted.
+        std::optional<QByteArray> blob;
+        bob.client.downloadAttachment(*id, sealed->blob.size(), {},
+                                      [&](const QByteArray &got, const ChatClient::Result &result) {
+                                          QVERIFY2(result.ok, qPrintable(result.message));
+                                          blob = got;
+                                      });
+        QTRY_VERIFY_WITH_TIMEOUT(blob.has_value(), kWait);
+        QCOMPARE(Attachment::decrypt(*blob, sealed->key, sealed->digest, file.size()), std::optional<QByteArray>(file));
+
+        // Not the size the message promised: refused.
+        std::optional<ChatClient::Result> wrong;
+        bob.client.downloadAttachment(*id, sealed->blob.size() + 1, {},
+                                      [&](const QByteArray &, const ChatClient::Result &result) { wrong = result; });
+        QTRY_VERIFY_WITH_TIMEOUT(wrong.has_value(), kWait);
+        QVERIFY(!wrong->ok);
+    }
+
+    void attachmentsFromStrangers()
+    {
+        Person alice(QStringLiteral("alice"));
+        Person bob(QStringLiteral("bob"));
+        QVERIFY(join(alice));
+        QVERIFY(join(bob));
+        ChatClient::Result result = wait([&](auto done) { alice.client.request("upload", {{"size", 1000}}, done); });
+        QVERIFY(result.ok);
+        const QString id = result.data.value("id").toString();
+        const QString chunk = Protocol::Json::base64(QByteArray(600, 'x'));
+
+        // Someone else's upload; the wrong place; past the end.
+        result = wait([&](auto done) { bob.client.request("upload-chunk", {{"id", id}, {"offset", 0}, {"data", chunk}}, done); });
+        QCOMPARE(result.error, QString("not-found"));
+        result = wait([&](auto done) { alice.client.request("upload-chunk", {{"id", id}, {"offset", 10}, {"data", chunk}}, done); });
+        QCOMPARE(result.error, QString("bad-offset"));
+        QVERIFY(wait([&](auto done) { alice.client.request("upload-chunk", {{"id", id}, {"offset", 0}, {"data", chunk}}, done); }).ok);
+        result = wait([&](auto done) { alice.client.request("upload-chunk", {{"id", id}, {"offset", 600}, {"data", chunk}}, done); });
+        QCOMPARE(result.error, QString("bad-offset"));
+        // Unfinished: nobody gets it.
+        result = wait([&](auto done) { bob.client.request("download", {{"id", id}, {"offset", 0}, {"length", 100}}, done); });
+        QCOMPARE(result.error, QString("not-found"));
+        // Rubbish.
+        for (const QJsonObject &bad : {QJsonObject{{"id", "../../etc/passwd"}, {"offset", 0}, {"length", 10}},
+                                       QJsonObject{{"id", id}, {"offset", -1}, {"length", 10}},
+                                       QJsonObject{{"id", id}, {"offset", 0}, {"length", 10 * 1024 * 1024}}}) {
+            result = wait([&](auto done) { bob.client.request("download", bad, done); });
+            QCOMPARE(result.error, QString("bad-request"));
+        }
+        result = wait([&](auto done) { bob.client.request("download", {{"id", "0123456789abcdef0123456789abcdef"}, {"offset", 0}, {"length", 10}}, done); });
+        QCOMPARE(result.error, QString("not-found"));
+        result = wait([&](auto done) { alice.client.request("upload", {{"size", double(Attachment::blobSize(Attachment::MaxFileBytes) + 1)}}, done); });
+        QCOMPARE(result.error, QString("bad-request"));
+        ChatClient stranger;
+        QVERIFY(connectTo(stranger));
+        result = wait([&](auto done) { stranger.request("upload", {{"size", 1000}}, done); });
+        QCOMPARE(result.error, QString("unauthenticated"));
+
+        // The server full; too many bytes for one account.
+        ChatServer::Limits limits = m_server->limits();
+        limits.maxStoredAttachmentBytes = 5000;
+        m_server->setLimits(limits);
+        result = wait([&](auto done) { alice.client.request("upload", {{"size", 4500}}, done); });
+        QCOMPARE(result.error, QString("full"));
+        limits.maxStoredAttachmentBytes = 1LL << 40;
+        limits.uploadBytesPerAccount = {10000, 1};
+        m_server->setLimits(limits);
+        QVERIFY(wait([&](auto done) { alice.client.request("upload", {{"size", 8000}}, done); }).ok);
+        result = wait([&](auto done) { alice.client.request("upload", {{"size", 8000}}, done); });
+        QCOMPARE(result.error, QString("rate-limited"));
+
+        // After 30 days (unfinished: a day), gone, files and all.
+        const QString finished = [&] {
+            const auto sealed = Attachment::encrypt("small");
+            std::optional<QString> uploaded;
+            bob.client.uploadAttachment(sealed->blob, {}, [&](const QString &done, const ChatClient::Result &) { uploaded = done; });
+            if (!QTest::qWaitFor([&] { return uploaded.has_value(); }, kWait))
+                return QString();
+            return uploaded.value_or(QString());
+        }();
+        QVERIFY(m_store->attachment(finished));
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        const qint64 day = 24LL * 3600 * 1000;
+        QCOMPARE(m_store->removeOldAttachments(now + 2 * day, 30 * day, day), 2); // the two unfinished ones
+        QVERIFY(m_store->attachment(finished));
+        QCOMPARE(m_store->removeOldAttachments(now + 31 * day, 30 * day, day), 1);
+        QVERIFY(!m_store->attachment(finished));
+        QCOMPARE(QDir(m_store->attachmentFolder()).entryList(QDir::Files).size(), 0);
     }
 
     void clientRefusesPlainRemote()

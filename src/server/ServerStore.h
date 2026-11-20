@@ -55,10 +55,33 @@ public:
     // Only the device's own messages are removed.
     void remove(const QString &to, quint32 toDevice, const QList<qint64> &ids);
 
+    // Attachments: encrypted blobs it cannot read, as files in the folder
+    // "attachments" next to the database; their ids are random (32 hex).
+    struct AttachmentInfo
+    {
+        QString owner;
+        qint64 size = 0;     // the blob's, as announced
+        qint64 received = 0; // so far
+        qint64 created = 0;  // ms
+        bool complete() const { return received == size; }
+    };
+    QString createAttachment(const QString &owner, qint64 size);
+    std::optional<AttachmentInfo> attachment(const QString &id) const;
+    // Only at its end (offset == received), only by its owner, never past its size.
+    bool appendAttachment(const QString &id, const QString &owner, qint64 offset, const QByteArray &data);
+    QByteArray readAttachment(const QString &id, qint64 offset, qint64 length) const;
+    // All announced sizes (what the folder may come to).
+    qint64 storedAttachmentBytes() const;
+    // Complete ones older than `keepMs`, unfinished ones older than `unfinishedMs`.
+    int removeOldAttachments(qint64 now, qint64 keepMs, qint64 unfinishedMs);
+    QString attachmentFolder() const { return m_attachments; }
+
 private:
     void createTables();
+    QString attachmentFile(const QString &id) const;
 
     QSqlDatabase m_db;
     QString m_connection;
     QString m_error;
+    QString m_attachments; // the folder
 };

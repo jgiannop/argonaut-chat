@@ -40,6 +40,7 @@ include(GNUInstallDirs)
 
 # The messenger's engine: no widgets, so all of it can be tested headless.
 qt_add_library(chat_core STATIC
+    src/core/Attachment.cpp src/core/Attachment.h
     src/core/ChatClient.cpp src/core/ChatClient.h
     src/core/ChatStore.cpp src/core/ChatStore.h
     src/core/CipherSql.cpp src/core/CipherSql.h

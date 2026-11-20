@@ -237,6 +237,17 @@ QByteArray encodeContent(const Content &content)
             return {};
         json.insert(QStringLiteral("t"), QStringLiteral("text"));
         json.insert(QStringLiteral("body"), content.body);
+        if (content.attachments.size() > MaxAttachments)
+            return {};
+        if (!content.attachments.isEmpty()) {
+            QJsonArray list;
+            for (const Attachment::Pointer &pointer : content.attachments) {
+                if (!Attachment::fromJson(Attachment::toJson(pointer))) // the same checks as on arrival
+                    return {};
+                list.append(Attachment::toJson(pointer));
+            }
+            json.insert(QStringLiteral("attachments"), list);
+        }
     } else {
         if (content.receiptFor.isEmpty() || content.receiptFor.size() > MaxReceiptIds)
             return {};
@@ -280,6 +291,18 @@ std::optional<Content> decodeContent(const QByteArray &padded)
             return std::nullopt;
         content.type = Content::Type::Text;
         content.body = body.toString();
+        const QJsonValue attachments = json.value(QStringLiteral("attachments"));
+        if (!attachments.isUndefined()) {
+            if (!attachments.isArray() || attachments.toArray().isEmpty()
+                || attachments.toArray().size() > MaxAttachments)
+                return std::nullopt;
+            for (const QJsonValue &item : attachments.toArray()) {
+                const auto pointer = Attachment::fromJson(item);
+                if (!pointer)
+                    return std::nullopt;
+                content.attachments.append(*pointer);
+            }
+        }
         return content;
     }
     if (type == QLatin1String("receipt")) {

@@ -31,6 +31,7 @@ QByteArray randomBytes(int count);
 void wipe(QByteArray &bytes);
 
 QByteArray sha512(const QByteArray &data);
+QByteArray sha256(const QByteArray &data);
 QByteArray hmacSha256(const QByteArray &key, const QByteArray &data);
 // RFC 5869 with SHA-256. An empty salt is 32 zero bytes. Empty if `length`
 // is not 1..8160.

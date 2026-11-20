@@ -1,9 +1,11 @@
 #include "ChatServer.h"
 
+#include "Attachment.h"
 #include "Crypto.h"
 #include "Protocol.h"
 #include "ServerStore.h"
 
+#include <QDateTime>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QTimer>
@@ -49,6 +51,12 @@ ChatServer::ChatServer(ServerStore *store, QObject *parent)
     m_keepAlive.setInterval(60 * 1000);
     connect(&m_keepAlive, &QTimer::timeout, this, &ChatServer::pingAll);
     m_keepAlive.start();
+    m_cleanup.setInterval(3600 * 1000);
+    connect(&m_cleanup, &QTimer::timeout, this, [this] {
+        m_store->removeOldAttachments(QDateTime::currentMSecsSinceEpoch(), m_limits.attachmentKeepMs,
+                                      m_limits.unfinishedUploadKeepMs);
+    });
+    m_cleanup.start();
     m_prune.setInterval(5 * 60 * 1000);
     connect(&m_prune, &QTimer::timeout, this, [this] { m_limiter.prune(); });
     m_prune.start();
@@ -117,10 +125,10 @@ QString ChatServer::addressOf(QWebSocket *socket) const
     return peer.toString();
 }
 
-std::optional<QJsonObject> ChatServer::limit(const QString &key, const RateLimiter::Rule &rule)
+std::optional<QJsonObject> ChatServer::limit(const QString &key, const RateLimiter::Rule &rule, double cost)
 {
     qint64 retryAfter = 0;
-    if (m_limiter.take(key, rule, &retryAfter))
+    if (m_limiter.take(key, rule, &retryAfter, cost))
         return std::nullopt;
     return fail(QStringLiteral("rate-limited"), QStringLiteral("Too many requests; try again later."),
                 {{QStringLiteral("retryAfter"), double(qMin<qint64>(retryAfter, qint64(1) << 40))}});
@@ -220,7 +228,8 @@ QJsonObject ChatServer::handle(QWebSocket *socket, Client &client, const QString
         return login(socket, client, request);
     if (!client.signedIn()) {
         if (op == QLatin1String("keys") || op == QLatin1String("send") || op == QLatin1String("ack")
-            || op == QLatin1String("prekeys"))
+            || op == QLatin1String("prekeys") || op == QLatin1String("upload") || op == QLatin1String("upload-chunk")
+            || op == QLatin1String("download"))
             return fail(QStringLiteral("unauthenticated"), QStringLiteral("Sign in first."));
         return fail(QStringLiteral("unknown-op"), QStringLiteral("No such request."));
     }
@@ -241,6 +250,15 @@ QJsonObject ChatServer::handle(QWebSocket *socket, Client &client, const QString
             return *limited;
         return prekeys(client, request);
     }
+    if (op == QLatin1String("upload")) {
+        if (auto limited = limit(QStringLiteral("uploads:") + client.username, m_limits.attachmentUploadsPerAccount))
+            return *limited;
+        return upload(client, request);
+    }
+    if (op == QLatin1String("upload-chunk"))
+        return uploadChunk(client, request);
+    if (op == QLatin1String("download"))
+        return download(client, request);
     return fail(QStringLiteral("unknown-op"), QStringLiteral("No such request."));
 }
 
@@ -441,6 +459,62 @@ QJsonObject ChatServer::prekeys(const Client &client, const QJsonObject &request
     if (!oneTime->isEmpty())
         m_store->addOneTimePreKeys(client.username, client.device, *oneTime);
     return ok({{QStringLiteral("prekeys"), m_store->oneTimePreKeyCount(client.username, client.device)}});
+}
+
+QJsonObject ChatServer::upload(const Client &client, const QJsonObject &request)
+{
+    const auto size = Protocol::Json::integer(request.value(QStringLiteral("size")), 1,
+                                              Attachment::blobSize(Attachment::MaxFileBytes));
+    if (!size)
+        return badRequest(QStringLiteral("No size, or too large."));
+    if (m_store->storedAttachmentBytes() + *size > m_limits.maxStoredAttachmentBytes)
+        return fail(QStringLiteral("full"), QStringLiteral("The server has no room for attachments now."));
+    if (auto limited = limit(QStringLiteral("upbytes:") + client.username, m_limits.uploadBytesPerAccount, double(*size)))
+        return *limited;
+    const QString id = m_store->createAttachment(client.username, *size);
+    if (id.isEmpty())
+        return fail(QStringLiteral("server"), QStringLiteral("Could not keep the attachment."));
+    return ok({{QStringLiteral("id"), id}, {QStringLiteral("chunk"), MaxChunkBytes}});
+}
+
+QJsonObject ChatServer::uploadChunk(const Client &client, const QJsonObject &request)
+{
+    const QString id = request.value(QStringLiteral("id")).toString();
+    const auto offset = Protocol::Json::integer(request.value(QStringLiteral("offset")), 0,
+                                                Attachment::blobSize(Attachment::MaxFileBytes));
+    const auto data = Protocol::Json::bytes(request.value(QStringLiteral("data")), -1, MaxChunkBytes);
+    if (!Attachment::isValidId(id) || !offset || !data)
+        return badRequest(QStringLiteral("Malformed chunk."));
+    const auto info = m_store->attachment(id);
+    if (!info || info->owner != client.username)
+        return fail(QStringLiteral("not-found"), QStringLiteral("No such upload."));
+    if (!m_store->appendAttachment(id, client.username, *offset, *data))
+        return fail(QStringLiteral("bad-offset"), QStringLiteral("Not where the upload is."),
+                    {{QStringLiteral("received"), double(info->received)}});
+    return ok({{QStringLiteral("received"), double(*offset + data->size())}});
+}
+
+QJsonObject ChatServer::download(const Client &client, const QJsonObject &request)
+{
+    const QString id = request.value(QStringLiteral("id")).toString();
+    const auto offset = Protocol::Json::integer(request.value(QStringLiteral("offset")), 0,
+                                                Attachment::blobSize(Attachment::MaxFileBytes));
+    const auto length = Protocol::Json::integer(request.value(QStringLiteral("length")), 1, MaxChunkBytes);
+    if (!Attachment::isValidId(id) || !offset || !length)
+        return badRequest(QStringLiteral("Malformed download."));
+    const auto info = m_store->attachment(id);
+    if (!info || !info->complete())
+        return fail(QStringLiteral("not-found"), QStringLiteral("No such attachment (it may have expired)."));
+    if (*offset >= info->size)
+        return badRequest(QStringLiteral("Past the end."));
+    const qint64 count = qMin<qint64>(*length, info->size - *offset);
+    if (auto limited = limit(QStringLiteral("downbytes:") + client.username, m_limits.downloadBytesPerAccount,
+                             double(count)))
+        return *limited;
+    const QByteArray data = m_store->readAttachment(id, *offset, count);
+    if (data.isEmpty())
+        return fail(QStringLiteral("server"), QStringLiteral("Could not read the attachment."));
+    return ok({{QStringLiteral("data"), Protocol::Json::base64(data)}, {QStringLiteral("size"), double(info->size)}});
 }
 
 void ChatServer::deliverQueued(QWebSocket *socket)

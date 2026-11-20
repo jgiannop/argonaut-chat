@@ -3,7 +3,9 @@
 #include "ChatStore.h"
 #include "Theme.h"
 
+#include <QHash>
 #include <QMainWindow>
+#include <QPixmap>
 
 class Messenger;
 class TrayIcon;
@@ -42,6 +44,10 @@ public:
     void acceptRequest();
     void deleteRequest(bool ask);
     void blockRequest(bool ask);
+    // A file into the open conversation, with what is typed as its caption (the 📎 button).
+    void attachFile(const QString &path);
+    // An attachment, decrypted, into `path` (a click on it asks where).
+    bool saveAttachment(qint64 attachment, const QString &path);
     // Finds them on the server and opens the conversation (New Chat).
     void startChatWith(const QString &username);
     void showSignUp();
@@ -74,6 +80,8 @@ private:
     void newChat();
     void showSafetyNumber();
     void markCurrentRead();
+    QPixmap previewFor(const ChatStore::StoredAttachment &attachment);
+    QString fileLine(const ChatStore::StoredAttachment &attachment, bool shownAsImage) const;
     void notify(qint64 conversation, const QString &from, const QString &text, bool request);
     void updateUnread();
 
@@ -87,6 +95,9 @@ private:
     QAction *m_safetyAction = nullptr;
     QAction *m_blockedAction = nullptr;
     TrayIcon *m_tray = nullptr;
+    QToolButton *m_attach = nullptr;
+    QHash<qint64, QPixmap> m_previews; // attachment -> its picture, decrypted in memory
+    QHash<qint64, int> m_progress;     // attachment -> percent up or down
     qint64 m_lastNotified = 0;
     bool m_quitting = false;
     QWidget *m_composer = nullptr;

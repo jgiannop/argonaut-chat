@@ -10,6 +10,8 @@
 
 #include <QApplication>
 #include <QDir>
+#include <QFile>
+#include <QImage>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
@@ -217,6 +219,75 @@ private slots:
         blocked.unblockButton()->click();
         QCOMPARE(blocked.list()->count(), 0);
         QVERIFY(!me.isBlocked(QStringLiteral("spammer")));
+    }
+
+    void filesInTheWindow()
+    {
+        ServerStore serverStore(QDir::homePath() + QStringLiteral("/server4/server.sqlite"));
+        ChatServer server(&serverStore);
+        QVERIFY(server.listen());
+        const QUrl url(QStringLiteral("ws://127.0.0.1:%1").arg(server.port()));
+        auto signUp = [&](Messenger &m, const QString &name) {
+            std::optional<bool> ok;
+            m.signUp(url, name, [&](bool done, const QString &) { ok = done; });
+            return QTest::qWaitFor([&] { return ok.has_value(); }, 5000) && *ok;
+        };
+        ChatStore store(QDir::homePath() + QStringLiteral("/me4/chat.sqlite"));
+        KeyStore keys(&store);
+        Messenger me(&store, &keys);
+        QVERIFY(signUp(me, QStringLiteral("myself")));
+        ChatStore annaStore(QDir::homePath() + QStringLiteral("/anna4/chat.sqlite"));
+        KeyStore annaKeys(&annaStore);
+        Messenger anna(&annaStore, &annaKeys);
+        QVERIFY(signUp(anna, QStringLiteral("anna")));
+        MainWindow window(&store, &me);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+
+        // I write first (so Anna's answers are no request), with a file and a caption.
+        window.startChatWith(QStringLiteral("anna"));
+        QTRY_VERIFY(store.directConversation(QStringLiteral("anna")) > 0);
+        const qint64 toAnna = store.directConversation(QStringLiteral("anna"));
+        QTRY_COMPARE(window.currentConversation(), toAnna);
+        const QString notes = QDir::homePath() + QStringLiteral("/notes.txt");
+        {
+            QFile f(notes);
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            f.write("the notes");
+        }
+        QTest::keyClicks(window.composeField(), QStringLiteral("my notes"));
+        window.attachFile(notes);
+        QVERIFY(window.composeField()->toPlainText().isEmpty());
+        QTRY_COMPARE(window.messages()->count(), 1);
+        QCOMPARE(window.messages()->item(0)->text(), QStringLiteral("my notes"));
+        QVERIFY(window.messages()->item(0)->data(Qt::UserRole + 9).toString().contains(QStringLiteral("notes.txt")));
+        QTRY_VERIFY_WITH_TIMEOUT(annaStore.directConversation(QStringLiteral("myself")) > 0, 5000);
+        const qint64 fromMe = annaStore.directConversation(QStringLiteral("myself"));
+        anna.acceptRequest(fromMe);
+
+        // Anna sends a picture: it shows in the bubble once it is here.
+        QImage picture(400, 300, QImage::Format_RGB32);
+        picture.fill(QColor(30, 120, 200));
+        const QString photo = QDir::homePath() + QStringLiteral("/photo.png");
+        QVERIFY(picture.save(photo));
+        QVERIFY(anna.sendFile(fromMe, photo, QString()) > 0);
+        QTRY_COMPARE_WITH_TIMEOUT(window.messages()->count(), 2, 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(!window.messages()->item(1)->data(Qt::UserRole + 8).value<QPixmap>().isNull(), 5000);
+        const QPixmap preview = window.messages()->item(1)->data(Qt::UserRole + 8).value<QPixmap>();
+        QCOMPARE(preview.width(), 260); // scaled to fit, the shape kept
+        QCOMPARE(preview.height(), 195);
+        // Saved: the very file.
+        const qint64 attachment = window.messages()->item(1)->data(Qt::UserRole + 10).toLongLong();
+        const QString saved = QDir::homePath() + QStringLiteral("/saved.png");
+        QVERIFY(window.saveAttachment(attachment, saved));
+        QFile original(photo), copy(saved);
+        QVERIFY(original.open(QIODevice::ReadOnly) && copy.open(QIODevice::ReadOnly));
+        QCOMPARE(copy.readAll(), original.readAll());
+        if (qEnvironmentVariableIsSet("CHAT_TEST_GRAB")) {
+            window.resize(1000, 640);
+            QTest::qWait(200);
+            window.grab().save(qEnvironmentVariable("CHAT_TEST_GRAB"));
+        }
     }
 
     void notificationContent()

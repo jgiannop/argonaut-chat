@@ -23,6 +23,10 @@ program: [docs/how-signal-works.md](docs/how-signal-works.md).
 - **Message requests**: a stranger's first message waits as a request;
   until you accept, they get no receipts at all. Delete it, or block them
   (their messages are then dropped, and they are not told).
+- **Files and pictures** (📎, up to 25 MB): encrypted on your computer
+  with a new key each, as Signal does; the server keeps only the encrypted
+  bytes, for 30 days. Pictures show in the conversation; a click saves a
+  file. Kept encrypted on disk too.
 - **Notifications and the tray**: a notification for each new message
   (View › Notifications: name and message, name only, nothing, or off), the
   unread count on the tray and dock icons; closing the window keeps it

@@ -47,6 +47,14 @@ QByteArray sha512(const QByteArray &data)
     return out;
 }
 
+QByteArray sha256(const QByteArray &data)
+{
+    init();
+    QByteArray out(crypto_hash_sha256_BYTES, Qt::Uninitialized);
+    crypto_hash_sha256(bytes(out), bytes(data), quint64(data.size()));
+    return out;
+}
+
 QByteArray hmacSha256(const QByteArray &key, const QByteArray &data)
 {
     init();

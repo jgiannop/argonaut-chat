@@ -68,6 +68,15 @@ public:
     void startConversation(const QString &username, const std::function<void(qint64 conversation, const QString &error)> &done);
     // Mine: kept at once, sent when it can be. Note to Self stays here.
     qint64 send(qint64 conversation, const QString &text);
+    // A file (at most Attachment::MaxFileBytes), with an optional caption:
+    // encrypted here, kept here as the encrypted blob, uploaded, then the
+    // message with its key goes as any other. 0 and `error` if it cannot be.
+    qint64 sendFile(qint64 conversation, const QString &path, const QString &caption, QString *error = nullptr);
+    // An attachment here, decrypted in memory; nothing if it is not here (yet).
+    std::optional<QByteArray> attachmentData(qint64 attachment) const;
+    // Decrypted into `path` (the user's choice).
+    bool saveAttachment(qint64 attachment, const QString &path, QString *error = nullptr) const;
+
     // Opened: their messages are seen, and they get read receipts (not for a request).
     void markRead(qint64 conversation);
     // A message request: accepted (they get the receipts now), deleted, or
@@ -92,6 +101,8 @@ signals:
     void messageReceived(qint64 conversation, const QString &from, const QString &text, bool request);
     // For people: something went wrong that they should know of.
     void problem(const QString &text);
+    // An attachment going up or coming down.
+    void attachmentProgress(qint64 attachment, qint64 done, qint64 total);
 
 private:
     void setState(State state);
@@ -107,6 +118,10 @@ private:
 
     void flushOutbox();
     void deliver(const ChatStore::Message &message);
+    // A message of mine did not go: again later, or failed for good.
+    void deliveryFailed(qint64 message, const QString &error, const QString &why);
+    // Fetches their attachments, one at a time, in accepted conversations.
+    void downloadPending();
     // Encrypts `content` for every device of `to` and sends it.
     void sendContent(const QString &to, const Protocol::Content &content, const Done &done, bool retried = false);
     // Sessions with the devices of `to` that have none (or all, if `devices` lists them).
@@ -135,4 +150,5 @@ private:
     QTimer m_rotation; // checks now and then while connected
     std::function<qint64()> m_clock;
     QSet<qint64> m_inFlight; // outbox messages being sent
+    bool m_downloading = false;
 };

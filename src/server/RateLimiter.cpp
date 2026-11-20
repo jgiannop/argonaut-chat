@@ -33,16 +33,17 @@ RateLimiter::Bucket &RateLimiter::refill(const QString &key, const Rule &rule)
     return bucket;
 }
 
-bool RateLimiter::take(const QString &key, const Rule &rule, qint64 *retryAfterMs)
+bool RateLimiter::take(const QString &key, const Rule &rule, qint64 *retryAfterMs, double cost)
 {
     Bucket &bucket = refill(key, rule);
-    if (bucket.tokens >= 1.0) {
-        bucket.tokens -= 1.0;
+    if (bucket.tokens >= cost) {
+        bucket.tokens -= cost;
         return true;
     }
     if (retryAfterMs)
-        *retryAfterMs = rule.perSecond > 0 ? qint64(std::ceil((1.0 - bucket.tokens) / rule.perSecond * 1000.0))
-                                           : std::numeric_limits<qint64>::max();
+        *retryAfterMs = rule.perSecond > 0 && cost <= rule.capacity
+                            ? qint64(std::ceil((cost - bucket.tokens) / rule.perSecond * 1000.0))
+                            : std::numeric_limits<qint64>::max();
     return false;
 }
 

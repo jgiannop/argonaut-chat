@@ -37,6 +37,26 @@ What a person wrote, as compact JSON:
 Then **padded** as Signal pads: a byte `0x80`, then zeros up to a multiple of
 160 bytes, so the length of a message shows little.
 
+### Attachments
+
+A text may carry up to 10 attachments (its body is then their caption,
+maybe empty), each a pointer:
+
+```json
+"attachments": [{"id":"<32 hex>", "key":"…", "digest":"…", "size":12345,
+                 "name":"photo.jpg", "type":"image/jpeg"}]
+```
+
+The file is encrypted on the sender's computer (`src/core/Attachment.h`): a
+new random key (32 bytes), the file padded with zeros to Signal's size
+bucket (`max(541, 1.05^ceil(log_1.05 size))`, so the size shows little),
+then `nonce (24) | XChaCha20-Poly1305(key, nonce, padded)`; `digest` is the
+SHA-256 of that blob, which alone is uploaded. The recipient downloads the
+blob, checks its size and digest, decrypts, and drops the padding. At most
+25 MB a file. Names arrive without folders, control characters or
+direction marks; types must look like `type/subtype`. On disk, both sides
+keep the blob as it was (the key in the encrypted database).
+
 ## Layer 2: CipherMessage (binary)
 
 The padded Content encrypted by the sender's `Session` for one device:
@@ -103,7 +123,18 @@ people). The server sends one thing unasked: `{"op":"deliver","envelope":{…}}`
 | `ack` | `ids` (≤ 1000) | | only the device's own messages |
 | `prekeys` | `signedPreKey`?, `oneTimePreKeys` | `prekeys` | `denied` (a signature that is not the device's) |
 
+| `upload` | `size` (the blob's) | `id`, `chunk` (largest chunk) | `full` (the server's 5 GB are used) |
+| `upload-chunk` | `id`, `offset`, `data` (≤ 512 KiB) | `received` | `bad-offset` (with `received`), `not-found` (not yours) |
+| `download` | `id`, `offset`, `length` (≤ 512 KiB) | `data`, `size` | `not-found` (unknown, unfinished or expired) |
+
 Any request may also be answered `rate-limited`, with `retryAfter` (ms).
+
+Attachments are blobs the server cannot read, kept in `attachments/` next
+to its database for 30 days (unfinished uploads: a day), and handed to
+anyone signed in who knows the random id: the id is only ever in the
+encrypted message. Chunks go in order, each after the last was answered;
+only the uploader may append, never past the announced size. Per account:
+100 uploads an hour, 1 GB up and 5 GB down a day.
 
 - **Signing in** (`register`, `login`): the `signature` is the identity key's
   Ed25519 signature of `"ArgonautChat sign-in v1" 0x00 · nonce · device (4,

@@ -1,6 +1,8 @@
 #include "ServerStore.h"
 
+#include "Attachment.h"
 #include "CipherSql.h"
+#include "Crypto.h"
 
 #include <QDateTime>
 #include <QDir>
@@ -44,6 +46,9 @@ ServerStore::ServerStore(const QString &file)
         return;
     }
     QFile::setPermissions(path, QFile::ReadOwner | QFile::WriteOwner);
+    m_attachments = folder + QStringLiteral("/attachments");
+    QDir().mkpath(m_attachments);
+    QFile::setPermissions(m_attachments, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
     QSqlQuery(m_db).exec(QStringLiteral("PRAGMA foreign_keys = ON"));
     QSqlQuery(m_db).exec(QStringLiteral("PRAGMA journal_mode = WAL"));
     createTables();
@@ -93,6 +98,108 @@ void ServerStore::createTables()
                           " received INTEGER NOT NULL,"
                           " message BLOB NOT NULL)"));
     q.exec(QStringLiteral("CREATE INDEX IF NOT EXISTS queue_by_device ON queue(to_user, to_device, id)"));
+    q.exec(QStringLiteral("CREATE TABLE IF NOT EXISTS attachments ("
+                          " id TEXT PRIMARY KEY,"
+                          " owner TEXT NOT NULL,"
+                          " size INTEGER NOT NULL,"
+                          " received INTEGER NOT NULL DEFAULT 0,"
+                          " created INTEGER NOT NULL)"));
+}
+
+QString ServerStore::attachmentFile(const QString &id) const
+{
+    return m_attachments + QLatin1Char('/') + id;
+}
+
+QString ServerStore::createAttachment(const QString &owner, qint64 size)
+{
+    const QString id = QString::fromLatin1(Crypto::randomBytes(16).toHex());
+    QFile file(attachmentFile(id));
+    if (!file.open(QIODevice::WriteOnly | QIODevice::NewOnly))
+        return {};
+    file.close();
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("INSERT INTO attachments (id, owner, size, created) VALUES (?, ?, ?, ?)"));
+    q.addBindValue(id);
+    q.addBindValue(owner);
+    q.addBindValue(size);
+    q.addBindValue(QDateTime::currentMSecsSinceEpoch());
+    if (!q.exec()) {
+        QFile::remove(attachmentFile(id));
+        return {};
+    }
+    return id;
+}
+
+std::optional<ServerStore::AttachmentInfo> ServerStore::attachment(const QString &id) const
+{
+    if (!Attachment::isValidId(id))
+        return std::nullopt;
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT owner, size, received, created FROM attachments WHERE id = ?"));
+    q.addBindValue(id);
+    if (!q.exec() || !q.next())
+        return std::nullopt;
+    return AttachmentInfo{q.value(0).toString(), q.value(1).toLongLong(), q.value(2).toLongLong(),
+                          q.value(3).toLongLong()};
+}
+
+bool ServerStore::appendAttachment(const QString &id, const QString &owner, qint64 offset, const QByteArray &data)
+{
+    const auto info = attachment(id);
+    if (!info || info->owner != owner || offset != info->received || data.isEmpty()
+        || offset + data.size() > info->size)
+        return false;
+    QFile file(attachmentFile(id));
+    if (!file.open(QIODevice::ReadWrite) || file.size() < offset || !file.resize(offset) || !file.seek(offset)
+        || file.write(data) != data.size() || !file.flush())
+        return false;
+    file.close();
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("UPDATE attachments SET received = ? WHERE id = ? AND received = ?"));
+    q.addBindValue(offset + data.size());
+    q.addBindValue(id);
+    q.addBindValue(offset);
+    return q.exec() && q.numRowsAffected() == 1;
+}
+
+QByteArray ServerStore::readAttachment(const QString &id, qint64 offset, qint64 length) const
+{
+    const auto info = attachment(id);
+    if (!info || !info->complete() || offset < 0 || length <= 0 || offset >= info->size)
+        return {};
+    QFile file(attachmentFile(id));
+    if (!file.open(QIODevice::ReadOnly) || !file.seek(offset))
+        return {};
+    return file.read(qMin(length, info->size - offset));
+}
+
+qint64 ServerStore::storedAttachmentBytes() const
+{
+    QSqlQuery q(m_db);
+    q.exec(QStringLiteral("SELECT COALESCE(SUM(size), 0) FROM attachments"));
+    return q.next() ? q.value(0).toLongLong() : 0;
+}
+
+int ServerStore::removeOldAttachments(qint64 now, qint64 keepMs, qint64 unfinishedMs)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT id FROM attachments WHERE (received = size AND created < ?)"
+                             " OR (received < size AND created < ?)"));
+    q.addBindValue(now - keepMs);
+    q.addBindValue(now - unfinishedMs);
+    q.exec();
+    QStringList ids;
+    while (q.next())
+        ids << q.value(0).toString();
+    QSqlQuery del(m_db);
+    del.prepare(QStringLiteral("DELETE FROM attachments WHERE id = ?"));
+    for (const QString &id : ids) {
+        QFile::remove(attachmentFile(id));
+        del.bindValue(0, id);
+        del.exec();
+    }
+    return int(ids.size());
 }
 
 bool ServerStore::accountExists(const QString &username) const

@@ -93,6 +93,35 @@ public:
     bool isBlocked(const QString &username) const;
     QStringList blocked() const;
 
+    // Attachments of messages. The files are kept as the encrypted blobs
+    // (Attachment.h) in the folder "attachments" next to the database (0700);
+    // their keys are here, in the encrypted database.
+    struct StoredAttachment
+    {
+        qint64 id = 0;
+        qint64 message = 0;
+        QString name;
+        QString type;
+        qint64 size = 0; // the file's
+        QByteArray key;
+        QByteArray digest;
+        QString remoteId; // the server's
+        QString file;     // the blob's file name in attachmentFolder(); empty until here
+        QString state;    // "upload", "sent", "download", "ready", "failed"
+    };
+    qint64 addAttachment(const StoredAttachment &attachment);
+    StoredAttachment attachment(qint64 id) const;
+    QList<StoredAttachment> attachments(qint64 message) const;
+    // Theirs still to fetch, in accepted conversations only.
+    QList<StoredAttachment> pendingDownloads() const;
+    void setAttachmentState(qint64 id, const QString &state);
+    void setAttachmentUploaded(qint64 id, const QString &remoteId);
+    void setAttachmentFile(qint64 id, const QString &file);
+    QString attachmentFolder() const { return m_attachments; }
+    // A blob into the folder: its new file name (empty if it could not be written).
+    QString writeBlob(const QByteArray &blob);
+    QByteArray readBlob(const QString &file) const;
+
     // The open database, for KeyStore (the same file).
     QSqlDatabase database() const { return m_db; }
 
@@ -106,5 +135,6 @@ private:
     QSqlDatabase m_db;
     QString m_connection;
     QString m_error;
+    QString m_attachments; // the folder
     bool m_encrypted = false;
 };

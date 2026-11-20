@@ -1,7 +1,12 @@
 #include "Messenger.h"
 
+#include "Attachment.h"
 #include "SafetyNumber.h"
 
+#include <QFile>
+#include <QFileInfo>
+#include <QMimeDatabase>
+#include <QSaveFile>
 #include <QTimeZone>
 
 Messenger::Messenger(ChatStore *store, KeyStore *keys, QObject *parent)
@@ -171,6 +176,7 @@ void Messenger::onConnected()
                        rotateSignedPreKey();
                        m_rotation.start();
                        flushOutbox();
+                       downloadPending();
                    });
 }
 
@@ -183,6 +189,7 @@ void Messenger::onConnectionLost(const QString &why)
     if (m_state != State::Connecting && m_state != State::Online)
         return;
     m_inFlight.clear();
+    m_downloading = false;
     m_replenishing = false;
     m_rotating = false;
     m_rotation.stop();
@@ -355,36 +362,191 @@ void Messenger::flushOutbox()
 
 void Messenger::deliver(const ChatStore::Message &message)
 {
-    if (m_inFlight.contains(message.id))
+    if (m_inFlight.contains(message.id) || m_state != State::Online)
         return;
     const ChatStore::Conversation c = m_store->conversation(message.conversation);
+    if (c.kind != QLatin1String("direct")) {
+        m_store->setStatus(message.id, QStringLiteral("failed"));
+        return;
+    }
+    const qint64 id = message.id;
+
+    // Its attachments first, one at a time; then the message with their keys.
+    const QList<ChatStore::StoredAttachment> attachments = m_store->attachments(id);
+    for (const ChatStore::StoredAttachment &a : attachments) {
+        if (a.state != QLatin1String("upload"))
+            continue;
+        const QByteArray blob = m_store->readBlob(a.file);
+        if (blob.isEmpty()) {
+            m_store->setAttachmentState(a.id, QStringLiteral("failed"));
+            deliveryFailed(id, QStringLiteral("missing"), tr("The file to send is no longer here."));
+            return;
+        }
+        m_inFlight.insert(id);
+        const qint64 attachmentId = a.id;
+        m_client.uploadAttachment(
+            blob, [this, attachmentId](qint64 done, qint64 total) { emit attachmentProgress(attachmentId, done, total); },
+            [this, id, attachmentId](const QString &remoteId, const ChatClient::Result &result) {
+                m_inFlight.remove(id);
+                if (!result.ok) {
+                    if (result.error == QLatin1String("rate-limited"))
+                        m_retryAfterMs = qint64(result.data.value(QStringLiteral("retryAfter")).toDouble());
+                    deliveryFailed(id, result.error,
+                                   result.error == QLatin1String("full") ? tr("The server has no room for files now.")
+                                                                         : result.message);
+                    return;
+                }
+                m_store->setAttachmentUploaded(attachmentId, remoteId);
+                deliver(m_store->message(id)); // the next one, or the message
+            });
+        return;
+    }
+
     Protocol::Content content;
     content.type = Protocol::Content::Type::Text;
     content.id = message.uid;
     content.sentAt = message.sentAt.toMSecsSinceEpoch();
     content.body = message.body;
-    if (c.kind != QLatin1String("direct") || Protocol::encodeContent(content).isEmpty()) {
-        m_store->setStatus(message.id, QStringLiteral("failed"));
+    for (const ChatStore::StoredAttachment &a : attachments)
+        content.attachments.append({a.remoteId, a.key, a.digest, a.size, a.name, a.type});
+    if (Protocol::encodeContent(content).isEmpty()) {
+        m_store->setStatus(id, QStringLiteral("failed"));
         return;
     }
-    m_inFlight.insert(message.id);
-    const qint64 id = message.id;
+    m_inFlight.insert(id);
     sendContent(c.peer, content, [this, id](bool ok, const QString &error) {
         m_inFlight.remove(id);
-        const QString status = m_store->message(id).status;
         if (ok) {
-            if (status == QLatin1String("sending")) // a receipt may have come first
+            if (m_store->message(id).status == QLatin1String("sending")) // a receipt may have come first
                 m_store->setStatus(id, QStringLiteral("sent"));
-        } else if (error == QLatin1String("rate-limited")) {
-            // Too many at once: the outbox goes again when the server says.
-            if (!m_retry.isActive())
-                m_retry.start(int(qBound(qint64(1000), m_retryAfterMs, qint64(10 * 60 * 1000))));
-        } else if (error != QLatin1String("disconnected")) {
-            m_store->setStatus(id, QStringLiteral("failed"));
-            emit problem(error);
+        } else {
+            deliveryFailed(id, error, error);
         }
-        // Disconnected: it stays in the outbox for next time.
     });
+}
+
+void Messenger::deliveryFailed(qint64 message, const QString &error, const QString &why)
+{
+    if (error == QLatin1String("disconnected"))
+        return; // it stays in the outbox for next time
+    if (error == QLatin1String("rate-limited")) {
+        // Too many at once: the outbox goes again when the server says.
+        if (!m_retry.isActive())
+            m_retry.start(int(qBound(qint64(1000), m_retryAfterMs, qint64(10 * 60 * 1000))));
+        return;
+    }
+    m_store->setStatus(message, QStringLiteral("failed"));
+    emit problem(why.isEmpty() ? error : why);
+}
+
+qint64 Messenger::sendFile(qint64 conversation, const QString &path, const QString &caption, QString *error)
+{
+    auto fail = [error](const QString &why) {
+        if (error)
+            *error = why;
+        return qint64(0);
+    };
+    const ChatStore::Conversation c = m_store->conversation(conversation);
+    if (c.id == 0)
+        return fail(tr("No such conversation."));
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly))
+        return fail(tr("The file could not be read."));
+    if (file.size() > Attachment::MaxFileBytes)
+        return fail(tr("The file is larger than %1 MB.").arg(Attachment::MaxFileBytes / (1024 * 1024)));
+    const QByteArray data = file.readAll();
+    const auto sealed = Attachment::encrypt(data);
+    if (!sealed)
+        return fail(tr("The file could not be encrypted."));
+    const QString blobFile = m_store->writeBlob(sealed->blob);
+    if (blobFile.isEmpty())
+        return fail(tr("The file could not be kept here."));
+    QString type = QMimeDatabase().mimeTypeForFileNameAndData(path, data.left(4096)).name();
+    if (!Attachment::isValidType(type))
+        type = QStringLiteral("application/octet-stream");
+
+    const bool direct = c.kind == QLatin1String("direct");
+    if (direct && c.request)
+        acceptRequest(conversation);
+    const Protocol::Content content = Protocol::Content::text(caption);
+    const ChatStore::Message message =
+        m_store->addMessage(conversation, caption, QString(), QDateTime::fromMSecsSinceEpoch(content.sentAt, QTimeZone::utc()),
+                            content.id, direct ? QStringLiteral("sending") : QStringLiteral("sent"));
+    if (message.id == 0)
+        return fail(tr("The message could not be kept."));
+    ChatStore::StoredAttachment a;
+    a.message = message.id;
+    a.name = Attachment::safeName(QFileInfo(path).fileName());
+    a.type = type;
+    a.size = data.size();
+    a.key = sealed->key;
+    a.digest = sealed->digest;
+    a.file = blobFile;
+    a.state = direct ? QStringLiteral("upload") : QStringLiteral("ready"); // Note to Self: here only
+    m_store->addAttachment(a);
+    if (direct && m_state == State::Online)
+        deliver(m_store->message(message.id));
+    return message.id;
+}
+
+std::optional<QByteArray> Messenger::attachmentData(qint64 attachment) const
+{
+    const ChatStore::StoredAttachment a = m_store->attachment(attachment);
+    if (a.id == 0 || a.file.isEmpty())
+        return std::nullopt;
+    return Attachment::decrypt(m_store->readBlob(a.file), a.key, a.digest, a.size);
+}
+
+bool Messenger::saveAttachment(qint64 attachment, const QString &path, QString *error) const
+{
+    const auto data = attachmentData(attachment);
+    if (!data) {
+        if (error)
+            *error = tr("The file is not here.");
+        return false;
+    }
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly) || file.write(*data) != data->size() || !file.commit()) {
+        if (error)
+            *error = file.errorString();
+        return false;
+    }
+    return true;
+}
+
+void Messenger::downloadPending()
+{
+    if (m_state != State::Online || m_downloading)
+        return;
+    const QList<ChatStore::StoredAttachment> pending = m_store->pendingDownloads();
+    if (pending.isEmpty())
+        return;
+    const ChatStore::StoredAttachment a = pending.first();
+    m_downloading = true;
+    m_client.downloadAttachment(
+        a.remoteId, Attachment::blobSize(a.size),
+        [this, a](qint64 done, qint64 total) { emit attachmentProgress(a.id, done, total); },
+        [this, a](const QByteArray &blob, const ChatClient::Result &result) {
+            m_downloading = false;
+            if (result.ok) {
+                // Kept only if it is what the message promised.
+                const QString file = Attachment::decrypt(blob, a.key, a.digest, a.size) ? m_store->writeBlob(blob)
+                                                                                        : QString();
+                if (!file.isEmpty())
+                    m_store->setAttachmentFile(a.id, file);
+                m_store->setAttachmentState(a.id, file.isEmpty() ? QStringLiteral("failed") : QStringLiteral("ready"));
+            } else if (result.error == QLatin1String("disconnected")) {
+                return; // on the next sign-in
+            } else if (result.error == QLatin1String("rate-limited")) {
+                QTimer::singleShot(int(qBound(qint64(1000), qint64(result.data.value(QStringLiteral("retryAfter")).toDouble()),
+                                              qint64(10 * 60 * 1000))),
+                                   this, &Messenger::downloadPending);
+                return;
+            } else {
+                m_store->setAttachmentState(a.id, QStringLiteral("failed")); // expired, or never there
+            }
+            downloadPending(); // the next one
+        });
 }
 
 void Messenger::sendContent(const QString &to, const Protocol::Content &content, const Done &done, bool retried)
@@ -470,6 +632,7 @@ void Messenger::acceptRequest(qint64 conversation)
         return;
     m_store->setAccepted(conversation);
     markRead(conversation); // read covers delivered
+    downloadPending();      // their files, now
 }
 
 void Messenger::deleteConversation(qint64 conversation)
@@ -558,11 +721,30 @@ void Messenger::handleContent(const QString &from, const Protocol::Envelope &env
         return;
     // Their clock, unless it is far ahead of the server's.
     const qint64 sentAt = content.sentAt > envelope.serverTime + 5 * 60 * 1000 ? envelope.serverTime : content.sentAt;
-    m_store->addMessage(conversation, content.body, from, QDateTime::fromMSecsSinceEpoch(sentAt, QTimeZone::utc()), content.id);
+    const ChatStore::Message message = m_store->addMessage(
+        conversation, content.body, from, QDateTime::fromMSecsSinceEpoch(sentAt, QTimeZone::utc()), content.id);
+    // Its attachments: fetched now, or once a request is accepted.
+    for (const Attachment::Pointer &pointer : content.attachments) {
+        ChatStore::StoredAttachment a;
+        a.message = message.id;
+        a.name = pointer.name;
+        a.type = pointer.type;
+        a.size = pointer.size;
+        a.key = pointer.key;
+        a.digest = pointer.digest;
+        a.remoteId = pointer.id;
+        a.state = QStringLiteral("download");
+        m_store->addAttachment(a);
+    }
     const bool request = m_store->conversation(conversation).request;
-    if (!request)
+    if (!request) {
         sendReceipt(from, Protocol::Content::Receipt::Delivered, {content.id});
-    emit messageReceived(conversation, from, content.body, request);
+        downloadPending();
+    }
+    const QString shown = content.body.isEmpty() && !content.attachments.isEmpty()
+                              ? QStringLiteral("📎 ") + content.attachments.first().name
+                              : content.body;
+    emit messageReceived(conversation, from, shown, request);
 }
 
 // --- Safety numbers ---

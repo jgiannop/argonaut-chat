@@ -6,6 +6,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QRegularExpression>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QStandardPaths>
@@ -29,6 +30,9 @@ ChatStore::ChatStore(const QString &file, const QByteArray &key, QObject *parent
     const QString folder = QFileInfo(path).absolutePath();
     QDir().mkpath(folder);
     QFile::setPermissions(folder, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+    m_attachments = folder + QStringLiteral("/attachments");
+    QDir().mkpath(m_attachments);
+    QFile::setPermissions(m_attachments, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
     CipherSql::registerDriver();
     if (!key.isEmpty()) {
         if (CipherSql::password(key).isEmpty()) {
@@ -104,6 +108,18 @@ void ChatStore::createTables()
     q.exec(QStringLiteral("CREATE TABLE IF NOT EXISTS blocked ("
                           " username TEXT PRIMARY KEY,"
                           " since INTEGER NOT NULL)"));
+    q.exec(QStringLiteral("CREATE TABLE IF NOT EXISTS attachments ("
+                          " id INTEGER PRIMARY KEY,"
+                          " message INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,"
+                          " name TEXT NOT NULL,"
+                          " type TEXT NOT NULL,"
+                          " size INTEGER NOT NULL,"
+                          " key BLOB NOT NULL,"
+                          " digest BLOB NOT NULL,"
+                          " remote_id TEXT NOT NULL DEFAULT '',"
+                          " file TEXT NOT NULL DEFAULT '',"
+                          " state TEXT NOT NULL)"));
+    q.exec(QStringLiteral("CREATE INDEX IF NOT EXISTS attachments_by_message ON attachments(message)"));
 }
 
 namespace {
@@ -141,7 +157,10 @@ QList<ChatStore::Conversation> ChatStore::conversations() const
     QList<Conversation> out;
     QSqlQuery q(m_db);
     q.exec(QStringLiteral("SELECT c.id, c.kind, c.title, c.peer, c.last_activity, c.state,"
-                          " (SELECT body FROM messages m WHERE m.conversation = c.id ORDER BY sent_at DESC, id DESC LIMIT 1),"
+                          // The newest message: its text, or else its first attachment's name.
+                          " (SELECT CASE WHEN m.body = '' THEN COALESCE('📎 ' || (SELECT a.name FROM attachments a"
+                          "  WHERE a.message = m.id ORDER BY a.id LIMIT 1), '') ELSE m.body END"
+                          "  FROM messages m WHERE m.conversation = c.id ORDER BY sent_at DESC, id DESC LIMIT 1),"
                           " (SELECT COUNT(*) FROM messages m WHERE m.conversation = c.id AND m.seen = 0 AND m.author <> '')"
                           " FROM conversations c ORDER BY c.last_activity DESC, c.id DESC"));
     while (q.next()) {
@@ -221,9 +240,30 @@ void ChatStore::deleteConversation(qint64 conversation)
     if (!m_db.transaction())
         return;
     QSqlQuery q(m_db);
+    // Never Note to Self.
+    q.prepare(QStringLiteral("SELECT 1 FROM conversations WHERE id = ? AND kind <> 'self'"));
+    q.addBindValue(conversation);
+    if (!q.exec() || !q.next()) {
+        m_db.rollback();
+        return;
+    }
+    // Its attachments' files go too.
+    QStringList files;
+    q.prepare(QStringLiteral("SELECT a.file FROM attachments a JOIN messages m ON a.message = m.id"
+                             " WHERE m.conversation = ? AND a.file <> ''"));
+    q.addBindValue(conversation);
+    q.exec();
+    while (q.next())
+        files << q.value(0).toString();
+    q.prepare(QStringLiteral("DELETE FROM attachments WHERE message IN"
+                             " (SELECT id FROM messages WHERE conversation = ?)"));
+    q.addBindValue(conversation);
+    q.exec();
     q.prepare(QStringLiteral("DELETE FROM messages WHERE conversation = ?"));
     q.addBindValue(conversation);
     q.exec();
+    for (const QString &name : files)
+        QFile::remove(m_attachments + QLatin1Char('/') + name);
     q.prepare(QStringLiteral("DELETE FROM conversations WHERE id = ? AND kind <> 'self'"));
     q.addBindValue(conversation);
     q.exec();
@@ -412,4 +452,140 @@ void ChatStore::markRead(qint64 conversation)
     q.exec();
     if (q.numRowsAffected() > 0)
         emit conversationsChanged();
+}
+
+namespace {
+
+const QString kAttachmentColumns =
+    QStringLiteral("id, message, name, type, size, key, digest, remote_id, file, state");
+
+ChatStore::StoredAttachment attachmentFrom(const QSqlQuery &q)
+{
+    ChatStore::StoredAttachment a;
+    a.id = q.value(0).toLongLong();
+    a.message = q.value(1).toLongLong();
+    a.name = q.value(2).toString();
+    a.type = q.value(3).toString();
+    a.size = q.value(4).toLongLong();
+    a.key = q.value(5).toByteArray();
+    a.digest = q.value(6).toByteArray();
+    a.remoteId = q.value(7).toString();
+    a.file = q.value(8).toString();
+    a.state = q.value(9).toString();
+    return a;
+}
+
+void updateAttachment(const QSqlDatabase &db, qint64 id, const QString &column, const QVariant &value)
+{
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral("UPDATE attachments SET %1 = ? WHERE id = ?").arg(column));
+    q.addBindValue(value);
+    q.addBindValue(id);
+    q.exec();
+}
+
+} // namespace
+
+qint64 ChatStore::addAttachment(const StoredAttachment &a)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("INSERT INTO attachments (message, name, type, size, key, digest, remote_id, file, state)"
+                             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+    q.addBindValue(a.message);
+    q.addBindValue(text(a.name));
+    q.addBindValue(text(a.type));
+    q.addBindValue(a.size);
+    q.addBindValue(a.key);
+    q.addBindValue(a.digest);
+    q.addBindValue(text(a.remoteId));
+    q.addBindValue(text(a.file));
+    q.addBindValue(text(a.state));
+    if (!q.exec()) {
+        m_error = q.lastError().text();
+        return 0;
+    }
+    const qint64 id = q.lastInsertId().toLongLong();
+    emit messagesChanged(message(a.message).conversation);
+    emit conversationsChanged();
+    return id;
+}
+
+ChatStore::StoredAttachment ChatStore::attachment(qint64 id) const
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT %1 FROM attachments WHERE id = ?").arg(kAttachmentColumns));
+    q.addBindValue(id);
+    if (q.exec() && q.next())
+        return attachmentFrom(q);
+    return {};
+}
+
+QList<ChatStore::StoredAttachment> ChatStore::attachments(qint64 messageId) const
+{
+    QList<StoredAttachment> out;
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT %1 FROM attachments WHERE message = ? ORDER BY id").arg(kAttachmentColumns));
+    q.addBindValue(messageId);
+    q.exec();
+    while (q.next())
+        out.append(attachmentFrom(q));
+    return out;
+}
+
+QList<ChatStore::StoredAttachment> ChatStore::pendingDownloads() const
+{
+    QList<StoredAttachment> out;
+    QSqlQuery q(m_db);
+    q.exec(QStringLiteral("SELECT a.id, a.message, a.name, a.type, a.size, a.key, a.digest, a.remote_id, a.file,"
+                          " a.state FROM attachments a JOIN messages m ON a.message = m.id"
+                          " JOIN conversations c ON m.conversation = c.id"
+                          " WHERE a.state = 'download' AND c.state = 'accepted' ORDER BY a.id"));
+    while (q.next())
+        out.append(attachmentFrom(q));
+    return out;
+}
+
+void ChatStore::setAttachmentState(qint64 id, const QString &state)
+{
+    updateAttachment(m_db, id, QStringLiteral("state"), state);
+    emit messagesChanged(message(attachment(id).message).conversation);
+}
+
+void ChatStore::setAttachmentUploaded(qint64 id, const QString &remoteId)
+{
+    updateAttachment(m_db, id, QStringLiteral("remote_id"), remoteId);
+    updateAttachment(m_db, id, QStringLiteral("state"), QStringLiteral("sent"));
+}
+
+void ChatStore::setAttachmentFile(qint64 id, const QString &file)
+{
+    updateAttachment(m_db, id, QStringLiteral("file"), file);
+}
+
+QString ChatStore::writeBlob(const QByteArray &blob)
+{
+    for (int tries = 0; tries < 5; ++tries) {
+        const QString name = QUuid::createUuid().toString(QUuid::Id128);
+        QFile file(m_attachments + QLatin1Char('/') + name);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::NewOnly))
+            continue; // taken: another name
+        file.setPermissions(QFile::ReadOwner | QFile::WriteOwner);
+        if (file.write(blob) == blob.size() && file.flush())
+            return name;
+        file.remove();
+        return {};
+    }
+    return {};
+}
+
+QByteArray ChatStore::readBlob(const QString &name) const
+{
+    // Only names of ours: never a way out of the folder.
+    static const QRegularExpression ours(QStringLiteral("^[0-9a-f]{32}$"));
+    if (!ours.match(name).hasMatch())
+        return {};
+    QFile file(m_attachments + QLatin1Char('/') + name);
+    if (!file.open(QIODevice::ReadOnly))
+        return {};
+    return file.readAll();
 }
