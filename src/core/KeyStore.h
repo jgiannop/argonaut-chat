@@ -44,9 +44,20 @@ public:
     // Everything of the account (after a refused sign-up).
     void forgetAccount();
 
-    bool addSignedPreKey(const X3dh::SignedPreKey &key);
+    // `created`: ms since the epoch (-1: now). `uploaded`: the server has it.
+    bool addSignedPreKey(const X3dh::SignedPreKey &key, qint64 created = -1, bool uploaded = true);
     std::optional<X3dh::SignedPreKey> signedPreKey(quint32 id) const;
     std::optional<X3dh::SignedPreKey> latestSignedPreKey() const;
+    struct SignedPreKeyInfo
+    {
+        quint32 id = 0;
+        qint64 created = 0;
+        bool uploaded = false;
+    };
+    // Oldest first.
+    QList<SignedPreKeyInfo> signedPreKeys() const;
+    void setSignedPreKeyUploaded(quint32 id);
+    void removeSignedPreKey(quint32 id);
     bool addOneTimePreKeys(const QList<X3dh::OneTimePreKey> &keys);
     std::optional<X3dh::OneTimePreKey> oneTimePreKey(quint32 id) const;
     void removeOneTimePreKey(quint32 id);

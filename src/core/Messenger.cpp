@@ -16,6 +16,8 @@ Messenger::Messenger(ChatStore *store, KeyStore *keys, QObject *parent)
     }
     m_state = hasAccount() ? State::Offline : State::NoAccount;
 
+    m_rotation.setInterval(6 * 3600 * 1000);
+    connect(&m_rotation, &QTimer::timeout, this, &Messenger::rotateSignedPreKey);
     m_retry.setSingleShot(true);
     connect(&m_retry, &QTimer::timeout, this, [this] {
         if (m_state == State::Online)
@@ -67,7 +69,7 @@ void Messenger::signUp(const QUrl &server, const QString &username, const Done &
     }
     const X3dh::SignedPreKey signedPreKey = X3dh::makeSignedPreKey(account.identity, m_keys->takePreKeyIds(1));
     m_signUpPreKeys = X3dh::makeOneTimePreKeys(m_keys->takePreKeyIds(PreKeyBatch), PreKeyBatch);
-    m_keys->addSignedPreKey(signedPreKey);
+    m_keys->addSignedPreKey(signedPreKey, now(), true); // sent with the sign-up
     m_keys->addOneTimePreKeys(m_signUpPreKeys);
     m_account = account;
     m_signUpDone = done;
@@ -164,6 +166,8 @@ void Messenger::onConnected()
                        m_serverPreKeys = result.data.value(QStringLiteral("prekeys")).toInt();
                        setState(State::Online);
                        replenishPreKeys();
+                       rotateSignedPreKey();
+                       m_rotation.start();
                        flushOutbox();
                    });
 }
@@ -178,6 +182,8 @@ void Messenger::onConnectionLost(const QString &why)
         return;
     m_inFlight.clear();
     m_replenishing = false;
+    m_rotating = false;
+    m_rotation.stop();
     setState(State::Offline);
     scheduleReconnect();
 }
@@ -201,6 +207,44 @@ void Messenger::replenishPreKeys()
         m_replenishing = false;
         if (result.ok)
             m_serverPreKeys = result.data.value(QStringLiteral("prekeys")).toInt();
+    });
+}
+
+qint64 Messenger::now() const
+{
+    return m_clock ? m_clock() : QDateTime::currentMSecsSinceEpoch();
+}
+
+void Messenger::rotateSignedPreKey()
+{
+    if (m_state != State::Online || m_rotating || !hasAccount())
+        return;
+    const qint64 time = now();
+    QList<KeyStore::SignedPreKeyInfo> keys = m_keys->signedPreKeys();
+
+    // Old ones: kept 30 days after the next one took over, then gone.
+    for (int i = 0; i + 1 < keys.size(); ++i) {
+        if (keys.at(i + 1).uploaded && time - keys.at(i + 1).created > SignedPreKeyGraceMs)
+            m_keys->removeSignedPreKey(keys.at(i).id);
+    }
+
+    // The newest: made if it is time, uploaded if the server does not have it yet.
+    std::optional<X3dh::SignedPreKey> latest = m_keys->latestSignedPreKey();
+    const bool due = keys.isEmpty() || time - keys.last().created >= SignedPreKeyLifetimeMs;
+    if (latest && !due && keys.last().uploaded)
+        return;
+    if (!latest || due) {
+        latest = X3dh::makeSignedPreKey(m_account->identity, m_keys->takePreKeyIds(1));
+        if (!m_keys->addSignedPreKey(*latest, time, false))
+            return;
+    }
+    m_rotating = true;
+    const quint32 id = latest->id;
+    m_client.uploadPreKeys(Protocol::publicPart(*latest), {}, [this, id](const ChatClient::Result &result) {
+        m_rotating = false;
+        if (result.ok)
+            m_keys->setSignedPreKeyUploaded(id);
+        // Otherwise it goes again on the next check.
     });
 }
 

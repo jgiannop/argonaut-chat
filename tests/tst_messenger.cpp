@@ -290,6 +290,65 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(alice.last(toBob), QString("hello you"), kWait);
     }
 
+    void signedPreKeyRotation()
+    {
+        const qint64 day = 24LL * 3600 * 1000;
+        qint64 clock = QDateTime::currentMSecsSinceEpoch();
+        Device bob(file("bob"));
+        bob.messenger->setClock([&clock] { return clock; });
+        QVERIFY(signUp(bob, "bob"));
+        auto serverKey = [this] { return m_serverStore->takeBundle("bob", 1, false)->signedPreKeyId; };
+        const quint32 first = serverKey();
+        auto restart = [&] {
+            bob.messenger->stop();
+            bob.messenger->start();
+            return QTest::qWaitFor([&] { return bob.messenger->state() == Messenger::State::Online; }, kWait);
+        };
+
+        // Within the week: the same key.
+        clock += 6 * day;
+        QVERIFY(restart());
+        QTest::qWait(200);
+        QCOMPARE(serverKey(), first);
+        QCOMPARE(bob.keys->signedPreKeys().size(), 1);
+
+        // Alice starts a conversation with the old key just before it changes.
+        Device alice(file("alice"));
+        QVERIFY(signUp(alice, "alice"));
+        const qint64 toBob = startConversation(alice, "bob");
+        QVERIFY(toBob > 0);
+
+        // A week on: a new key on the server; the old one still kept here.
+        clock += 2 * day;
+        QVERIFY(restart());
+        QTRY_VERIFY_WITH_TIMEOUT(serverKey() != first, kWait);
+        const quint32 second = serverKey();
+        QTRY_VERIFY_WITH_TIMEOUT(bob.keys->signedPreKeys().last().uploaded, kWait);
+        QCOMPARE(bob.keys->signedPreKeys().size(), 2);
+        QCOMPARE(bob.keys->latestSignedPreKey()->id, second);
+        // Alice's message, started with the old key, still opens.
+        alice.messenger->send(toBob, "made with the old key");
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("alice") > 0, kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(bob.store->directConversation("alice")), QString("made with the old key"),
+                                  kWait);
+
+        // Thirty days after it was replaced, the first goes; a third comes.
+        clock += 31 * day;
+        QVERIFY(restart());
+        QTRY_VERIFY_WITH_TIMEOUT(serverKey() != second, kWait);
+        QTRY_VERIFY_WITH_TIMEOUT(bob.keys->signedPreKeys().last().uploaded, kWait);
+        QVERIFY(!bob.keys->signedPreKey(first));
+        QVERIFY(bob.keys->signedPreKey(second)); // replaced just now: kept
+        QCOMPARE(bob.keys->signedPreKeys().size(), 2);
+
+        // One made but never uploaded (the connection went): sent on the next sign-in.
+        const X3dh::SignedPreKey pending = X3dh::makeSignedPreKey(bob.keys->account()->identity, 9999);
+        QVERIFY(bob.keys->addSignedPreKey(pending, clock + 1, false));
+        QVERIFY(restart());
+        QTRY_COMPARE_WITH_TIMEOUT(serverKey(), 9999u, kWait);
+        QTRY_VERIFY_WITH_TIMEOUT(bob.keys->signedPreKeys().last().uploaded, kWait);
+    }
+
     void keyStoreTrust()
     {
         Device alice(file("alice"));

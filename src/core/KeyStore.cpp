@@ -29,6 +29,13 @@ void KeyStore::createTables()
                           " secret_key BLOB NOT NULL,"
                           " signature BLOB NOT NULL,"
                           " created INTEGER NOT NULL)"));
+    // Added with the rotation of signed prekeys.
+    bool hasUploaded = false;
+    q.exec(QStringLiteral("PRAGMA table_info(signed_prekeys)"));
+    while (q.next())
+        hasUploaded = hasUploaded || q.value(1).toString() == QLatin1String("uploaded");
+    if (!hasUploaded)
+        q.exec(QStringLiteral("ALTER TABLE signed_prekeys ADD COLUMN uploaded INTEGER NOT NULL DEFAULT 1"));
     q.exec(QStringLiteral("CREATE TABLE IF NOT EXISTS one_time_prekeys ("
                           " id INTEGER PRIMARY KEY,"
                           " public_key BLOB NOT NULL,"
@@ -91,17 +98,44 @@ void KeyStore::forgetAccount()
         q.exec(QStringLiteral("DELETE FROM %1").arg(QLatin1String(table)));
 }
 
-bool KeyStore::addSignedPreKey(const X3dh::SignedPreKey &key)
+bool KeyStore::addSignedPreKey(const X3dh::SignedPreKey &key, qint64 created, bool uploaded)
 {
     QSqlQuery q(m_db);
-    q.prepare(QStringLiteral("INSERT OR REPLACE INTO signed_prekeys (id, public_key, secret_key, signature, created)"
-                             " VALUES (?, ?, ?, ?, ?)"));
+    q.prepare(QStringLiteral("INSERT OR REPLACE INTO signed_prekeys (id, public_key, secret_key, signature, created,"
+                             " uploaded) VALUES (?, ?, ?, ?, ?, ?)"));
     q.addBindValue(qint64(key.id));
     q.addBindValue(key.pair.publicKey);
     q.addBindValue(key.pair.secretKey);
     q.addBindValue(key.signature);
-    q.addBindValue(QDateTime::currentMSecsSinceEpoch());
+    q.addBindValue(created >= 0 ? created : QDateTime::currentMSecsSinceEpoch());
+    q.addBindValue(uploaded ? 1 : 0);
     return q.exec();
+}
+
+QList<KeyStore::SignedPreKeyInfo> KeyStore::signedPreKeys() const
+{
+    QList<SignedPreKeyInfo> out;
+    QSqlQuery q(m_db);
+    q.exec(QStringLiteral("SELECT id, created, uploaded FROM signed_prekeys ORDER BY created, id"));
+    while (q.next())
+        out.append({q.value(0).toUInt(), q.value(1).toLongLong(), q.value(2).toBool()});
+    return out;
+}
+
+void KeyStore::setSignedPreKeyUploaded(quint32 id)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("UPDATE signed_prekeys SET uploaded = 1 WHERE id = ?"));
+    q.addBindValue(qint64(id));
+    q.exec();
+}
+
+void KeyStore::removeSignedPreKey(quint32 id)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("DELETE FROM signed_prekeys WHERE id = ?"));
+    q.addBindValue(qint64(id));
+    q.exec();
 }
 
 namespace {

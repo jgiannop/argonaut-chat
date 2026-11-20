@@ -27,6 +27,9 @@
 //     receipts (not even delivered), so they cannot tell I exist or read it.
 //     Blocked people's messages are dropped without a word.
 //   - The connection comes back by itself, sooner first, then slower.
+//   - The signed prekey is replaced every 7 days (on signing in, and while
+//     connected); an old one is kept 30 more days for conversations started
+//     with it, then deleted. A new one counts only once the server has it.
 //
 // Note to Self never leaves this computer.
 class Messenger : public QObject
@@ -40,6 +43,8 @@ public:
     static constexpr int PreKeyBatch = 100;
     static constexpr int PreKeyLowWater = 20;
     static constexpr int MaxReconnectDelayMs = 60000;
+    static constexpr qint64 SignedPreKeyLifetimeMs = 7LL * 24 * 3600 * 1000;
+    static constexpr qint64 SignedPreKeyGraceMs = 30LL * 24 * 3600 * 1000;
 
     using Done = std::function<void(bool ok, const QString &error)>;
 
@@ -55,8 +60,9 @@ public:
     // Connected while there is an account, until stop().
     void start();
     void stop();
-    // Tests: the first wait before connecting again.
+    // Tests: the first wait before connecting again, and the clock (ms).
     void setReconnectDelay(int ms) { m_firstDelay = ms; }
+    void setClock(std::function<qint64()> clock) { m_clock = std::move(clock); }
 
     // Finds the person on the server and opens the conversation with them.
     void startConversation(const QString &username, const std::function<void(qint64 conversation, const QString &error)> &done);
@@ -105,6 +111,8 @@ private:
     void fetchSessions(const QString &to, const Done &done);
     void sendReceipt(const QString &to, Protocol::Content::Receipt kind, const QStringList &ids);
     void replenishPreKeys();
+    void rotateSignedPreKey();
+    qint64 now() const;
 
     ChatStore *m_store;
     KeyStore *m_keys;
@@ -121,5 +129,8 @@ private:
     int m_delay = 1000;
     int m_serverPreKeys = 0;
     bool m_replenishing = false;
+    bool m_rotating = false;
+    QTimer m_rotation; // checks now and then while connected
+    std::function<qint64()> m_clock;
     QSet<qint64> m_inFlight; // outbox messages being sent
 };
