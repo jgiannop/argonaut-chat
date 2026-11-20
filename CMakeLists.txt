@@ -19,6 +19,8 @@ qt_add_library(chat_core STATIC
     src/core/ChatClient.cpp src/core/ChatClient.h
     src/core/ChatStore.cpp src/core/ChatStore.h
     src/core/Crypto.cpp src/core/Crypto.h
+    src/core/KeyStore.cpp src/core/KeyStore.h
+    src/core/Messenger.cpp src/core/Messenger.h
     src/core/Protocol.cpp src/core/Protocol.h
     src/core/RatchetSession.cpp src/core/RatchetSession.h
     src/core/SafetyNumber.cpp src/core/SafetyNumber.h
@@ -31,6 +33,7 @@ target_compile_definitions(chat_core PUBLIC CHAT_VERSION="${PROJECT_VERSION}")
 
 # The window.
 qt_add_library(chat_app STATIC
+    src/app/Dialogs.cpp src/app/Dialogs.h
     src/app/MainWindow.cpp src/app/MainWindow.h
     src/app/StyleSheet.cpp src/app/StyleSheet.h
     src/app/Theme.cpp src/app/Theme.h

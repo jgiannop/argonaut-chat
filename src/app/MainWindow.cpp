@@ -1,11 +1,14 @@
 #include "MainWindow.h"
 
+#include "Dialogs.h"
+#include "Messenger.h"
 #include "StyleSheet.h"
 
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
 #include <QHBoxLayout>
+#include <QInputDialog>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
@@ -15,12 +18,15 @@
 #include <QMessageBox>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPointer>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollBar>
 #include <QSplitter>
 #include <QStyledItemDelegate>
 #include <QTextLayout>
+#include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 namespace {
@@ -148,11 +154,18 @@ public:
         small.setPointSizeF(option.font.pointSizeF() * 0.85);
         const QFontMetrics smallMetrics(small);
         QString footer = index.data(TimeRole).toString();
+        bool read = false;
         if (mine) {
             const QString status = index.data(StatusRole).toString();
-            footer += status == QLatin1String("read") ? QStringLiteral("  ✓✓") : status == QLatin1String("delivered") ? QStringLiteral("  ✓✓")
-                      : status == QLatin1String("sent")                                                         ? QStringLiteral("  ✓")
-                                                                                                                 : QString();
+            read = status == QLatin1String("read");
+            if (status == QLatin1String("read") || status == QLatin1String("delivered"))
+                footer += QStringLiteral("  ✓✓");
+            else if (status == QLatin1String("sent"))
+                footer += QStringLiteral("  ✓");
+            else if (status == QLatin1String("sending"))
+                footer += QStringLiteral("  …");
+            else if (status == QLatin1String("failed"))
+                footer += QStringLiteral("  ⚠ ") + QCoreApplication::translate("MainWindow", "Not sent");
         }
         const int width = qMax(t.width(), smallMetrics.horizontalAdvance(footer)) + 2 * Pad;
         const int height = t.height() + smallMetrics.height() + 2 * Pad + 2;
@@ -164,7 +177,8 @@ public:
         p->setFont(option.font);
         p->drawText(QRect(bubble.left() + Pad, bubble.top() + Pad, t.width(), t.height()), Qt::TextWordWrap, text);
         p->setFont(small);
-        QColor dim = mine ? QColor(255, 255, 255, 190) : m_theme->dimFg;
+        // Read: the ticks in full white, as Signal fills them in.
+        QColor dim = mine ? QColor(255, 255, 255, read ? 255 : 190) : m_theme->dimFg;
         p->setPen(dim);
         p->drawText(QRect(bubble.left() + Pad, bubble.bottom() - Pad - smallMetrics.height(), bubble.width() - 2 * Pad, smallMetrics.height()),
                     Qt::AlignRight | Qt::AlignVCenter, footer);
@@ -177,9 +191,10 @@ private:
 
 } // namespace
 
-MainWindow::MainWindow(ChatStore *store, QWidget *parent)
+MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
     : QMainWindow(parent)
     , m_store(store)
+    , m_messenger(messenger)
     , m_theme(currentTheme())
 {
     setWindowTitle(tr("Argonaut Chat"));
@@ -203,7 +218,15 @@ MainWindow::MainWindow(ChatStore *store, QWidget *parent)
     m_conversations->setItemDelegate(new ConversationDelegate(&m_theme, m_conversations));
     m_conversations->setMouseTracking(true);
     m_conversations->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_connection = new QLabel(sidebar);
+    m_connection->setObjectName(QStringLiteral("connectionState"));
+    m_notice = new QLabel(sidebar);
+    m_notice->setObjectName(QStringLiteral("notice"));
+    m_notice->setWordWrap(true);
+    m_notice->hide();
     sideLayout->addWidget(sideTitle);
+    sideLayout->addWidget(m_connection);
+    sideLayout->addWidget(m_notice);
     sideLayout->addWidget(search);
     sideLayout->addWidget(m_conversations, 1);
     connect(search, &QLineEdit::textChanged, this, [this](const QString &text) {
@@ -221,15 +244,24 @@ MainWindow::MainWindow(ChatStore *store, QWidget *parent)
     chatLayout->setSpacing(0);
     auto *header = new QWidget(chat);
     header->setObjectName(QStringLiteral("chatHeader"));
-    auto *headerLayout = new QVBoxLayout(header);
+    auto *headerLayout = new QHBoxLayout(header);
     headerLayout->setContentsMargins(16, 10, 16, 10);
-    headerLayout->setSpacing(2);
+    auto *titles = new QVBoxLayout;
+    titles->setSpacing(2);
     m_title = new QLabel(header);
     m_title->setObjectName(QStringLiteral("chatTitle"));
     m_subtitle = new QLabel(header);
     m_subtitle->setObjectName(QStringLiteral("chatSubtitle"));
-    headerLayout->addWidget(m_title);
-    headerLayout->addWidget(m_subtitle);
+    titles->addWidget(m_title);
+    titles->addWidget(m_subtitle);
+    headerLayout->addLayout(titles, 1);
+    m_safety = new QToolButton(header);
+    m_safety->setObjectName(QStringLiteral("safetyNumberButton"));
+    m_safety->setText(tr("Safety Number"));
+    m_safety->setToolTip(tr("Check that your messages reach only them"));
+    m_safety->setCursor(Qt::PointingHandCursor);
+    headerLayout->addWidget(m_safety);
+    connect(m_safety, &QToolButton::clicked, this, &MainWindow::showSafetyNumber);
     m_messages = new QListWidget(chat);
     m_messages->setObjectName(QStringLiteral("messageList"));
     m_messages->setItemDelegate(new BubbleDelegate(&m_theme, m_messages));
@@ -279,11 +311,24 @@ MainWindow::MainWindow(ChatStore *store, QWidget *parent)
     });
     connect(m_store, &ChatStore::conversationsChanged, this, &MainWindow::reloadConversations);
     connect(m_store, &ChatStore::messagesChanged, this, [this](qint64 conversation) {
-        if (conversation == m_current)
-            reloadMessages();
+        if (conversation != m_current)
+            return;
+        reloadMessages();
+        // Arrived while it is open in front of them: seen.
+        if (isActiveWindow())
+            QTimer::singleShot(0, this, &MainWindow::markCurrentRead);
     });
+    if (m_messenger) {
+        connect(m_messenger, &Messenger::stateChanged, this, &MainWindow::updateConnection);
+        connect(m_messenger, &Messenger::safetyNumberChanged, this, [this](const QString &username) {
+            updateHeader();
+            showNotice(tr("Your safety number with %1 has changed.").arg(username));
+        });
+        connect(m_messenger, &Messenger::problem, this, &MainWindow::showNotice);
+    }
 
     buildMenus();
+    updateConnection();
     applyTheme();
     m_store->noteToSelf(); // always there, as in Signal
     reloadConversations();
@@ -294,8 +339,15 @@ MainWindow::MainWindow(ChatStore *store, QWidget *parent)
 void MainWindow::buildMenus()
 {
     QMenu *file = menuBar()->addMenu(tr("&File"));
+    m_newChatAction = file->addAction(tr("New Chat…"), this, &MainWindow::newChat);
+    m_newChatAction->setShortcut(QKeySequence::New);
+    m_signUpAction = file->addAction(tr("Sign Up…"), this, &MainWindow::showSignUp);
+    file->addSeparator();
     QAction *quit = file->addAction(tr("Quit"), this, &QWidget::close);
     quit->setShortcut(QKeySequence::Quit);
+
+    QMenu *conversation = menuBar()->addMenu(tr("&Conversation"));
+    m_safetyAction = conversation->addAction(tr("Safety Number…"), this, &MainWindow::showSafetyNumber);
 
     QMenu *view = menuBar()->addMenu(tr("&View"));
     QMenu *themes = view->addMenu(tr("Theme"));
@@ -342,13 +394,126 @@ void MainWindow::reloadConversations()
 void MainWindow::openConversation(qint64 id)
 {
     m_current = id;
-    const ChatStore::Conversation c = m_store->conversation(id);
-    m_title->setText(c.title);
-    m_subtitle->setText(c.kind == QLatin1String("self") ? tr("Notes you keep for yourself, on this computer") : c.peer);
-    m_store->markRead(id);
+    updateHeader();
+    markCurrentRead();
     reloadMessages();
     m_compose->setFocus();
     m_send->setEnabled(!m_compose->toPlainText().trimmed().isEmpty());
+}
+
+void MainWindow::markCurrentRead()
+{
+    if (m_current == 0)
+        return;
+    if (m_messenger)
+        m_messenger->markRead(m_current);
+    else
+        m_store->markRead(m_current);
+}
+
+void MainWindow::updateHeader()
+{
+    const ChatStore::Conversation c = m_store->conversation(m_current);
+    const bool direct = c.kind == QLatin1String("direct");
+    m_title->setText(c.title);
+    if (c.kind == QLatin1String("self"))
+        m_subtitle->setText(tr("Notes you keep for yourself, on this computer"));
+    else if (direct && m_messenger && m_messenger->safetyNumberHasChanged(c.peer))
+        m_subtitle->setText(tr("⚠ Your safety number with %1 has changed: check it").arg(c.peer));
+    else if (direct && m_messenger && m_messenger->isVerified(c.peer))
+        m_subtitle->setText(tr("@%1 · ✓ verified").arg(c.peer));
+    else
+        m_subtitle->setText(direct ? QStringLiteral("@") + c.peer : c.peer);
+    m_safety->setVisible(direct && m_messenger);
+    if (m_safetyAction)
+        m_safetyAction->setEnabled(direct && m_messenger);
+}
+
+void MainWindow::updateConnection()
+{
+    const bool account = m_messenger && m_messenger->hasAccount();
+    QString text;
+    if (!m_messenger || !account) {
+        text = tr("On this computer only: sign up to chat");
+    } else {
+        switch (m_messenger->state()) {
+        case Messenger::State::Online:
+            text = tr("@%1 · connected").arg(m_messenger->username());
+            break;
+        case Messenger::State::Connecting:
+            text = tr("@%1 · connecting…").arg(m_messenger->username());
+            break;
+        default:
+            text = tr("@%1 · offline: messages wait until the connection is back").arg(m_messenger->username());
+            break;
+        }
+    }
+    m_connection->setText(text);
+    if (m_signUpAction)
+        m_signUpAction->setVisible(m_messenger && !account);
+    if (m_newChatAction)
+        m_newChatAction->setEnabled(account);
+}
+
+void MainWindow::showNotice(const QString &text)
+{
+    m_notice->setText(text);
+    m_notice->show();
+    QTimer::singleShot(10000, m_notice, [notice = m_notice, text] {
+        if (notice->text() == text)
+            notice->hide();
+    });
+}
+
+void MainWindow::showSignUp()
+{
+    if (!m_messenger || m_messenger->hasAccount())
+        return;
+    SignUpDialog dialog(m_messenger, this);
+    if (dialog.exec() == QDialog::Accepted)
+        updateConnection();
+}
+
+void MainWindow::newChat()
+{
+    if (!m_messenger || !m_messenger->hasAccount())
+        return;
+    bool ok = false;
+    const QString username =
+        QInputDialog::getText(this, tr("New Chat"), tr("Their username:"), QLineEdit::Normal, QString(), &ok);
+    if (ok && !username.trimmed().isEmpty())
+        startChatWith(username);
+}
+
+void MainWindow::startChatWith(const QString &username)
+{
+    if (!m_messenger)
+        return;
+    QPointer<MainWindow> self(this);
+    m_messenger->startConversation(username, [self](qint64 conversation, const QString &error) {
+        if (!self)
+            return;
+        if (conversation == 0) {
+            self->showNotice(error);
+            return;
+        }
+        self->reloadConversations();
+        for (int i = 0; i < self->m_conversations->count(); ++i) {
+            if (self->m_conversations->item(i)->data(IdRole).toLongLong() == conversation)
+                self->m_conversations->setCurrentRow(i);
+        }
+        self->openConversation(conversation);
+    });
+}
+
+void MainWindow::showSafetyNumber()
+{
+    const ChatStore::Conversation c = m_store->conversation(m_current);
+    if (!m_messenger || c.kind != QLatin1String("direct"))
+        return;
+    SafetyNumberDialog dialog(m_messenger, c.peer, this);
+    dialog.exec();
+    updateHeader();
 }
 
 void MainWindow::reloadMessages()
@@ -369,7 +534,10 @@ void MainWindow::send()
     const QString text = m_compose->toPlainText().trimmed();
     if (text.isEmpty() || m_current == 0)
         return;
-    m_store->addMessage(m_current, text);
+    if (m_messenger)
+        m_messenger->send(m_current, text);
+    else
+        m_store->addMessage(m_current, text);
     m_compose->clear();
 }
 

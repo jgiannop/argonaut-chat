@@ -5,8 +5,10 @@
 
 #include <QMainWindow>
 
+class Messenger;
 class QLabel;
 class QListWidget;
+class QToolButton;
 class QPlainTextEdit;
 class QPushButton;
 
@@ -14,19 +16,28 @@ class QPushButton;
 // last message and the unread count), the chosen one at the right, its
 // messages as bubbles (mine at the right, in the accent colour), and the
 // field to write in under them (Enter sends, Shift+Enter is a new line).
+//
+// With a Messenger, conversations with people go through the server,
+// encrypted; without one (or before signing up) only Note to Self works.
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
 
 public:
-    explicit MainWindow(ChatStore *store, QWidget *parent = nullptr);
+    explicit MainWindow(ChatStore *store, Messenger *messenger = nullptr, QWidget *parent = nullptr);
 
     // Tests reach the parts.
     QListWidget *conversations() const { return m_conversations; }
     QListWidget *messages() const { return m_messages; }
     QPlainTextEdit *composeField() const { return m_compose; }
     qint64 currentConversation() const { return m_current; }
+    QLabel *connectionLabel() const { return m_connection; }
+    QLabel *noticeLabel() const { return m_notice; }
+    QToolButton *safetyNumberButton() const { return m_safety; }
     void openConversation(qint64 id);
+    // Finds them on the server and opens the conversation (New Chat).
+    void startChatWith(const QString &username);
+    void showSignUp();
 
 protected:
     void changeEvent(QEvent *event) override;
@@ -38,8 +49,21 @@ private:
     void reloadMessages();
     void send();
     void applyTheme();
+    void updateConnection();
+    void updateHeader();
+    void showNotice(const QString &text);
+    void newChat();
+    void showSafetyNumber();
+    void markCurrentRead();
 
     ChatStore *m_store;
+    Messenger *m_messenger;
+    QLabel *m_connection = nullptr;
+    QLabel *m_notice = nullptr;
+    QToolButton *m_safety = nullptr;
+    QAction *m_signUpAction = nullptr;
+    QAction *m_newChatAction = nullptr;
+    QAction *m_safetyAction = nullptr;
     QListWidget *m_conversations = nullptr;
     QListWidget *m_messages = nullptr;
     QLabel *m_title = nullptr;

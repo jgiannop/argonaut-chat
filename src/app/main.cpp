@@ -1,8 +1,11 @@
 #include "ChatStore.h"
+#include "KeyStore.h"
 #include "MainWindow.h"
+#include "Messenger.h"
 #include "Theme.h"
 
 #include <QApplication>
+#include <QTimer>
 #include <cstdio>
 
 int main(int argc, char **argv)
@@ -31,7 +34,14 @@ int main(int argc, char **argv)
     ChatStore store;
     if (!store.isOpen())
         qWarning("The chat store couldn't be opened: %s", qPrintable(store.error()));
-    MainWindow window(&store);
+    KeyStore keys(&store);
+    Messenger messenger(&store, &keys);
+    MainWindow window(&store, &messenger);
     window.show();
+    // The first time: sign up (or not now, for Note to Self alone).
+    if (messenger.hasAccount())
+        messenger.start();
+    else
+        QTimer::singleShot(0, &window, &MainWindow::showSignUp);
     return app.exec();
 }

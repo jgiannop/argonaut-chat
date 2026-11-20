@@ -1,9 +1,9 @@
 find_package(Qt6 REQUIRED COMPONENTS Test)
 
-# chat_test(<name> [LIBRARY <lib>]): tests/tst_<name>.cpp as a CTest test.
+# chat_test(<name> [LIBRARY <lib>...]): tests/tst_<name>.cpp as a CTest test.
 # Every test runs headless, with its own HOME and XDG folders (TestSupport.h).
 function(chat_test name)
-    cmake_parse_arguments(ARG "" "LIBRARY" "" ${ARGN})
+    cmake_parse_arguments(ARG "" "" "LIBRARY" ${ARGN})
     if(NOT ARG_LIBRARY)
         set(ARG_LIBRARY chat_core)
     endif()
@@ -18,4 +18,5 @@ chat_test(crypto)
 chat_test(ratchet)
 chat_test(protocol)
 chat_test(server LIBRARY chat_server)
-chat_test(mainwindow LIBRARY chat_app)
+chat_test(messenger LIBRARY chat_server)
+chat_test(mainwindow LIBRARY chat_app chat_server)

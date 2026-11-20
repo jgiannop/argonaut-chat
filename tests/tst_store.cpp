@@ -5,6 +5,8 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QSignalSpy>
+#include <QSqlDatabase>
+#include <QSqlQuery>
 #include <QTest>
 
 class TestStore : public QObject
@@ -48,6 +50,76 @@ private slots:
         QCOMPARE(notes.first().body, QStringLiteral("first")); // oldest first
         QVERIFY(notes.first().outgoing());
         QCOMPARE(QFileInfo(file).permissions() & (QFile::ReadGroup | QFile::ReadOther), QFile::Permissions());
+    }
+
+    void wireIdsOutboxAndReceipts()
+    {
+        ChatStore store(QDir::homePath() + QStringLiteral("/wire.sqlite"));
+        const qint64 bob = store.addConversation(QStringLiteral("direct"), QStringLiteral("bob"), QStringLiteral("bob"));
+        QCOMPARE(store.directConversation(QStringLiteral("bob")), bob);
+        QCOMPARE(store.directConversation(QStringLiteral("carol")), 0);
+
+        const auto a = store.addMessage(bob, QStringLiteral("a"), QString(), QDateTime::currentDateTimeUtc(),
+                                        QStringLiteral("id-a"), QStringLiteral("sending"));
+        const auto b = store.addMessage(bob, QStringLiteral("b"), QString(), QDateTime::currentDateTimeUtc(),
+                                        QStringLiteral("id-b"), QStringLiteral("sending"));
+        QCOMPARE(store.message(a.id).uid, QStringLiteral("id-a"));
+        QVERIFY(store.hasMessage(bob, QStringLiteral("id-a")));
+        QVERIFY(!store.hasMessage(bob, QStringLiteral("id-x")));
+        QVERIFY(!store.hasMessage(bob, QString()));
+        QCOMPARE(store.outbox().size(), 2);
+        store.setStatus(a.id, QStringLiteral("sent"));
+        QCOMPARE(store.outbox().size(), 1);
+
+        // Receipts move on, never back; "sending" too (the receipt can come first).
+        store.advanceStatus(bob, {QStringLiteral("id-a"), QStringLiteral("id-b")}, QStringLiteral("read"));
+        QCOMPARE(store.message(a.id).status, QStringLiteral("read"));
+        QCOMPARE(store.message(b.id).status, QStringLiteral("read"));
+        store.advanceStatus(bob, {QStringLiteral("id-a")}, QStringLiteral("delivered"));
+        QCOMPARE(store.message(a.id).status, QStringLiteral("read"));
+        // Only mine, only in that conversation.
+        const qint64 carol = store.addConversation(QStringLiteral("direct"), QStringLiteral("carol"), QStringLiteral("carol"));
+        const auto theirs = store.addMessage(carol, QStringLiteral("c"), QStringLiteral("carol"),
+                                             QDateTime::currentDateTimeUtc(), QStringLiteral("id-c"));
+        const auto mine = store.addMessage(carol, QStringLiteral("d"), QString(), QDateTime::currentDateTimeUtc(),
+                                           QStringLiteral("id-d"), QStringLiteral("sent"));
+        store.advanceStatus(bob, {QStringLiteral("id-d")}, QStringLiteral("read"));
+        store.advanceStatus(carol, {QStringLiteral("id-c")}, QStringLiteral("read"));
+        QCOMPARE(store.message(mine.id).status, QStringLiteral("sent"));
+        QCOMPARE(store.message(theirs.id).status, QStringLiteral("received"));
+        QCOMPARE(store.unseenUids(carol), QStringList{QStringLiteral("id-c")});
+        store.markRead(carol);
+        QVERIFY(store.unseenUids(carol).isEmpty());
+    }
+
+    void oldDatabasesGetTheWireId()
+    {
+        // A database from before the network, without the uid column.
+        const QString file = QDir::homePath() + QStringLiteral("/old.sqlite");
+        {
+            QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), QStringLiteral("old"));
+            db.setDatabaseName(file);
+            QVERIFY(db.open());
+            QSqlQuery q(db);
+            QVERIFY(q.exec(QStringLiteral("CREATE TABLE conversations (id INTEGER PRIMARY KEY, kind TEXT NOT NULL,"
+                                          " title TEXT NOT NULL DEFAULT '', peer TEXT NOT NULL DEFAULT '',"
+                                          " created INTEGER NOT NULL, last_activity INTEGER NOT NULL)")));
+            QVERIFY(q.exec(QStringLiteral("CREATE TABLE messages (id INTEGER PRIMARY KEY, conversation INTEGER NOT NULL,"
+                                          " author TEXT NOT NULL DEFAULT '', body TEXT NOT NULL, sent_at INTEGER NOT NULL,"
+                                          " status TEXT NOT NULL, seen INTEGER NOT NULL DEFAULT 0)")));
+            QVERIFY(q.exec(QStringLiteral("INSERT INTO conversations VALUES (1, 'self', 'Note to Self', '', 0, 0)")));
+            QVERIFY(q.exec(QStringLiteral("INSERT INTO messages VALUES (1, 1, '', 'old note', 0, 'sent', 1)")));
+            db.close();
+        }
+        QSqlDatabase::removeDatabase(QStringLiteral("old"));
+        ChatStore store(file);
+        const auto notes = store.messages(1);
+        QCOMPARE(notes.size(), 1);
+        QCOMPARE(notes.first().body, QStringLiteral("old note"));
+        QVERIFY(notes.first().uid.isEmpty());
+        QVERIFY(store.addMessage(1, QStringLiteral("new"), QString(), QDateTime::currentDateTimeUtc(),
+                                 QStringLiteral("u1")).id > 0);
+        QVERIFY(store.hasMessage(1, QStringLiteral("u1")));
     }
 
     void defaultPlace()

@@ -37,6 +37,7 @@ public:
         QString body;
         QDateTime sentAt;
         QString status; // mine: "sending", "sent", "delivered", "read", "failed"; theirs: "received"
+        QString uid;    // the message's id on the wire (Protocol::Content::id); empty for notes to self
         bool outgoing() const { return author.isEmpty(); }
     };
 
@@ -53,14 +54,31 @@ public:
     // Note to Self: always there (made the first time).
     qint64 noteToSelf();
     qint64 addConversation(const QString &kind, const QString &title, const QString &peer);
+    // The direct conversation with this username; 0 if there is none.
+    qint64 directConversation(const QString &peer) const;
 
     // A message of mine (author empty) or of someone else's. Returns it, with its id.
+    // `status` empty: "sent" for mine, "received" for theirs.
     Message addMessage(qint64 conversation, const QString &body, const QString &author = QString(),
-                       const QDateTime &sentAt = QDateTime::currentDateTimeUtc());
+                       const QDateTime &sentAt = QDateTime::currentDateTimeUtc(), const QString &uid = QString(),
+                       const QString &status = QString());
+    Message message(qint64 id) const;
+    // A message already there with this wire id (to drop one delivered twice).
+    bool hasMessage(qint64 conversation, const QString &uid) const;
+    // Mine in "sending", oldest first: the outbox.
+    QList<Message> outbox() const;
     // Oldest first: the newest `limit` of them.
     QList<Message> messages(qint64 conversation, int limit = 500) const;
     void setStatus(qint64 message, const QString &status);
+    // A receipt: mine with these wire ids, in this conversation, move on to
+    // "delivered" or "read" (never back).
+    void advanceStatus(qint64 conversation, const QStringList &uids, const QString &status);
+    // The wire ids of theirs not seen yet (for read receipts).
+    QStringList unseenUids(qint64 conversation) const;
     void markRead(qint64 conversation);
+
+    // The open database, for KeyStore (the same file).
+    QSqlDatabase database() const { return m_db; }
 
 signals:
     void conversationsChanged();

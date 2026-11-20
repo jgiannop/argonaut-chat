@@ -6,6 +6,10 @@ QString styleSheetFor(const Theme &t)
 QMainWindow, QWidget#chatPane, QListView#messageList { background: @window; color: @fg; }
 QWidget#sidebar { background: @sidebar; border-right: 1px solid @border; }
 QLabel#sidebarTitle { color: @fg; font-weight: bold; font-size: 15px; padding: 10px 12px 4px 12px; }
+QLabel#connectionState { color: @dimFg; font-size: 12px; padding: 0 12px 4px 12px; }
+QLabel#notice { color: @fg; background: @pathBg; border-radius: 8px; padding: 6px 8px; margin: 2px 8px 4px 8px; }
+QToolButton#safetyNumberButton { color: @fg; background: @pathBg; border: none; border-radius: 8px; padding: 5px 10px; }
+QToolButton#safetyNumberButton:hover { background: @hover; }
 QLineEdit#searchField { background: @pathBg; border: none; border-radius: 8px; padding: 6px 8px; margin: 4px 8px 8px 8px; color: @fg; }
 QListWidget#conversationList { background: @sidebar; color: @fg; border: none; outline: 0; padding: 0 6px; }
 QWidget#chatHeader { background: @window; border-bottom: 1px solid @border; }

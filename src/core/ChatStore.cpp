@@ -69,7 +69,45 @@ void ChatStore::createTables()
                           " status TEXT NOT NULL,"
                           " seen INTEGER NOT NULL DEFAULT 0)"));
     q.exec(QStringLiteral("CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages(conversation, sent_at)"));
+    // Added with the network: the message's id on the wire.
+    bool hasUid = false;
+    q.exec(QStringLiteral("PRAGMA table_info(messages)"));
+    while (q.next())
+        hasUid = hasUid || q.value(1).toString() == QLatin1String("uid");
+    if (!hasUid)
+        q.exec(QStringLiteral("ALTER TABLE messages ADD COLUMN uid TEXT NOT NULL DEFAULT ''"));
+    q.exec(QStringLiteral("CREATE INDEX IF NOT EXISTS messages_by_uid ON messages(conversation, uid)"));
 }
+
+namespace {
+
+const QString kMessageColumns = QStringLiteral("id, conversation, author, body, sent_at, status, uid");
+
+ChatStore::Message messageFrom(const QSqlQuery &q)
+{
+    ChatStore::Message m;
+    m.id = q.value(0).toLongLong();
+    m.conversation = q.value(1).toLongLong();
+    m.author = q.value(2).toString();
+    m.body = q.value(3).toString();
+    m.sentAt = QDateTime::fromMSecsSinceEpoch(q.value(4).toLongLong(), Qt::UTC);
+    m.status = q.value(5).toString();
+    m.uid = q.value(6).toString();
+    return m;
+}
+
+int statusRank(const QString &status)
+{
+    if (status == QLatin1String("read"))
+        return 3;
+    if (status == QLatin1String("delivered"))
+        return 2;
+    if (status == QLatin1String("sent"))
+        return 1;
+    return 0;
+}
+
+} // namespace
 
 QList<ChatStore::Conversation> ChatStore::conversations() const
 {
@@ -111,6 +149,16 @@ qint64 ChatStore::noteToSelf()
     return addConversation(QStringLiteral("self"), tr("Note to Self"), QString());
 }
 
+qint64 ChatStore::directConversation(const QString &peer) const
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT id FROM conversations WHERE kind = 'direct' AND peer = ? ORDER BY id LIMIT 1"));
+    q.addBindValue(text(peer));
+    if (q.exec() && q.next())
+        return q.value(0).toLongLong();
+    return 0;
+}
+
 qint64 ChatStore::addConversation(const QString &kind, const QString &title, const QString &peer)
 {
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
@@ -129,24 +177,27 @@ qint64 ChatStore::addConversation(const QString &kind, const QString &title, con
     return q.lastInsertId().toLongLong();
 }
 
-ChatStore::Message ChatStore::addMessage(qint64 conversation, const QString &body, const QString &author, const QDateTime &sentAt)
+ChatStore::Message ChatStore::addMessage(qint64 conversation, const QString &body, const QString &author,
+                                        const QDateTime &sentAt, const QString &uid, const QString &status)
 {
     Message m;
     m.conversation = conversation;
     m.author = author;
     m.body = body;
     m.sentAt = sentAt.toUTC();
-    // Nothing is sent anywhere yet: a note to self is there at once, and so is
-    // everything until there is a network.
-    m.status = author.isEmpty() ? QStringLiteral("sent") : QStringLiteral("received");
+    m.uid = uid;
+    // A note to self is there at once.
+    m.status = !status.isEmpty() ? status : author.isEmpty() ? QStringLiteral("sent") : QStringLiteral("received");
     QSqlQuery q(m_db);
-    q.prepare(QStringLiteral("INSERT INTO messages (conversation, author, body, sent_at, status, seen) VALUES (?, ?, ?, ?, ?, ?)"));
+    q.prepare(QStringLiteral("INSERT INTO messages (conversation, author, body, sent_at, status, seen, uid)"
+                             " VALUES (?, ?, ?, ?, ?, ?, ?)"));
     q.addBindValue(conversation);
     q.addBindValue(text(author));
     q.addBindValue(text(body));
     q.addBindValue(m.sentAt.toMSecsSinceEpoch());
     q.addBindValue(m.status);
     q.addBindValue(author.isEmpty() ? 1 : 0);
+    q.addBindValue(text(uid));
     if (!q.exec()) {
         m_error = q.lastError().text();
         return {};
@@ -166,21 +217,86 @@ QList<ChatStore::Message> ChatStore::messages(qint64 conversation, int limit) co
 {
     QList<Message> out;
     QSqlQuery q(m_db);
-    q.prepare(QStringLiteral("SELECT id, author, body, sent_at, status FROM messages WHERE conversation = ?"
-                             " ORDER BY sent_at DESC, id DESC LIMIT ?"));
+    q.prepare(QStringLiteral("SELECT %1 FROM messages WHERE conversation = ?"
+                             " ORDER BY sent_at DESC, id DESC LIMIT ?").arg(kMessageColumns));
     q.addBindValue(conversation);
     q.addBindValue(limit);
     q.exec();
-    while (q.next()) {
-        Message m;
-        m.id = q.value(0).toLongLong();
-        m.conversation = conversation;
-        m.author = q.value(1).toString();
-        m.body = q.value(2).toString();
-        m.sentAt = QDateTime::fromMSecsSinceEpoch(q.value(3).toLongLong(), Qt::UTC);
-        m.status = q.value(4).toString();
-        out.prepend(m);
+    while (q.next())
+        out.prepend(messageFrom(q));
+    return out;
+}
+
+ChatStore::Message ChatStore::message(qint64 id) const
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT %1 FROM messages WHERE id = ?").arg(kMessageColumns));
+    q.addBindValue(id);
+    if (q.exec() && q.next())
+        return messageFrom(q);
+    return {};
+}
+
+bool ChatStore::hasMessage(qint64 conversation, const QString &uid) const
+{
+    if (uid.isEmpty())
+        return false;
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT 1 FROM messages WHERE conversation = ? AND uid = ? LIMIT 1"));
+    q.addBindValue(conversation);
+    q.addBindValue(uid);
+    return q.exec() && q.next();
+}
+
+QList<ChatStore::Message> ChatStore::outbox() const
+{
+    QList<Message> out;
+    QSqlQuery q(m_db);
+    q.exec(QStringLiteral("SELECT %1 FROM messages WHERE author = '' AND status = 'sending' ORDER BY id")
+               .arg(kMessageColumns));
+    while (q.next())
+        out.append(messageFrom(q));
+    return out;
+}
+
+void ChatStore::advanceStatus(qint64 conversation, const QStringList &uids, const QString &status)
+{
+    const int rank = statusRank(status);
+    if (rank < 2)
+        return;
+    bool changed = false;
+    QSqlQuery find(m_db);
+    find.prepare(QStringLiteral("SELECT id, status FROM messages WHERE conversation = ? AND author = '' AND uid = ?"));
+    QSqlQuery update(m_db);
+    update.prepare(QStringLiteral("UPDATE messages SET status = ? WHERE id = ?"));
+    for (const QString &uid : uids) {
+        find.bindValue(0, conversation);
+        find.bindValue(1, uid);
+        if (!find.exec())
+            continue;
+        while (find.next()) {
+            // "sending" too: the answer to the send can come after the receipt.
+            if (statusRank(find.value(1).toString()) >= rank || find.value(1).toString() == QLatin1String("failed"))
+                continue;
+            update.bindValue(0, status);
+            update.bindValue(1, find.value(0));
+            changed = update.exec() || changed;
+        }
     }
+    if (changed)
+        emit messagesChanged(conversation);
+}
+
+QStringList ChatStore::unseenUids(qint64 conversation) const
+{
+    QStringList out;
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT uid FROM messages WHERE conversation = ? AND seen = 0 AND author <> '' AND uid <> ''"
+                             " ORDER BY id"));
+    q.addBindValue(conversation);
+    q.exec();
+    while (q.next())
+        out << q.value(0).toString();
     return out;
 }
 
