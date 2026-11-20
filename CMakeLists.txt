@@ -5,15 +5,25 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# CHAT_SERVER_ONLY: just argonaut-chat-server (a VPS: no widgets, no keyring,
+# no tests), as deploy/setup-server.sh builds it.
+option(CHAT_SERVER_ONLY "Build only argonaut-chat-server" OFF)
+
 # 6.4 is what Ubuntu 24.04 ships, as for Argonaut and Argonaut Emails.
-find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets Network Sql WebSockets)
+if(CHAT_SERVER_ONLY)
+    find_package(Qt6 6.4 REQUIRED COMPONENTS Core Network Sql WebSockets)
+else()
+    find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets Network Sql WebSockets)
+endif()
 # The cryptography: libsodium (1.0.18 on Ubuntu 24.04).
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium>=1.0.18)
 # The local database: SQLCipher (4.5 on Ubuntu 24.04), and its key in the
 # system keyring through QtKeychain.
 pkg_check_modules(SQLCIPHER REQUIRED IMPORTED_TARGET sqlcipher>=4)
-find_package(Qt6Keychain REQUIRED)
+if(NOT CHAT_SERVER_ONLY)
+    find_package(Qt6Keychain REQUIRED)
+endif()
 qt_standard_project_setup()
 
 include(GNUInstallDirs)
@@ -36,6 +46,7 @@ target_include_directories(chat_core PUBLIC src/core)
 target_link_libraries(chat_core PUBLIC Qt6::Core Qt6::Network Qt6::Sql Qt6::WebSockets PRIVATE PkgConfig::SODIUM PkgConfig::SQLCIPHER)
 target_compile_definitions(chat_core PUBLIC CHAT_VERSION="${PROJECT_VERSION}")
 
+if(NOT CHAT_SERVER_ONLY)
 # The window.
 qt_add_library(chat_app STATIC
     src/app/DatabaseKey.cpp src/app/DatabaseKey.h
@@ -50,6 +61,7 @@ target_link_libraries(chat_app PUBLIC chat_core Qt6::Widgets PRIVATE Qt6Keychain
 qt_add_executable(argonaut-chat src/app/main.cpp)
 target_link_libraries(argonaut-chat PRIVATE chat_app)
 install(TARGETS argonaut-chat RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
 
 # The relay server: a separate program, sharing chat_core (protocol, crypto).
 qt_add_library(chat_server STATIC
@@ -64,7 +76,9 @@ qt_add_executable(argonaut-chat-server src/server/main.cpp)
 target_link_libraries(argonaut-chat-server PRIVATE chat_server)
 install(TARGETS argonaut-chat-server RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-include(CTest)
-if(BUILD_TESTING)
-    add_subdirectory(tests)
+if(NOT CHAT_SERVER_ONLY)
+    include(CTest)
+    if(BUILD_TESTING)
+        add_subdirectory(tests)
+    endif()
 endif()

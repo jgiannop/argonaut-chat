@@ -66,6 +66,8 @@ XDG_DATA_HOME=/tmp/bob ./build/debug/argonaut-chat
 On a server, run it behind a reverse proxy that does TLS (Caddy or nginx),
 with `--trust-proxy` so its rate limits see the real addresses; the app
 accepts only `wss://` addresses, except to the same computer.
+`deploy/setup-server.sh` does all of it on an Ubuntu 24.04 VPS:
+[docs/deploy.md](docs/deploy.md).
 
 ## License
 
