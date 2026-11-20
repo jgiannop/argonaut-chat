@@ -30,6 +30,8 @@ program: [docs/how-signal-works.md](docs/how-signal-works.md).
 - **Groups** of up to 50 (File › New Group…): kept by their members, each
   message encrypted for each member; the server cannot tell a group exists.
   Its creator adds and removes people; anyone can leave.
+- **Disappearing messages** (Conversation › Disappearing Messages): from
+  30 seconds to 4 weeks after they are seen, gone on every side.
 - **Linked devices**: your account on up to five computers (File › Linked
   Devices…), linked by a code; what you send and read follows you; a new
   computer starts without the old history.
@@ -54,7 +56,8 @@ program: [docs/how-signal-works.md](docs/how-signal-works.md).
 ## Not there yet
 
 PQXDH (the
-post-quantum start), calls, disappearing messages.
+post-quantum start), calls, Sender Keys for big groups, moving the history
+to a linked computer.
 
 ## Installing
 

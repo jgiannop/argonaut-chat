@@ -209,6 +209,17 @@ Content Content::groupUpdate(const QString &group, const QString &name, const QS
     return content;
 }
 
+Content Content::timer(qint64 seconds, const QString &group)
+{
+    Content content;
+    content.type = Type::Timer;
+    content.id = newMessageId();
+    content.sentAt = QDateTime::currentMSecsSinceEpoch();
+    content.expireSeconds = seconds;
+    content.group = group;
+    return content;
+}
+
 Content Content::leave(const QString &group)
 {
     Content content;
@@ -308,6 +319,10 @@ QByteArray encodeContent(const Content &content)
                 return {};
             json.insert(QStringLiteral("sentTo"), content.sentTo);
         }
+        if (content.expireSeconds < 0 || content.expireSeconds > MaxExpireSeconds)
+            return {};
+        if (content.expireSeconds > 0)
+            json.insert(QStringLiteral("expire"), double(content.expireSeconds));
         json.insert(QStringLiteral("body"), content.body);
         if (content.attachments.size() > MaxAttachments)
             return {};
@@ -335,6 +350,17 @@ QByteArray encodeContent(const Content &content)
         json.insert(QStringLiteral("admin"), content.groupAdmin);
         json.insert(QStringLiteral("members"), QJsonArray::fromStringList(content.groupMembers));
         json.insert(QStringLiteral("revision"), content.groupRevision);
+    } else if (content.type == Content::Type::Timer) {
+        if (content.expireSeconds < 0 || content.expireSeconds > MaxExpireSeconds
+            || (!content.group.isEmpty() && !isValidGroupId(content.group))
+            || (!content.sentTo.isEmpty() && !isValidUsername(content.sentTo)))
+            return {};
+        json.insert(QStringLiteral("t"), QStringLiteral("timer"));
+        json.insert(QStringLiteral("expire"), double(content.expireSeconds));
+        if (!content.group.isEmpty())
+            json.insert(QStringLiteral("group"), content.group);
+        if (!content.sentTo.isEmpty())
+            json.insert(QStringLiteral("sentTo"), content.sentTo);
     } else if (content.type == Content::Type::Leave) {
         if (!isValidGroupId(content.group))
             return {};
@@ -405,6 +431,13 @@ std::optional<Content> decodeContent(const QByteArray &padded)
                 return std::nullopt;
             content.sentTo = sentTo.toString();
         }
+        const QJsonValue expire = json.value(QStringLiteral("expire"));
+        if (!expire.isUndefined()) {
+            const auto seconds = Json::integer(expire, 0, MaxExpireSeconds);
+            if (!seconds)
+                return std::nullopt;
+            content.expireSeconds = *seconds;
+        }
         const QJsonValue attachments = json.value(QStringLiteral("attachments"));
         if (!attachments.isUndefined()) {
             if (!attachments.isArray() || attachments.toArray().isEmpty()
@@ -417,6 +450,19 @@ std::optional<Content> decodeContent(const QByteArray &padded)
                 content.attachments.append(*pointer);
             }
         }
+        return content;
+    }
+    if (type == QLatin1String("timer")) {
+        content.type = Content::Type::Timer;
+        const auto seconds = Json::integer(json.value(QStringLiteral("expire")), 0, MaxExpireSeconds);
+        const QJsonValue group = json.value(QStringLiteral("group"));
+        const QJsonValue sentTo = json.value(QStringLiteral("sentTo"));
+        if (!seconds || (!group.isUndefined() && (!group.isString() || !isValidGroupId(group.toString())))
+            || (!sentTo.isUndefined() && (!sentTo.isString() || !isValidUsername(sentTo.toString()))))
+            return std::nullopt;
+        content.expireSeconds = *seconds;
+        content.group = group.toString();
+        content.sentTo = sentTo.toString();
         return content;
     }
     if (type == QLatin1String("group") || type == QLatin1String("leave")) {

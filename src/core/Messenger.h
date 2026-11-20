@@ -109,6 +109,16 @@ public:
     static QString encodeLinkCode(const QByteArray &publicKey, const QString &slot);
     static bool decodeLinkCode(const QString &code, QByteArray *publicKey, QString *slot);
 
+    // Disappearing messages, as Signal's: either side of a chat (any member
+    // of a group) sets the conversation's timer; each message then carries
+    // it and disappears that long after it is seen (mine: after it is sent),
+    // on every side, attachments and all.
+    void setDisappearing(qint64 conversation, qint64 seconds);
+    // "1 hour", "off"…: for the notes and the menu.
+    static QString describeTimer(qint64 seconds);
+    // Tests (and the timer): deletes what is due now, then waits for the next.
+    void expireNow();
+
     // Profiles: a display name and a picture, sent only inside encrypted
     // messages, to the people I write to or accept (and again to them all
     // when it changes); the server never has one. The picture: PNG or JPEG,
@@ -187,6 +197,8 @@ private:
     void handleSync(const Protocol::Content &content);
     void applyMyProfile(const QString &name, const std::optional<Attachment::Pointer> &avatar);
     void onProvision(const QByteArray &sealed);
+    void scheduleExpiry();
+    void handleTimer(const QString &from, const Protocol::Content &content);
     // From the linking message: my contacts, groups and blocked people.
     void takeLinkedState(const QJsonObject &json);
     void finishLinking(bool ok, const QString &error);
@@ -228,6 +240,7 @@ private:
     bool m_avatarUploading = false;
     bool m_avatarFetching = false;
     QSet<QString> m_profileInFlight;
+    QTimer m_expiry; // the next disappearing message
     // Linking this device: while waiting for the account.
     Done m_linkDone;
     LinkCode m_linkCode;

@@ -27,6 +27,9 @@ Messenger::Messenger(ChatStore *store, KeyStore *keys, QObject *parent)
     }
     m_state = hasAccount() ? State::Offline : State::NoAccount;
 
+    m_expiry.setSingleShot(true);
+    connect(&m_expiry, &QTimer::timeout, this, &Messenger::expireNow);
+    QTimer::singleShot(0, this, &Messenger::expireNow); // what came due while closed
     m_rotation.setInterval(6 * 3600 * 1000);
     connect(&m_rotation, &QTimer::timeout, this, &Messenger::rotateSignedPreKey);
     m_retry.setSingleShot(true);
@@ -374,8 +377,14 @@ qint64 Messenger::send(qint64 conversation, const QString &text)
     const ChatStore::Conversation c = m_store->conversation(conversation);
     if (c.id == 0 || text.isEmpty())
         return 0;
-    if (c.kind == QLatin1String("self"))
-        return m_store->addMessage(conversation, text).id;
+    if (c.kind == QLatin1String("self")) {
+        const qint64 id = m_store->addMessage(conversation, text).id;
+        if (id != 0 && c.expireSeconds > 0) {
+            m_store->setMessageExpiry(id, c.expireSeconds, now());
+            scheduleExpiry();
+        }
+        return id;
+    }
     if (c.left)
         return 0; // not in that group any more
     if (c.request)
@@ -384,8 +393,12 @@ qint64 Messenger::send(qint64 conversation, const QString &text)
     const ChatStore::Message message =
         m_store->addMessage(conversation, text, QString(), QDateTime::fromMSecsSinceEpoch(content.sentAt, QTimeZone::utc()),
                             content.id, QStringLiteral("sending"));
+    if (message.id != 0 && c.expireSeconds > 0) {
+        m_store->setMessageExpiry(message.id, c.expireSeconds, now()); // mine: from now
+        scheduleExpiry();
+    }
     if (message.id != 0 && m_state == State::Online)
-        deliver(message);
+        deliver(m_store->message(message.id));
     return message.id;
 }
 
@@ -443,6 +456,7 @@ void Messenger::deliver(const ChatStore::Message &message)
     content.id = message.uid;
     content.sentAt = message.sentAt.toMSecsSinceEpoch();
     content.body = message.body;
+    content.expireSeconds = message.expireSeconds;
     for (const ChatStore::StoredAttachment &a : attachments)
         content.attachments.append({a.remoteId, a.key, a.digest, a.size, a.name, a.type});
     if (Protocol::encodeContent(content).isEmpty()) {
@@ -524,6 +538,10 @@ qint64 Messenger::sendFile(qint64 conversation, const QString &path, const QStri
                             content.id, direct ? QStringLiteral("sending") : QStringLiteral("sent"));
     if (message.id == 0)
         return fail(tr("The message could not be kept."));
+    if (c.expireSeconds > 0) {
+        m_store->setMessageExpiry(message.id, c.expireSeconds, now());
+        scheduleExpiry();
+    }
     ChatStore::StoredAttachment a;
     a.message = message.id;
     a.name = Attachment::safeName(QFileInfo(path).fileName());
@@ -669,6 +687,11 @@ void Messenger::markRead(qint64 conversation)
     const ChatStore::Conversation c = m_store->conversation(conversation);
     if (c.request)
         return; // seen only once accepted: until then they learn nothing
+    // Seen: disappearing ones start counting (after the marking below).
+    QTimer::singleShot(0, this, [this, conversation] {
+        m_store->startExpiry(conversation, now());
+        scheduleExpiry();
+    });
     if (c.kind == QLatin1String("group")) {
         const QHash<QString, QStringList> byAuthor = m_store->unseenUidsByAuthor(conversation);
         m_store->markRead(conversation);
@@ -808,6 +831,10 @@ void Messenger::handleContent(const QString &from, const Protocol::Envelope &env
         handleLeave(from, content);
         return;
     }
+    if (content.type == Protocol::Content::Type::Timer) {
+        handleTimer(from, content);
+        return;
+    }
     if (content.type == Protocol::Content::Type::Receipt) {
         m_store->advanceStatusFrom(from, content.receiptFor,
                                    content.receipt == Protocol::Content::Receipt::Read ? QStringLiteral("read")
@@ -833,6 +860,8 @@ void Messenger::handleContent(const QString &from, const Protocol::Envelope &env
     const qint64 sentAt = content.sentAt > envelope.serverTime + 5 * 60 * 1000 ? envelope.serverTime : content.sentAt;
     const ChatStore::Message message = m_store->addMessage(
         conversation, content.body, from, QDateTime::fromMSecsSinceEpoch(sentAt, QTimeZone::utc()), content.id);
+    if (content.expireSeconds > 0)
+        m_store->setMessageExpiry(message.id, content.expireSeconds, 0); // counts once seen
     // Its attachments: fetched now, or once a request is accepted.
     for (const Attachment::Pointer &pointer : content.attachments) {
         ChatStore::StoredAttachment a;
@@ -1504,6 +1533,10 @@ void Messenger::handleSync(const Protocol::Content &content)
         const ChatStore::Message message = m_store->addMessage(
             conversation, content.body, QString(), QDateTime::fromMSecsSinceEpoch(content.sentAt, QTimeZone::utc()),
             content.id, QStringLiteral("sent"));
+        if (content.expireSeconds > 0) {
+            m_store->setMessageExpiry(message.id, content.expireSeconds, content.sentAt);
+            scheduleExpiry();
+        }
         for (const Attachment::Pointer &pointer : content.attachments) {
             ChatStore::StoredAttachment a;
             a.message = message.id;
@@ -1521,8 +1554,11 @@ void Messenger::handleSync(const Protocol::Content &content)
     }
     case Protocol::Content::Type::Receipt:
         // Read on another of my devices.
-        if (content.receipt == Protocol::Content::Receipt::Read)
+        if (content.receipt == Protocol::Content::Receipt::Read) {
             m_store->markSeenUids(content.receiptFor);
+            m_store->startExpiryForUids(content.receiptFor, now());
+            scheduleExpiry();
+        }
         return;
     case Protocol::Content::Type::Profile:
         applyMyProfile(content.name, content.avatar);
@@ -1533,6 +1569,9 @@ void Messenger::handleSync(const Protocol::Content &content)
     case Protocol::Content::Type::Leave:
         if (const qint64 conversation = m_store->groupConversation(content.group))
             m_store->setLeft(conversation);
+        return;
+    case Protocol::Content::Type::Timer:
+        handleTimer(username(), content); // set on another device of mine
         return;
     }
 }
@@ -1598,4 +1637,94 @@ void Messenger::takeLinkedState(const QJsonObject &json)
         group.revision = checked->groupRevision;
         m_store->addGroup(group, false);
     }
+}
+
+// --- Disappearing messages ---
+
+QString Messenger::describeTimer(qint64 seconds)
+{
+    if (seconds <= 0)
+        return tr("off");
+    struct Unit
+    {
+        qint64 seconds;
+        const char *one;
+        const char *many;
+    };
+    static const Unit units[] = {{7 * 24 * 3600, "1 week", "%1 weeks"}, {24 * 3600, "1 day", "%1 days"},
+                                 {3600, "1 hour", "%1 hours"},          {60, "1 minute", "%1 minutes"},
+                                 {1, "1 second", "%1 seconds"}};
+    for (const Unit &unit : units) {
+        if (seconds % unit.seconds == 0) {
+            const qint64 count = seconds / unit.seconds;
+            return count == 1 ? tr(unit.one) : tr(unit.many).arg(count);
+        }
+    }
+    return tr("%1 seconds").arg(seconds);
+}
+
+// The notes carry real time, as the messages do (the clock `now()` is for
+// the countdowns, which tests move on).
+void Messenger::setDisappearing(qint64 conversation, qint64 seconds)
+{
+    const ChatStore::Conversation c = m_store->conversation(conversation);
+    seconds = qBound(qint64(0), seconds, Protocol::MaxExpireSeconds);
+    if (c.id == 0 || c.left || c.expireSeconds == seconds)
+        return;
+    m_store->setExpireSeconds(conversation, seconds);
+    m_store->addSystemNote(conversation, tr("You set disappearing messages to %1.").arg(describeTimer(seconds)),
+                           QDateTime::currentDateTimeUtc());
+    Protocol::Content timer = Protocol::Content::timer(seconds);
+    Protocol::Content copy = timer;
+    if (c.kind == QLatin1String("direct")) {
+        sendContent(c.peer, timer, [](bool, const QString &) {});
+        copy.sentTo = c.peer;
+    } else if (c.kind == QLatin1String("group")) {
+        timer.group = c.peer;
+        copy.group = c.peer;
+        fanOut(othersIn(conversation), timer, [](bool, const QString &) {});
+    } else {
+        return; // Note to Self: here only
+    }
+    syncToMyDevices(copy);
+}
+
+void Messenger::handleTimer(const QString &from, const Protocol::Content &content)
+{
+    qint64 conversation = 0;
+    const bool mine = from == username();
+    if (!content.group.isEmpty()) {
+        conversation = m_store->groupConversation(content.group);
+        if (conversation == 0 || m_store->conversation(conversation).left || !m_store->isMember(conversation, from))
+            return;
+    } else {
+        // Theirs to me, or mine (another device of mine) to them.
+        conversation = m_store->directConversation(mine ? content.sentTo : from);
+        if (conversation == 0)
+            return; // no conversation: nothing to set (it does not start one)
+    }
+    if (m_store->conversation(conversation).expireSeconds == content.expireSeconds)
+        return;
+    m_store->setExpireSeconds(conversation, content.expireSeconds);
+    const QString who = mine ? tr("You") : displayName(from);
+    m_store->addSystemNote(conversation,
+                           tr("%1 set disappearing messages to %2.").arg(who, describeTimer(content.expireSeconds)),
+                           QDateTime::currentDateTimeUtc());
+}
+
+void Messenger::expireNow()
+{
+    m_store->deleteExpired(now());
+    scheduleExpiry();
+}
+
+void Messenger::scheduleExpiry()
+{
+    const qint64 next = m_store->nextExpiry();
+    if (next == 0) {
+        m_expiry.stop();
+        return;
+    }
+    // At most a day ahead (a timer's int); it looks again then.
+    m_expiry.start(int(qBound(qint64(0), next - now(), qint64(24 * 3600 * 1000))));
 }

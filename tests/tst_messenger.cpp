@@ -781,6 +781,96 @@ private slots:
         QVERIFY(laptop.last(laptopToBob) != QString("only one computer again"));
     }
 
+    void disappearing()
+    {
+        qint64 clock = QDateTime::currentMSecsSinceEpoch();
+        const qint64 hour = 3600 * 1000;
+        Device alice(file("alice"));
+        Device bob(file("bob"));
+        Device carol(file("carol"));
+        for (Device *d : {&alice, &bob, &carol})
+            d->messenger->setClock([&clock] { return clock; });
+        QVERIFY(signUp(alice, "alice"));
+        QVERIFY(signUp(bob, "bob"));
+        QVERIFY(signUp(carol, "carol"));
+        const qint64 toBob = startConversation(alice, "bob");
+        alice.messenger->send(toBob, "hi");
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("alice") > 0, kWait);
+        const qint64 toAlice = bob.store->directConversation("alice");
+        bob.messenger->acceptRequest(toAlice);
+
+        // Alice sets an hour: Bob's side follows, with a note on each.
+        QCOMPARE(Messenger::describeTimer(3600), QString("1 hour"));
+        QCOMPARE(Messenger::describeTimer(4 * 7 * 24 * 3600), QString("4 weeks"));
+        QCOMPARE(Messenger::describeTimer(0), QString("off"));
+        alice.messenger->setDisappearing(toBob, 3600);
+        QCOMPARE(alice.store->conversation(toBob).expireSeconds, 3600);
+        QVERIFY(alice.store->messages(toBob).last().system);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.store->conversation(toAlice).expireSeconds, 3600, kWait);
+        QVERIFY(bob.store->messages(toAlice).last().system);
+        QCOMPARE(bob.store->messages(toAlice).last().body, QString("alice set disappearing messages to 1 hour."));
+
+        // A message: Alice's copy counts from sending, Bob's once he has seen it.
+        const qint64 secret = alice.messenger->send(toBob, "this goes away");
+        QCOMPARE(alice.store->message(secret).expiresAt, clock + hour);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(toAlice), QString("this goes away"), kWait);
+        const ChatStore::Message got = bob.store->messages(toAlice).last();
+        QCOMPARE(got.expireSeconds, 3600);
+        QCOMPARE(got.expiresAt, 0); // not seen yet
+        clock += hour / 2;
+        bob.messenger->markRead(toAlice);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.store->message(got.id).expiresAt, clock + hour, kWait);
+
+        // A file, the same way.
+        const QString path = m_dir.filePath("plan.txt");
+        { QFile f(path); QVERIFY(f.open(QIODevice::WriteOnly)); f.write("the plan"); }
+        QVERIFY(bob.messenger->sendFile(toAlice, path, QString()) > 0);
+        QTRY_COMPARE_WITH_TIMEOUT(alice.store->messages(toBob).size(), 4, kWait); // hi, the note, the secret, the file
+        const qint64 planMessage = alice.store->messages(toBob).last().id;
+        QTRY_COMPARE_WITH_TIMEOUT(alice.store->attachments(planMessage).first().state, QString("ready"), kWait);
+        alice.messenger->markRead(toBob);
+        QTRY_VERIFY_WITH_TIMEOUT(alice.store->message(planMessage).expiresAt > 0, kWait);
+        QCOMPARE(QDir(alice.store->attachmentFolder()).entryList(QDir::Files).size(), 1);
+
+        // Half an hour on: Alice's own is gone (an hour since sent); Bob's copy stays a while.
+        clock += hour / 2 + 1;
+        alice.messenger->expireNow();
+        bob.messenger->expireNow();
+        QVERIFY(alice.store->message(secret).id == 0);
+        QCOMPARE(bob.store->message(got.id).id, got.id);
+        // And an hour after he read it, his too; the file with Alice's.
+        clock += hour;
+        alice.messenger->expireNow();
+        bob.messenger->expireNow();
+        QVERIFY(bob.store->message(got.id).id == 0);
+        QVERIFY(alice.store->message(planMessage).id == 0);
+        QCOMPARE(QDir(alice.store->attachmentFolder()).entryList(QDir::Files).size(), 0);
+        // The notes and the earlier message stay.
+        QCOMPARE(bob.store->messages(toAlice).first().body, QString("hi"));
+
+        // Bob turns it off: new messages stay.
+        bob.messenger->setDisappearing(toAlice, 0);
+        QTRY_COMPARE_WITH_TIMEOUT(alice.store->conversation(toBob).expireSeconds, 0, kWait);
+        QCOMPARE(alice.store->messages(toBob).last().body, QString("bob set disappearing messages to off."));
+        const qint64 stays = alice.messenger->send(toBob, "this stays");
+        QCOMPARE(alice.store->message(stays).expiresAt, 0);
+
+        // A stranger's timer starts nothing.
+        const qint64 carolToBob = startConversation(carol, "bob");
+        carol.messenger->setDisappearing(carolToBob, 60);
+        QTest::qWait(300);
+        QCOMPARE(bob.store->directConversation("carol"), 0);
+
+        // In a group: any member sets it for all.
+        std::optional<qint64> group;
+        alice.messenger->createGroup("Quiet", {"bob"}, [&](qint64 c, const QString &) { group = c; });
+        QTRY_VERIFY_WITH_TIMEOUT(group.has_value() && *group > 0, kWait);
+        const QString gid = alice.store->group(*group).id;
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->groupConversation(gid) > 0, kWait);
+        bob.messenger->setDisappearing(bob.store->groupConversation(gid), 300);
+        QTRY_COMPARE_WITH_TIMEOUT(alice.store->conversation(*group).expireSeconds, 300, kWait);
+    }
+
     void keyStoreTrust()
     {
         Device alice(file("alice"));

@@ -14,6 +14,7 @@
 #include <QImage>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QPushButton>
 #include <QSignalSpy>
 #include <QToolButton>
@@ -524,6 +525,67 @@ private slots:
         cancelled.reject();
         QCOMPARE(third.state(), Messenger::State::NoAccount);
         QVERIFY(!thirdKeys.account());
+    }
+
+    void disappearingInTheWindow()
+    {
+        ServerStore serverStore(QDir::homePath() + QStringLiteral("/server8/server.sqlite"));
+        ChatServer server(&serverStore);
+        QVERIFY(server.listen());
+        const QUrl url(QStringLiteral("ws://127.0.0.1:%1").arg(server.port()));
+        auto signUp = [&](Messenger &m, const QString &name) {
+            std::optional<bool> ok;
+            m.signUp(url, name, [&](bool done, const QString &) { ok = done; });
+            return QTest::qWaitFor([&] { return ok.has_value(); }, 5000) && *ok;
+        };
+        ChatStore store(QDir::homePath() + QStringLiteral("/me8/chat.sqlite"));
+        KeyStore keys(&store);
+        Messenger me(&store, &keys);
+        QVERIFY(signUp(me, QStringLiteral("myself")));
+        ChatStore annaStore(QDir::homePath() + QStringLiteral("/anna8/chat.sqlite"));
+        KeyStore annaKeys(&annaStore);
+        Messenger anna(&annaStore, &annaKeys);
+        QVERIFY(signUp(anna, QStringLiteral("anna")));
+        MainWindow window(&store, &me);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        window.startChatWith(QStringLiteral("anna"));
+        QTRY_VERIFY(store.directConversation(QStringLiteral("anna")) > 0);
+        const qint64 toAnna = store.directConversation(QStringLiteral("anna"));
+        QTRY_COMPARE(window.currentConversation(), toAnna);
+        me.send(toAnna, QStringLiteral("hello"));
+        QTRY_VERIFY_WITH_TIMEOUT(annaStore.directConversation(QStringLiteral("myself")) > 0, 5000);
+        anna.acceptRequest(annaStore.directConversation(QStringLiteral("myself")));
+
+        // Conversation › Disappearing Messages › 1 hour.
+        QAction *hour = nullptr;
+        for (QAction *a : window.timerMenu()->actions())
+            if (a->data().toLongLong() == 3600)
+                hour = a;
+        QVERIFY(hour);
+        QVERIFY(window.timerMenu()->isEnabled());
+        hour->trigger();
+        QVERIFY(hour->isChecked());
+        QVERIFY(window.findChild<QLabel *>(QStringLiteral("chatSubtitle"))->text().contains(QStringLiteral("⏱ 1 hour")));
+        QTRY_COMPARE(window.messages()->count(), 2);
+        QVERIFY(window.messages()->item(1)->data(Qt::UserRole + 14).toBool()); // a note
+        QCOMPARE(window.messages()->item(1)->text(), QStringLiteral("You set disappearing messages to 1 hour."));
+        QTRY_COMPARE_WITH_TIMEOUT(annaStore.conversation(annaStore.directConversation(QStringLiteral("myself"))).expireSeconds,
+                                  3600, 5000);
+        // What I write now carries the ⏱.
+        QTest::keyClicks(window.composeField(), QStringLiteral("this goes"));
+        QTest::keyClick(window.composeField(), Qt::Key_Return);
+        QTRY_COMPARE(window.messages()->count(), 3);
+        QVERIFY(window.messages()->item(2)->data(Qt::UserRole + 15).toBool());
+        QVERIFY(!window.messages()->item(0)->data(Qt::UserRole + 15).toBool()); // the first did not
+        if (qEnvironmentVariableIsSet("CHAT_TEST_GRAB")) {
+            window.resize(1000, 640);
+            QTest::qWait(200);
+            window.grab().save(qEnvironmentVariable("CHAT_TEST_GRAB"));
+        }
+        // Off again.
+        window.setDisappearing(0);
+        QVERIFY(!window.findChild<QLabel *>(QStringLiteral("chatSubtitle"))->text().contains(QStringLiteral("⏱")));
     }
 
     void notificationContent()

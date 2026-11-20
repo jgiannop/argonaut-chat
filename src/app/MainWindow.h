@@ -11,6 +11,7 @@ class Messenger;
 class TrayIcon;
 class QLabel;
 class QListWidget;
+class QMenu;
 class QToolButton;
 class QPlainTextEdit;
 class QPushButton;
@@ -46,6 +47,9 @@ public:
     void blockRequest(bool ask);
     // The open group: left (`ask`: confirm first).
     void leaveGroup(bool ask);
+    // The open conversation's disappearing messages (0: off).
+    void setDisappearing(qint64 seconds);
+    QMenu *timerMenu() const { return m_timerMenu; }
     // A file into the open conversation, with what is typed as its caption (the 📎 button).
     void attachFile(const QString &path);
     // An attachment, decrypted, into `path` (a click on it asks where).
@@ -105,6 +109,7 @@ private:
     QAction *m_profileAction = nullptr;
     QAction *m_newGroupAction = nullptr;
     QAction *m_devicesAction = nullptr;
+    QMenu *m_timerMenu = nullptr;
     QAction *m_membersAction = nullptr;
     QAction *m_leaveAction = nullptr;
     QLabel *m_leftNote = nullptr;

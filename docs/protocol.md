@@ -98,6 +98,20 @@ admin and a member list (at most 50, the admin among them):
 - Receipts go to the author: a group message is ✓✓ once a member has it,
   read once a member has read it.
 
+### Disappearing messages
+
+```json
+{"v":1, "t":"timer", "id":"<uuid>", "sent":…, "expire":3600, "group":"<32 hex>"?}
+{"v":1, "t":"text", …, "expire":3600}
+```
+
+Either side of a chat, or any member of a group, sets a conversation's
+timer (seconds, at most four weeks; 0 is off); every side shows a note. A
+text carries its timer: the sender's copy counts from sending, the
+recipient's from when it is seen (read on another device of mine counts
+too); then it is deleted on each side with its attachments. A timer from
+someone with no conversation starts none.
+
 ## Layer 2: CipherMessage (binary)
 
 The padded Content encrypted by the sender's `Session` for one device:

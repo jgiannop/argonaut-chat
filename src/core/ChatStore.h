@@ -37,6 +37,7 @@ public:
         int unread = 0;
         bool request = false; // a message request: someone I have not accepted yet
         bool left = false;    // a group I am no longer in (read only)
+        qint64 expireSeconds = 0; // disappearing messages: 0 off
     };
 
     struct Message
@@ -48,6 +49,9 @@ public:
         QDateTime sentAt;
         QString status; // mine: "sending", "sent", "delivered", "read", "failed"; theirs: "received"
         QString uid;    // the message's id on the wire (Protocol::Content::id); empty for notes to self
+        qint64 expireSeconds = 0; // disappears this long after it is seen (mine: sent); 0 never
+        qint64 expiresAt = 0;     // ms; 0: not counting yet
+        bool system = false;      // a note in the conversation ("… set disappearing messages …")
         bool outgoing() const { return author.isEmpty(); }
     };
 
@@ -99,6 +103,20 @@ public:
     void markRead(qint64 conversation);
     // Read on another of my devices: theirs with these wire ids, seen.
     void markSeenUids(const QStringList &uids);
+
+    // Disappearing messages.
+    void setExpireSeconds(qint64 conversation, qint64 seconds);
+    // A message's timer; mine count from `startAt` (ms; 0: once seen).
+    void setMessageExpiry(qint64 message, qint64 seconds, qint64 startAt);
+    // Theirs, seen and on a timer: counting from `now` (ms).
+    void startExpiry(qint64 conversation, qint64 now);
+    void startExpiryForUids(const QStringList &uids, qint64 now);
+    // Gone, with their attachments' files: those whose time came. How many.
+    int deleteExpired(qint64 now);
+    // The next moment one is due (ms), or 0.
+    qint64 nextExpiry() const;
+    // A note in the conversation, not a message from anyone.
+    qint64 addSystemNote(qint64 conversation, const QString &text, const QDateTime &at);
 
     // People whose messages are dropped.
     void block(const QString &username);

@@ -123,6 +123,21 @@ void ChatStore::createTables()
                           " file TEXT NOT NULL DEFAULT '',"
                           " state TEXT NOT NULL)"));
     q.exec(QStringLiteral("CREATE INDEX IF NOT EXISTS attachments_by_message ON attachments(message)"));
+    // Added with disappearing messages.
+    const auto addColumn = [this](const QString &table, const QString &column, const QString &definition) {
+        QSqlQuery info(m_db);
+        info.exec(QStringLiteral("PRAGMA table_info(%1)").arg(table));
+        while (info.next()) {
+            if (info.value(1).toString() == column)
+                return;
+        }
+        QSqlQuery(m_db).exec(QStringLiteral("ALTER TABLE %1 ADD COLUMN %2 %3").arg(table, column, definition));
+    };
+    addColumn(QStringLiteral("conversations"), QStringLiteral("expire_seconds"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
+    addColumn(QStringLiteral("messages"), QStringLiteral("expire_seconds"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
+    addColumn(QStringLiteral("messages"), QStringLiteral("expires_at"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
+    addColumn(QStringLiteral("messages"), QStringLiteral("system"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
+    q.exec(QStringLiteral("CREATE INDEX IF NOT EXISTS messages_by_expiry ON messages(expires_at)"));
     q.exec(QStringLiteral("CREATE TABLE IF NOT EXISTS group_info ("
                           " conversation INTEGER PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,"
                           " admin TEXT NOT NULL,"
@@ -151,7 +166,8 @@ void ChatStore::createTables()
 
 namespace {
 
-const QString kMessageColumns = QStringLiteral("id, conversation, author, body, sent_at, status, uid");
+const QString kMessageColumns =
+    QStringLiteral("id, conversation, author, body, sent_at, status, uid, expire_seconds, expires_at, system");
 
 ChatStore::Message messageFrom(const QSqlQuery &q)
 {
@@ -163,6 +179,9 @@ ChatStore::Message messageFrom(const QSqlQuery &q)
     m.sentAt = QDateTime::fromMSecsSinceEpoch(q.value(4).toLongLong(), QTimeZone::utc());
     m.status = q.value(5).toString();
     m.uid = q.value(6).toString();
+    m.expireSeconds = q.value(7).toLongLong();
+    m.expiresAt = q.value(8).toLongLong();
+    m.system = q.value(9).toBool();
     return m;
 }
 
@@ -183,7 +202,7 @@ QList<ChatStore::Conversation> ChatStore::conversations() const
 {
     QList<Conversation> out;
     QSqlQuery q(m_db);
-    q.exec(QStringLiteral("SELECT c.id, c.kind, c.title, c.peer, c.last_activity, c.state,"
+    q.exec(QStringLiteral("SELECT c.id, c.kind, c.title, c.peer, c.last_activity, c.state, c.expire_seconds,"
                           // The newest message: its text, or else its first attachment's name.
                           " (SELECT CASE WHEN m.body = '' THEN COALESCE('📎 ' || (SELECT a.name FROM attachments a"
                           "  WHERE a.message = m.id ORDER BY a.id LIMIT 1), '') ELSE m.body END"
@@ -199,8 +218,9 @@ QList<ChatStore::Conversation> ChatStore::conversations() const
         c.lastActivity = QDateTime::fromMSecsSinceEpoch(q.value(4).toLongLong(), QTimeZone::utc());
         c.request = q.value(5).toString() == QLatin1String("request");
         c.left = q.value(5).toString() == QLatin1String("left");
-        c.lastText = q.value(6).toString();
-        c.unread = q.value(7).toInt();
+        c.expireSeconds = q.value(6).toLongLong();
+        c.lastText = q.value(7).toString();
+        c.unread = q.value(8).toInt();
         out.append(c);
     }
     return out;
@@ -907,4 +927,106 @@ void ChatStore::markSeenUids(const QStringList &uids)
     for (qint64 conversation : std::as_const(conversations))
         emit messagesChanged(conversation);
     emit conversationsChanged();
+}
+
+// --- Disappearing messages ---
+
+void ChatStore::setExpireSeconds(qint64 conversation, qint64 seconds)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("UPDATE conversations SET expire_seconds = ? WHERE id = ?"));
+    q.addBindValue(seconds);
+    q.addBindValue(conversation);
+    q.exec();
+    emit conversationsChanged();
+}
+
+void ChatStore::setMessageExpiry(qint64 message, qint64 seconds, qint64 startAt)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("UPDATE messages SET expire_seconds = ?, expires_at = ? WHERE id = ?"));
+    q.addBindValue(seconds);
+    q.addBindValue(seconds > 0 && startAt > 0 ? startAt + seconds * 1000 : 0);
+    q.addBindValue(message);
+    q.exec();
+    emit messagesChanged(this->message(message).conversation); // its ⏱ shows
+}
+
+void ChatStore::startExpiry(qint64 conversation, qint64 now)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("UPDATE messages SET expires_at = ? + expire_seconds * 1000"
+                             " WHERE conversation = ? AND expire_seconds > 0 AND expires_at = 0 AND seen = 1"));
+    q.addBindValue(now);
+    q.addBindValue(conversation);
+    q.exec();
+}
+
+void ChatStore::startExpiryForUids(const QStringList &uids, qint64 now)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("UPDATE messages SET expires_at = ? + expire_seconds * 1000"
+                             " WHERE uid = ? AND expire_seconds > 0 AND expires_at = 0"));
+    for (const QString &uid : uids) {
+        q.bindValue(0, now);
+        q.bindValue(1, uid);
+        q.exec();
+    }
+}
+
+int ChatStore::deleteExpired(qint64 now)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT id, conversation FROM messages WHERE expires_at > 0 AND expires_at <= ?"));
+    q.addBindValue(now);
+    q.exec();
+    QList<qint64> ids;
+    QSet<qint64> conversations;
+    while (q.next()) {
+        ids << q.value(0).toLongLong();
+        conversations.insert(q.value(1).toLongLong());
+    }
+    if (ids.isEmpty() || !m_db.transaction())
+        return 0;
+    QSqlQuery files(m_db);
+    files.prepare(QStringLiteral("SELECT file FROM attachments WHERE message = ? AND file <> ''"));
+    QSqlQuery del(m_db);
+    QStringList names;
+    for (qint64 id : ids) {
+        files.bindValue(0, id);
+        files.exec();
+        while (files.next())
+            names << files.value(0).toString();
+        del.prepare(QStringLiteral("DELETE FROM attachments WHERE message = ?"));
+        del.addBindValue(id);
+        del.exec();
+        del.prepare(QStringLiteral("DELETE FROM messages WHERE id = ?"));
+        del.addBindValue(id);
+        del.exec();
+    }
+    m_db.commit();
+    for (const QString &name : names)
+        QFile::remove(m_attachments + QLatin1Char('/') + name);
+    for (qint64 conversation : std::as_const(conversations))
+        emit messagesChanged(conversation);
+    emit conversationsChanged();
+    return int(ids.size());
+}
+
+qint64 ChatStore::nextExpiry() const
+{
+    QSqlQuery q(m_db);
+    q.exec(QStringLiteral("SELECT MIN(expires_at) FROM messages WHERE expires_at > 0"));
+    return q.next() ? q.value(0).toLongLong() : 0;
+}
+
+qint64 ChatStore::addSystemNote(qint64 conversation, const QString &text, const QDateTime &at)
+{
+    const Message note = addMessage(conversation, text, QString(), at, QString(), QStringLiteral("note"));
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("UPDATE messages SET system = 1 WHERE id = ?"));
+    q.addBindValue(note.id);
+    q.exec();
+    emit messagesChanged(conversation);
+    return note.id;
 }

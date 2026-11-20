@@ -34,6 +34,8 @@ constexpr int MaxCipherMessageBytes = 192 * 1024;
 constexpr int MaxReceiptIds = 1000;
 constexpr int MaxAttachments = 10; // per message
 constexpr int MaxGroupMembers = 50; // me included
+// Disappearing messages: at most four weeks (seconds).
+constexpr qint64 MaxExpireSeconds = 4LL * 7 * 24 * 3600;
 constexpr int PaddingBlock = 160;
 
 // Usernames: 3 to 32 characters, a-z 0-9 _ and ., starting with a letter, no
@@ -49,7 +51,7 @@ bool isValidMessageId(const QString &id);
 // Layer 1.
 struct Content
 {
-    enum class Type { Text, Receipt, Profile, Group, Leave };
+    enum class Type { Text, Receipt, Profile, Group, Leave, Timer };
     enum class Receipt { Delivered, Read };
 
     Type type = Type::Text;
@@ -65,8 +67,11 @@ struct Content
     // Text, Group, Leave: the group (32 hex digits; empty: a direct message).
     QString group;
     // Text, to my own other devices only: whom I sent it to (a username), so
-    // they show it as mine (a group's has `group` instead).
+    // they show it as mine (a group's has `group` instead). Timer too.
     QString sentTo;
+    // Text: disappears this many seconds after it is seen (0: never).
+    // Timer: the conversation's new setting (with `group` for a group's).
+    qint64 expireSeconds = 0;
     // Group (from its admin): its name, admin, members (the admin among
     // them) and revision (each update one higher; older ones are ignored).
     QString groupName;
@@ -80,6 +85,7 @@ struct Content
     static Content groupUpdate(const QString &group, const QString &name, const QString &admin,
                                const QStringList &members, int revision);
     static Content leave(const QString &group);
+    static Content timer(qint64 seconds, const QString &group = QString());
 };
 
 // A group's id: 32 lower-case hex digits, random.

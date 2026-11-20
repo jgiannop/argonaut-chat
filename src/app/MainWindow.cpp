@@ -51,6 +51,8 @@ enum Role {
     AvatarRole,     // a conversation's picture (QPixmap), if they sent one
     PeerRole,       // a conversation's username (search finds it too)
     AuthorRole,     // in a group, who wrote it (theirs only)
+    SystemRole,     // a note in the conversation, not a message
+    ExpireRole,     // a disappearing message
 };
 
 QString shortTime(const QDateTime &when)
@@ -224,6 +226,8 @@ public:
     static QString footerFor(const QModelIndex &index, bool *read)
     {
         QString footer = index.data(TimeRole).toString();
+        if (index.data(ExpireRole).toBool())
+            footer = QStringLiteral("⏱ ") + footer;
         *read = false;
         if (index.data(OutgoingRole).toBool()) {
             const QString status = index.data(StatusRole).toString();
@@ -242,6 +246,8 @@ public:
 
     QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override
     {
+        if (index.data(SystemRole).toBool())
+            return {option.rect.width(), QFontMetrics(option.font).height() + 22};
         bool read = false;
         return {option.rect.width(), layout(option, index, footerFor(index, &read)).height + 8};
     }
@@ -250,6 +256,20 @@ public:
     {
         p->save();
         p->setRenderHint(QPainter::Antialiasing);
+        if (index.data(SystemRole).toBool()) {
+            // A note: small, in the middle, no bubble of anyone's.
+            const QFontMetrics fm(option.font);
+            const QString text = index.data().toString();
+            const int w = qMin(option.rect.width() - 40, fm.horizontalAdvance(text) + 24);
+            const QRect pill(option.rect.center().x() - w / 2, option.rect.top() + 6, w, fm.height() + 10);
+            QPainterPath path;
+            path.addRoundedRect(pill, pill.height() / 2.0, pill.height() / 2.0);
+            p->fillPath(path, m_theme->pathBg);
+            p->setPen(m_theme->dimFg);
+            p->drawText(pill, Qt::AlignCenter, fm.elidedText(text, Qt::ElideRight, w - 16));
+            p->restore();
+            return;
+        }
         const bool mine = index.data(OutgoingRole).toBool();
         bool read = false;
         const QString footer = footerFor(index, &read);
@@ -477,6 +497,10 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
     });
     connect(m_store, &ChatStore::conversationsChanged, this, &MainWindow::reloadConversations);
     connect(m_store, &ChatStore::conversationsChanged, this, &MainWindow::updateUnread);
+    connect(m_store, &ChatStore::conversationsChanged, this, [this] {
+        if (m_current != 0)
+            updateHeader();
+    });
     connect(m_store, &ChatStore::profileChanged, this, [this](const QString &username) {
         m_avatars.remove(username);
         reloadConversations();
@@ -585,6 +609,16 @@ void MainWindow::buildMenus()
         updateHeader();
     });
     m_leaveAction = conversation->addAction(tr("Leave Group…"), this, [this] { leaveGroup(true); });
+    conversation->addSeparator();
+    m_timerMenu = conversation->addMenu(tr("Disappearing Messages"));
+    auto *timers = new QActionGroup(m_timerMenu);
+    for (qint64 seconds : {0LL, 30LL, 300LL, 3600LL, 8 * 3600LL, 24 * 3600LL, 7 * 24 * 3600LL, 28 * 24 * 3600LL}) {
+        QAction *a = m_timerMenu->addAction(seconds == 0 ? tr("Off") : Messenger::describeTimer(seconds));
+        a->setCheckable(true);
+        a->setData(seconds);
+        timers->addAction(a);
+        connect(a, &QAction::triggered, this, [this, seconds] { setDisappearing(seconds); });
+    }
 
     QMenu *view = menuBar()->addMenu(tr("&View"));
     QMenu *notifications = view->addMenu(tr("Notifications"));
@@ -681,6 +715,14 @@ void MainWindow::markCurrentRead()
         m_store->markRead(m_current);
 }
 
+void MainWindow::setDisappearing(qint64 seconds)
+{
+    if (!m_messenger || m_current == 0)
+        return;
+    m_messenger->setDisappearing(m_current, seconds);
+    updateHeader();
+}
+
 void MainWindow::updateHeader()
 {
     const ChatStore::Conversation c = m_store->conversation(m_current);
@@ -709,6 +751,13 @@ void MainWindow::updateHeader()
         m_subtitle->setText(tr("@%1 · ✓ verified").arg(c.peer));
     else
         m_subtitle->setText(direct ? QStringLiteral("@") + c.peer : c.peer);
+    if (c.expireSeconds > 0)
+        m_subtitle->setText(m_subtitle->text() + QStringLiteral(" · ⏱ ") + Messenger::describeTimer(c.expireSeconds));
+    if (m_timerMenu) {
+        m_timerMenu->setEnabled(m_messenger && c.id != 0 && !c.left && !c.request);
+        for (QAction *a : m_timerMenu->actions())
+            a->setChecked(a->data().toLongLong() == c.expireSeconds);
+    }
     m_safety->setVisible(direct && m_messenger);
     if (m_safetyAction)
         m_safetyAction->setEnabled(direct && m_messenger);
@@ -893,6 +942,8 @@ void MainWindow::reloadMessages()
         item->setData(OutgoingRole, m.outgoing());
         item->setData(TimeRole, QLocale().toString(m.sentAt.toLocalTime().time(), QLocale::ShortFormat));
         item->setData(StatusRole, m.status);
+        item->setData(SystemRole, m.system);
+        item->setData(ExpireRole, m.expireSeconds > 0);
         if (group && !m.outgoing())
             item->setData(AuthorRole, m_messenger ? m_messenger->displayName(m.author) : m.author);
         const QList<ChatStore::StoredAttachment> attachments = m_store->attachments(m.id);

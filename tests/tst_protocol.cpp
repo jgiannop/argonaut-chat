@@ -192,6 +192,29 @@ private slots:
         QVERIFY(decodeContent(pad(head + "\"admin\":\"alice\",\"members\":[\"alice\"],\"revision\":1}")));
     }
 
+    void timers()
+    {
+        Content text = Content::text("gone soon");
+        text.expireSeconds = 3600;
+        QCOMPARE(decodeContent(encodeContent(text))->expireSeconds, 3600);
+        QCOMPARE(decodeContent(encodeContent(Content::text("stays")))->expireSeconds, 0);
+        text.expireSeconds = MaxExpireSeconds + 1;
+        QVERIFY(encodeContent(text).isEmpty());
+        const QString gid = newGroupId();
+        auto back = decodeContent(encodeContent(Content::timer(300, gid)));
+        QCOMPARE(back->type, Content::Type::Timer);
+        QCOMPARE(back->expireSeconds, 300);
+        QCOMPARE(back->group, gid);
+        back = decodeContent(encodeContent(Content::timer(0)));
+        QCOMPARE(back->expireSeconds, 0); // off
+        QVERIFY(back->group.isEmpty());
+        const QByteArray head = "{\"v\":1,\"t\":\"timer\",\"id\":\"" + newMessageId().toLatin1() + "\",\"sent\":1,";
+        QVERIFY(!decodeContent(pad(head + "\"expire\":-5}")));
+        QVERIFY(!decodeContent(pad(head + "\"expire\":\"1h\"}")));
+        QVERIFY(!decodeContent(pad(head + "\"expire\":99999999}")));
+        QVERIFY(!decodeContent(pad(head + "\"expire\":5,\"group\":\"x\"}")));
+    }
+
     void contentFromStrangers_data()
     {
         QTest::addColumn<QByteArray>("json");
