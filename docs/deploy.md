@@ -59,6 +59,40 @@ app, sign up with the server `wss://188-34-165-32.sslip.io`.
 The same two commands (with the new domain, if it changed): it rebuilds,
 reinstalls and restarts; the database stays.
 
+## Backups
+
+Each night at about 03:30 (`argonaut-chat-backup.timer`), the database is
+copied while the server runs, checked, compressed, and kept in
+`/var/backups/argonaut-chat` (root only); the newest 14 stay. The setup
+makes one at once, too. What is in it: accounts, the devices' public keys,
+and the messages still waiting for delivery (encrypted; the server cannot
+read them).
+
+These copies are on the same machine: they help against a damaged database
+or a mistake, not against losing the machine. For that, turn on Hetzner's
+backups (in the Cloud Console), or copy the folder elsewhere now and then:
+
+```bash
+rsync -a --rsync-path='sudo rsync' jgiannop@SERVER:/var/backups/argonaut-chat/ ~/argonaut-chat-backups/
+```
+
+A backup now: `sudo systemctl start argonaut-chat-backup`. The list:
+`sudo ls -l /var/backups/argonaut-chat`.
+
+### Restoring
+
+```bash
+sudo systemctl stop argonaut-chat-server
+db=/var/lib/argonaut-chat/server.sqlite
+sudo rm -f $db-wal $db-shm
+sudo sh -c "gunzip -c /var/backups/argonaut-chat/server-YYYY-MM-DD-HHMMSS.sqlite.gz > $db"
+sudo chown argonaut-chat:argonaut-chat $db && sudo chmod 600 $db
+sudo systemctl start argonaut-chat-server
+```
+
+Messages that arrived after that backup and were still waiting are lost;
+accounts made after it are gone (their owners sign up again).
+
 ## On the server
 
 ```bash

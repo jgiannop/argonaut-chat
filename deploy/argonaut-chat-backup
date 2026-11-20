@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# The server's database, copied while the server runs (SQLite's online
+# backup), checked, compressed; the newest KEEP (14) kept. Installed into
+# /usr/local/sbin by setup-server.sh and run each night by a systemd timer.
+# Restoring: docs/deploy.md.
+#
+# Environment (tests): DB, DIR, KEEP.
+set -euo pipefail
+
+DB=${DB:-/var/lib/argonaut-chat/server.sqlite}
+DIR=${DIR:-/var/backups/argonaut-chat}
+KEEP=${KEEP:-14}
+[[ $KEEP =~ ^[0-9]+$ ]] && ((KEEP >= 1)) || { echo "KEEP must be a number from 1" >&2; exit 2; }
+
+umask 077
+mkdir -p "$DIR"
+chmod 700 "$DIR"
+if [[ ! -f $DB ]]; then
+    echo "no database yet at $DB"
+    exit 0
+fi
+
+copy=$(mktemp "$DIR/.copy.XXXXXX")
+trap 'rm -f "$copy" "$copy.gz"' EXIT
+sqlite3 "$DB" ".backup '$copy'"
+check=$(sqlite3 "$copy" 'PRAGMA integrity_check;')
+if [[ $check != ok ]]; then
+    echo "the copy is damaged: $check" >&2
+    exit 1
+fi
+gzip -9 "$copy"
+name="$DIR/server-$(date +%Y-%m-%d-%H%M%S).sqlite.gz"
+mv "$copy.gz" "$name"
+
+# The newest KEEP stay.
+find "$DIR" -maxdepth 1 -name 'server-*.sqlite.gz' -printf '%T@ %p\n' | sort -rn | tail -n +$((KEEP + 1)) |
+    cut -d' ' -f2- | while read -r old; do rm -f -- "$old"; done
+echo "backed up to $name ($(du -h "$name" | cut -f1))"

@@ -5,6 +5,8 @@
 #   - builds it from this source (the server alone: no widgets, no keyring)
 #   - runs it under systemd as its own unprivileged user, on 127.0.0.1 only,
 #     its database in /var/lib/argonaut-chat (0700)
+#   - backs that database up each night (deploy/argonaut-chat-backup: 14
+#     kept, in /var/backups/argonaut-chat, root only)
 #   - serves wss://<domain> through the web server that already holds ports
 #     80/443, with its own Let's Encrypt certificate:
 #       * nothing there yet: installs Caddy (it gets the certificate itself)
@@ -105,7 +107,7 @@ say "Installing packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
 packages=(build-essential cmake ninja-build pkg-config
-    qt6-base-dev qt6-websockets-dev libsodium-dev libsqlcipher-dev ca-certificates curl)
+    qt6-base-dev qt6-websockets-dev libsodium-dev libsqlcipher-dev ca-certificates curl sqlite3)
 case $WEB in
     caddy-new | caddy) packages+=(caddy) ;;
     nginx) command -v certbot >/dev/null || packages+=(certbot) ;;
@@ -184,6 +186,40 @@ EOF
 systemctl daemon-reload
 systemctl enable "$SERVICE" >/dev/null
 systemctl restart "$SERVICE"
+
+# --- Nightly backup ---
+
+say "A nightly backup of the database"
+install -m 0755 "$SRC/deploy/argonaut-chat-backup" /usr/local/sbin/argonaut-chat-backup
+cat > /etc/systemd/system/argonaut-chat-backup.service <<EOF
+# Written by deploy/setup-server.sh (Argonaut Chat).
+[Unit]
+Description=Back up the Argonaut Chat server's database
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/argonaut-chat-backup
+Nice=10
+IOSchedulingClass=idle
+PrivateTmp=yes
+ProtectHome=yes
+NoNewPrivileges=yes
+EOF
+cat > /etc/systemd/system/argonaut-chat-backup.timer <<EOF
+# Written by deploy/setup-server.sh (Argonaut Chat).
+[Unit]
+Description=Back up the Argonaut Chat server's database each night
+
+[Timer]
+OnCalendar=*-*-* 03:30
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+systemctl daemon-reload
+systemctl enable --now argonaut-chat-backup.timer >/dev/null
 
 # --- The web server in front ---
 
@@ -320,6 +356,11 @@ sleep 2
 systemctl is-active --quiet "$SERVICE" || die "$SERVICE is not running: journalctl -u $SERVICE"
 ss -ltnH "sport = :$PORT" | grep -q "127.0.0.1:$PORT" || die "nothing listens on 127.0.0.1:$PORT: journalctl -u $SERVICE"
 echo "The server runs, on 127.0.0.1:$PORT only."
+if systemctl start argonaut-chat-backup.service; then
+    echo "A backup now: $(ls -1t /var/backups/argonaut-chat/server-*.sqlite.gz 2>/dev/null | head -1)"
+else
+    warn "the backup did not work: journalctl -u argonaut-chat-backup"
+fi
 # A WebSocket handshake through the web server: "101 Switching Protocols"
 # means TLS, the certificate, the proxy and the server all work. (curl then
 # waits on the open socket until --max-time; that is expected.)
@@ -341,4 +382,5 @@ Done. In Argonaut Chat, sign up with the server:
 Logs:     journalctl -u $SERVICE -f
 Restart:  systemctl restart $SERVICE
 Database: $STATE/server.sqlite
+Backups:  /var/backups/argonaut-chat (each night, the newest 14 kept)
 EOF
