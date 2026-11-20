@@ -10,6 +10,10 @@ find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets Network Sql WebSockets
 # The cryptography: libsodium (1.0.18 on Ubuntu 24.04).
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium>=1.0.18)
+# The local database: SQLCipher (4.5 on Ubuntu 24.04), and its key in the
+# system keyring through QtKeychain.
+pkg_check_modules(SQLCIPHER REQUIRED IMPORTED_TARGET sqlcipher>=4)
+find_package(Qt6Keychain REQUIRED)
 qt_standard_project_setup()
 
 include(GNUInstallDirs)
@@ -18,6 +22,7 @@ include(GNUInstallDirs)
 qt_add_library(chat_core STATIC
     src/core/ChatClient.cpp src/core/ChatClient.h
     src/core/ChatStore.cpp src/core/ChatStore.h
+    src/core/CipherSql.cpp src/core/CipherSql.h
     src/core/Crypto.cpp src/core/Crypto.h
     src/core/KeyStore.cpp src/core/KeyStore.h
     src/core/Messenger.cpp src/core/Messenger.h
@@ -28,18 +33,19 @@ qt_add_library(chat_core STATIC
     src/core/X3dh.cpp src/core/X3dh.h
 )
 target_include_directories(chat_core PUBLIC src/core)
-target_link_libraries(chat_core PUBLIC Qt6::Core Qt6::Network Qt6::Sql Qt6::WebSockets PRIVATE PkgConfig::SODIUM)
+target_link_libraries(chat_core PUBLIC Qt6::Core Qt6::Network Qt6::Sql Qt6::WebSockets PRIVATE PkgConfig::SODIUM PkgConfig::SQLCIPHER)
 target_compile_definitions(chat_core PUBLIC CHAT_VERSION="${PROJECT_VERSION}")
 
 # The window.
 qt_add_library(chat_app STATIC
+    src/app/DatabaseKey.cpp src/app/DatabaseKey.h
     src/app/Dialogs.cpp src/app/Dialogs.h
     src/app/MainWindow.cpp src/app/MainWindow.h
     src/app/StyleSheet.cpp src/app/StyleSheet.h
     src/app/Theme.cpp src/app/Theme.h
 )
 target_include_directories(chat_app PUBLIC src/app)
-target_link_libraries(chat_app PUBLIC chat_core Qt6::Widgets)
+target_link_libraries(chat_app PUBLIC chat_core Qt6::Widgets PRIVATE Qt6Keychain::Qt6Keychain)
 
 qt_add_executable(argonaut-chat src/app/main.cpp)
 target_link_libraries(argonaut-chat PRIVATE chat_app)

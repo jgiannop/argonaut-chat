@@ -11,8 +11,10 @@
 // read (0600, its folder 0700). A server, when there is one, only passes
 // messages on; the history is here.
 //
-// Not encrypted on disk yet: that comes with the encryption (SQLCipher, or
-// our own with a key from the keyring), before anything leaves this computer.
+// Encrypted with SQLCipher (CipherSql) when given a key: the app's key lives
+// in the system keyring (DatabaseKey). A plain file found where an encrypted
+// one should be (from before the encryption) is encrypted in place. Without a
+// key (tests) the file is plain SQLite.
 class ChatStore : public QObject
 {
     Q_OBJECT
@@ -41,10 +43,12 @@ public:
         bool outgoing() const { return author.isEmpty(); }
     };
 
-    // `file` empty: the default place.
-    explicit ChatStore(const QString &file = QString(), QObject *parent = nullptr);
+    // `file` empty: the default place. `key`: 32 bytes, or empty for a plain file.
+    explicit ChatStore(const QString &file = QString(), const QByteArray &key = QByteArray(),
+                       QObject *parent = nullptr);
     ~ChatStore() override;
     bool isOpen() const { return m_db.isOpen(); }
+    bool isEncrypted() const { return m_encrypted; }
     QString error() const { return m_error; }
     static QString defaultFile();
 
@@ -90,4 +94,5 @@ private:
     QSqlDatabase m_db;
     QString m_connection;
     QString m_error;
+    bool m_encrypted = false;
 };

@@ -1,5 +1,7 @@
 #include "ServerStore.h"
 
+#include "CipherSql.h"
+
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -32,7 +34,10 @@ ServerStore::ServerStore(const QString &file)
     const QString folder = QFileInfo(path).absolutePath();
     QDir().mkpath(folder);
     QFile::setPermissions(folder, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
-    m_db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), m_connection);
+    // Plain SQLite (public keys and messages it cannot read), through the
+    // same library as the app's, so both can live in one process (tests).
+    CipherSql::registerDriver();
+    m_db = QSqlDatabase::addDatabase(CipherSql::DriverName, m_connection);
     m_db.setDatabaseName(path);
     if (!m_db.open()) {
         m_error = m_db.lastError().text();

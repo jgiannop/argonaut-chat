@@ -1,5 +1,7 @@
 #include "ChatStore.h"
 
+#include "CipherSql.h"
+
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -18,7 +20,7 @@ QString text(const QString &s)
 
 } // namespace
 
-ChatStore::ChatStore(const QString &file, QObject *parent)
+ChatStore::ChatStore(const QString &file, const QByteArray &key, QObject *parent)
     : QObject(parent)
     , m_connection(QStringLiteral("chat-") + QUuid::createUuid().toString(QUuid::WithoutBraces))
 {
@@ -26,12 +28,26 @@ ChatStore::ChatStore(const QString &file, QObject *parent)
     const QString folder = QFileInfo(path).absolutePath();
     QDir().mkpath(folder);
     QFile::setPermissions(folder, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
-    m_db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), m_connection);
+    CipherSql::registerDriver();
+    if (!key.isEmpty()) {
+        if (CipherSql::password(key).isEmpty()) {
+            m_error = tr("The database key is not a key.");
+            return;
+        }
+        // From before the encryption: encrypted now, in place.
+        if (QFileInfo::exists(path) && CipherSql::isPlainSqlite(path) && !CipherSql::encryptFile(path, key, &m_error)) {
+            m_error = tr("The history could not be encrypted: %1").arg(m_error);
+            return;
+        }
+    }
+    m_db = QSqlDatabase::addDatabase(CipherSql::DriverName, m_connection);
     m_db.setDatabaseName(path);
+    m_db.setPassword(CipherSql::password(key));
     if (!m_db.open()) {
         m_error = m_db.lastError().text();
         return;
     }
+    m_encrypted = !key.isEmpty();
     QFile::setPermissions(path, QFile::ReadOwner | QFile::WriteOwner); // the history is private
     QSqlQuery(m_db).exec(QStringLiteral("PRAGMA foreign_keys = ON"));
     QSqlQuery(m_db).exec(QStringLiteral("PRAGMA journal_mode = WAL"));

@@ -1,10 +1,14 @@
 #include "ChatStore.h"
+#include "CipherSql.h"
+#include "DatabaseKey.h"
 #include "KeyStore.h"
 #include "MainWindow.h"
 #include "Messenger.h"
 #include "Theme.h"
 
 #include <QApplication>
+#include <QFileInfo>
+#include <QMessageBox>
 #include <QTimer>
 #include <cstdio>
 
@@ -31,9 +35,22 @@ int main(int argc, char **argv)
     QApplication::setStyle(QStringLiteral("Fusion"));
     applyThemeKey(savedThemeKey());
 
-    ChatStore store;
-    if (!store.isOpen())
-        qWarning("The chat store couldn't be opened: %s", qPrintable(store.error()));
+    // The history is encrypted; its key is in the system keyring. Without the
+    // key nothing opens and nothing is changed.
+    const QString file = ChatStore::defaultFile();
+    const QFileInfo info(file);
+    const bool encryptedHistory = info.exists() && info.size() > 0 && !CipherSql::isPlainSqlite(file);
+    const DatabaseKey::Result key = DatabaseKey::load(!encryptedHistory);
+    if (key.key.isEmpty()) {
+        QMessageBox::critical(nullptr, QObject::tr("Argonaut Chat"), key.error);
+        return 1;
+    }
+    ChatStore store(file, key.key);
+    if (!store.isOpen()) {
+        QMessageBox::critical(nullptr, QObject::tr("Argonaut Chat"),
+                              QObject::tr("Your history could not be opened: %1").arg(store.error()));
+        return 1;
+    }
     KeyStore keys(&store);
     Messenger messenger(&store, &keys);
     MainWindow window(&store, &messenger);

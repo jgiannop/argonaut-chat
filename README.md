@@ -25,22 +25,22 @@ program: [docs/how-signal-works.md](docs/how-signal-works.md).
 - **The relay server**, `argonaut-chat-server`: accounts, public keys and
   encrypted messages until delivery; it cannot read any of them
   ([docs/protocol.md](docs/protocol.md)).
-- **The history on this computer only**: one SQLite file,
-  `~/.local/share/Argonaut/argonaut-chat/chat.sqlite`, that only you can read.
-  It also holds your keys, and is **not encrypted yet** (next step).
+- **The history on this computer only, encrypted**: one SQLCipher file,
+  `~/.local/share/Argonaut/argonaut-chat/chat.sqlite` (your messages and your
+  keys), whose key is kept in the system keyring (GNOME Keyring or KWallet).
 - **Themes**: Argonaut's themes, including theme files from
   `~/.local/share/argonaut/themes`.
 
 ## Not there yet
 
-The encrypted local database, rate limits on the server, PQXDH (the
+Rate limits on the server, PQXDH (the
 post-quantum start), contacts and profiles, groups, attachments, linked
 devices, calls.
 
 ## Building
 
-Dependencies (Ubuntu 24.04): `cmake ninja-build qt6-base-dev qt6-websockets-dev
-libqt6sql6-sqlite libsodium-dev pkg-config`.
+Dependencies (Ubuntu 24.04): `cmake ninja-build pkg-config qt6-base-dev
+qt6-websockets-dev libsodium-dev libsqlcipher-dev qtkeychain-qt6-dev`.
 
 ```bash
 cmake --preset debug

@@ -1,4 +1,6 @@
 #include "ChatStore.h"
+#include "CipherSql.h"
+#include "KeyStore.h"
 #include "TestSupport.h"
 
 #include <QCoreApplication>
@@ -97,7 +99,8 @@ private slots:
         // A database from before the network, without the uid column.
         const QString file = QDir::homePath() + QStringLiteral("/old.sqlite");
         {
-            QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), QStringLiteral("old"));
+            CipherSql::registerDriver();
+            QSqlDatabase db = QSqlDatabase::addDatabase(CipherSql::DriverName, QStringLiteral("old"));
             db.setDatabaseName(file);
             QVERIFY(db.open());
             QSqlQuery q(db);
@@ -120,6 +123,74 @@ private slots:
         QVERIFY(store.addMessage(1, QStringLiteral("new"), QString(), QDateTime::currentDateTimeUtc(),
                                  QStringLiteral("u1")).id > 0);
         QVERIFY(store.hasMessage(1, QStringLiteral("u1")));
+    }
+
+    void encrypted()
+    {
+        const QString file = QDir::homePath() + QStringLiteral("/secret.sqlite");
+        const QByteArray key = Crypto::randomBytes(32);
+        QByteArray identitySecret;
+        {
+            ChatStore store(file, key);
+            QVERIFY2(store.isOpen(), qPrintable(store.error()));
+            QVERIFY(store.isEncrypted());
+            store.addMessage(store.noteToSelf(), QStringLiteral("the secret text"));
+            KeyStore keys(&store);
+            const KeyStore::Account account{QStringLiteral("alice"), 1, QUrl(QStringLiteral("wss://x")),
+                                            Crypto::IdentityKeyPair::generate(), true};
+            QVERIFY(keys.saveAccount(account));
+            identitySecret = account.identity.secretKey();
+        }
+        // On disk: no SQLite header, no text, no key.
+        QVERIFY(!CipherSql::isPlainSqlite(file));
+        QFile raw(file);
+        QVERIFY(raw.open(QIODevice::ReadOnly));
+        const QByteArray bytes = raw.readAll();
+        QVERIFY(!bytes.contains("the secret text"));
+        QVERIFY(!bytes.contains("Note to Self"));
+        QVERIFY(!bytes.contains(identitySecret));
+        QVERIFY(!bytes.contains("CREATE TABLE"));
+
+        // The key opens it again; another key, or none, does not.
+        {
+            ChatStore again(file, key);
+            QVERIFY(again.isOpen());
+            QCOMPARE(again.messages(again.noteToSelf()).first().body, QStringLiteral("the secret text"));
+            KeyStore keys(&again);
+            QCOMPARE(keys.account()->identity.secretKey(), identitySecret);
+        }
+        QVERIFY(!ChatStore(file, Crypto::randomBytes(32)).isOpen());
+        QVERIFY(!ChatStore(file).isOpen());
+        QVERIFY(!ChatStore(file, QByteArray("short")).isOpen());
+        // A failed opening leaves the file as it was.
+        QVERIFY(ChatStore(file, key).isOpen());
+        QCOMPARE(QFileInfo(file).permissions() & (QFile::ReadGroup | QFile::ReadOther), QFile::Permissions());
+    }
+
+    void plainHistoryIsEncryptedInPlace()
+    {
+        const QString file = QDir::homePath() + QStringLiteral("/before.sqlite");
+        {
+            ChatStore plain(file); // as before the encryption
+            QVERIFY(!plain.isEncrypted());
+            plain.addMessage(plain.noteToSelf(), QStringLiteral("written before"));
+        }
+        QVERIFY(CipherSql::isPlainSqlite(file));
+        const QByteArray key = Crypto::randomBytes(32);
+        {
+            ChatStore store(file, key);
+            QVERIFY2(store.isOpen(), qPrintable(store.error()));
+            QVERIFY(store.isEncrypted());
+            QCOMPARE(store.messages(store.noteToSelf()).first().body, QStringLiteral("written before"));
+            store.addMessage(store.noteToSelf(), QStringLiteral("written after"));
+        }
+        QVERIFY(!CipherSql::isPlainSqlite(file));
+        QFile raw(file);
+        QVERIFY(raw.open(QIODevice::ReadOnly));
+        QVERIFY(!raw.readAll().contains("written before"));
+        QVERIFY(!QFile::exists(file + QStringLiteral(".encrypting")));
+        ChatStore again(file, key);
+        QCOMPARE(again.messages(again.noteToSelf()).size(), 2);
     }
 
     void defaultPlace()
