@@ -3,6 +3,7 @@
 #include "Attachment.h"
 
 #include <QDateTime>
+#include <QHash>
 #include <QObject>
 #include <QSqlDatabase>
 #include <QString>
@@ -35,6 +36,7 @@ public:
         QString lastText; // the newest message, for the list
         int unread = 0;
         bool request = false; // a message request: someone I have not accepted yet
+        bool left = false;    // a group I am no longer in (read only)
     };
 
     struct Message
@@ -87,6 +89,11 @@ public:
     // A receipt: mine with these wire ids, in this conversation, move on to
     // "delivered" or "read" (never back).
     void advanceStatus(qint64 conversation, const QStringList &uids, const QString &status);
+    // The same for a receipt from `from`: mine with these ids, in any
+    // conversation with them (direct, or a group they are in).
+    void advanceStatusFrom(const QString &from, const QStringList &uids, const QString &status);
+    // Theirs not seen yet, by author (group read receipts go to each).
+    QHash<QString, QStringList> unseenUidsByAuthor(qint64 conversation) const;
     // The wire ids of theirs not seen yet (for read receipts).
     QStringList unseenUids(qint64 conversation) const;
     void markRead(qint64 conversation);
@@ -125,6 +132,25 @@ public:
     // A blob into the folder: its new file name (empty if it could not be written).
     QString writeBlob(const QByteArray &blob);
     QByteArray readBlob(const QString &file) const;
+
+    // Groups (kept by their members; the server knows nothing of them): a
+    // conversation of kind "group", its peer the group's id, its title the
+    // name; the members, the admin, and the revision of the last update.
+    struct Group
+    {
+        qint64 conversation = 0;
+        QString id;
+        QString name;
+        QString admin;
+        QStringList members;
+        int revision = 0;
+    };
+    qint64 groupConversation(const QString &groupId) const;
+    Group group(qint64 conversation) const;
+    qint64 addGroup(const Group &group, bool request);
+    void updateGroup(const Group &group);
+    void setLeft(qint64 conversation);
+    bool isMember(qint64 conversation, const QString &username) const;
 
     // Profiles: a display name and a picture (image bytes, small), mine and
     // others'. Mine has a version, raised by every change, and the pointer of

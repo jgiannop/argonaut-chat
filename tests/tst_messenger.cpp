@@ -515,11 +515,160 @@ private slots:
         QVERIFY(alice.messenger->setMyProfile("Alice S.", QByteArray()));
         QTRY_VERIFY_WITH_TIMEOUT(bob.messenger->avatar("alice").isEmpty(), kWait);
 
+        // Changes in quick succession (each while the last is on its way): the last one wins.
+        const QByteArray other = QByteArray("\x89PNG\r\n\x1a\n", 8) + Crypto::randomBytes(2000);
+        QVERIFY(alice.messenger->setMyProfile("Alice 1", picture));
+        QVERIFY(alice.messenger->setMyProfile("Alice 2", other));
+        QVERIFY(alice.messenger->setMyProfile("Alice S.", QByteArray()));
+        QTRY_COMPARE_WITH_TIMEOUT(bob.messenger->displayName("alice"), QString("Alice S."), kWait);
+        QTest::qWait(500); // anything late would land now
+        QVERIFY(bob.messenger->avatar("alice").isEmpty());
+        QVERIFY(alice.messenger->setMyProfile("Alice S.", other));
+        QTRY_COMPARE_WITH_TIMEOUT(bob.messenger->avatar("alice"), other, kWait);
+        QVERIFY(alice.messenger->setMyProfile("Alice S.", QByteArray()));
+
         // Kept over a restart.
         bob.close();
         bob.open();
         QCOMPARE(bob.messenger->displayName("alice"), QString("Alice S."));
         QCOMPARE(bob.store->messages(fromAlice).size(), 1);
+    }
+
+    void groups()
+    {
+        Device alice(file("alice"));
+        Device bob(file("bob"));
+        Device carol(file("carol"));
+        Device dave(file("dave"));
+        for (auto &[device, name] : QList<QPair<Device *, QString>>{{&alice, "alice"}, {&bob, "bob"}, {&carol, "carol"}, {&dave, "dave"}})
+            QVERIFY(signUp(*device, name));
+        // Bob knows Alice; Carol does not.
+        const qint64 aliceToBob = startConversation(alice, "bob");
+        alice.messenger->send(aliceToBob, "hi Bob");
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("alice") > 0, kWait);
+        bob.messenger->acceptRequest(bob.store->directConversation("alice"));
+
+        auto create = [&](Device &who, const QString &name, const QStringList &members, QString *error = nullptr) {
+            std::optional<qint64> result;
+            who.messenger->createGroup(name, members, [&](qint64 conversation, const QString &why) {
+                result = conversation;
+                if (error)
+                    *error = why;
+            });
+            return QTest::qWaitFor([&] { return result.has_value(); }, kWait) ? *result : qint64(-1);
+        };
+        QString error;
+        QCOMPARE(create(alice, "x", {"nobody"}, &error), 0);
+        QVERIFY(error.contains("nobody"));
+        QStringList crowd;
+        for (int i = 0; i < Protocol::MaxGroupMembers; ++i)
+            crowd << QStringLiteral("person%1").arg(i);
+        QCOMPARE(create(alice, "x", crowd, &error), 0);
+        QVERIFY(error.contains("50"));
+
+        const qint64 trip = create(alice, "Trip", {"bob", "Carol"});
+        QVERIFY(trip > 0);
+        const QString gid = alice.store->group(trip).id;
+        QCOMPARE(alice.store->group(trip).members, (QStringList{"alice", "bob", "carol"}));
+        QCOMPARE(alice.store->group(trip).admin, QString("alice"));
+        // Bob (knows Alice): the group, accepted. Carol: a request.
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->groupConversation(gid) > 0, kWait);
+        QTRY_VERIFY_WITH_TIMEOUT(carol.store->groupConversation(gid) > 0, kWait);
+        const qint64 bobTrip = bob.store->groupConversation(gid);
+        const qint64 carolTrip = carol.store->groupConversation(gid);
+        QVERIFY(!bob.store->conversation(bobTrip).request);
+        QVERIFY(carol.store->conversation(carolTrip).request);
+        QCOMPARE(bob.store->conversation(bobTrip).title, QString("Trip"));
+
+        // A message to all; each has it, from Alice.
+        const qint64 hello = alice.messenger->send(trip, "hello all");
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(bobTrip), QString("hello all"), kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(carol.last(carolTrip), QString("hello all"), kWait);
+        QCOMPARE(bob.store->messages(bobTrip).last().author, QString("alice"));
+        QTRY_COMPARE_WITH_TIMEOUT(alice.store->message(hello).status, QString("delivered"), kWait); // Bob's ✓✓
+        // Bob answers; Carol has it too, from someone she does not know: it is the group's.
+        bob.messenger->send(bobTrip, "count me in");
+        QTRY_COMPARE_WITH_TIMEOUT(carol.last(carolTrip), QString("count me in"), kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(alice.last(trip), QString("count me in"), kWait);
+        QCOMPARE(carol.store->directConversation("bob"), 0);
+        // Carol accepts: read receipts go to each author; she writes.
+        carol.messenger->acceptRequest(carolTrip);
+        QTRY_COMPARE_WITH_TIMEOUT(alice.store->message(hello).status, QString("read"), kWait);
+        carol.messenger->send(carolTrip, "me too");
+        QTRY_COMPARE_WITH_TIMEOUT(alice.last(trip), QString("me too"), kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(bobTrip), QString("me too"), kWait);
+
+        // Only the admin changes it.
+        QCOMPARE([&] {
+            std::optional<qint64> result;
+            bob.messenger->changeGroup(bobTrip, "Mine now", {"bob"}, [&](qint64 c, const QString &) { result = c; });
+            return result.value_or(-1);
+        }(), 0);
+        // Forgeries: Dave, not a member, sends into the group and "renames" it, by
+        // hand with his own keys (as a changed program could).
+        const qint64 daveToBob = startConversation(dave, "bob");
+        dave.messenger->send(daveToBob, "hello Bob");
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("dave") > 0, kWait);
+        dave.messenger->stop();
+        std::optional<Session> session = dave.keys->session("bob", 1);
+        QVERIFY(session);
+        Protocol::Content sneaky = Protocol::Content::text("I am in your group now");
+        sneaky.group = gid;
+        const Protocol::Content rename = Protocol::Content::groupUpdate(gid, "Pwned", "dave", {"dave", "bob"}, 99);
+        QHash<quint32, QByteArray> wires{{1, session->encrypt(Protocol::encodeContent(sneaky))}};
+        QHash<quint32, QByteArray> wires2{{1, session->encrypt(Protocol::encodeContent(rename))}};
+        dave.keys->saveSession("bob", 1, *session);
+        ChatClient raw;
+        QVERIFY(raw.open(m_url));
+        QTRY_VERIFY_WITH_TIMEOUT(raw.isConnected(), kWait);
+        std::optional<bool> sent;
+        raw.login("dave", 1, dave.keys->account()->identity, [&](const ChatClient::Result &r) {
+            const bool loggedIn = r.ok; // copied: `r` is gone by the time the sends answer
+            raw.send("bob", wires, [&, loggedIn](const ChatClient::Result &) {
+                raw.send("bob", wires2, [&, loggedIn](const ChatClient::Result &s) { sent = loggedIn && s.ok; });
+            });
+        });
+        QTRY_VERIFY_WITH_TIMEOUT(sent.has_value(), kWait);
+        QVERIFY(*sent);
+        QTRY_COMPARE_WITH_TIMEOUT(m_serverStore->queuedCount("bob", 1), 0, kWait); // Bob took them
+        QTest::qWait(200);
+        QCOMPARE(bob.last(bobTrip), QString("me too"));
+        QCOMPARE(bob.store->group(bobTrip).name, QString("Trip"));
+        QCOMPARE(bob.store->group(bobTrip).members, (QStringList{"alice", "bob", "carol"}));
+        // Not anywhere else either.
+        QCOMPARE(bob.last(bob.store->directConversation("dave")), QString("hello Bob"));
+        for (const ChatStore::Conversation &c : bob.store->conversations())
+            for (const ChatStore::Message &m : bob.store->messages(c.id))
+                QVERIFY(m.body != QLatin1String("I am in your group now"));
+        raw.close();
+        dave.messenger->start();
+        QTRY_COMPARE_WITH_TIMEOUT(dave.messenger->state(), Messenger::State::Online, kWait);
+
+        // Alice takes Carol out and brings Dave in.
+        std::optional<qint64> changed;
+        alice.messenger->changeGroup(trip, "Trip 2", {"bob", "dave"}, [&](qint64 c, const QString &) { changed = c; });
+        QTRY_VERIFY_WITH_TIMEOUT(changed.has_value(), kWait);
+        QCOMPARE(*changed, trip);
+        QTRY_VERIFY_WITH_TIMEOUT(carol.store->conversation(carolTrip).left, kWait);
+        QCOMPARE(carol.messenger->send(carolTrip, "still here?"), 0);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.store->group(bobTrip).name, QString("Trip 2"), kWait);
+        QTRY_VERIFY_WITH_TIMEOUT(dave.store->groupConversation(gid) > 0, kWait);
+        const qint64 daveTrip = dave.store->groupConversation(gid);
+        QVERIFY(dave.store->conversation(daveTrip).request); // he does not know Alice
+        alice.messenger->send(trip, "welcome Dave");
+        QTRY_COMPARE_WITH_TIMEOUT(dave.last(daveTrip), QString("welcome Dave"), kWait);
+        QTest::qWait(200);
+        QVERIFY(carol.last(carolTrip) != QString("welcome Dave"));
+
+        // Bob leaves; the admin tells the rest.
+        bob.messenger->leaveGroup(bobTrip);
+        QVERIFY(bob.store->conversation(bobTrip).left);
+        QTRY_COMPARE_WITH_TIMEOUT(alice.store->group(trip).members, (QStringList{"alice", "dave"}), kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(dave.store->group(daveTrip).members, (QStringList{"alice", "dave"}), kWait);
+        alice.messenger->send(trip, "just us");
+        QTRY_COMPARE_WITH_TIMEOUT(dave.last(daveTrip), QString("just us"), kWait);
+        QTest::qWait(200);
+        QVERIFY(bob.last(bobTrip) != QString("just us"));
     }
 
     void keyStoreTrust()

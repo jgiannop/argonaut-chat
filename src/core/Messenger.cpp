@@ -9,6 +9,8 @@
 #include <QSaveFile>
 #include <QTimeZone>
 
+#include <memory>
+
 Messenger::Messenger(ChatStore *store, KeyStore *keys, QObject *parent)
     : QObject(parent)
     , m_store(store)
@@ -347,8 +349,10 @@ qint64 Messenger::send(qint64 conversation, const QString &text)
     const ChatStore::Conversation c = m_store->conversation(conversation);
     if (c.id == 0 || text.isEmpty())
         return 0;
-    if (c.kind != QLatin1String("direct"))
+    if (c.kind == QLatin1String("self"))
         return m_store->addMessage(conversation, text).id;
+    if (c.left)
+        return 0; // not in that group any more
     if (c.request)
         acceptRequest(conversation);
     const Protocol::Content content = Protocol::Content::text(text);
@@ -371,7 +375,8 @@ void Messenger::deliver(const ChatStore::Message &message)
     if (m_inFlight.contains(message.id) || m_state != State::Online)
         return;
     const ChatStore::Conversation c = m_store->conversation(message.conversation);
-    if (c.kind != QLatin1String("direct")) {
+    const bool group = c.kind == QLatin1String("group");
+    if ((c.kind != QLatin1String("direct") && !group) || c.left) {
         m_store->setStatus(message.id, QStringLiteral("failed"));
         return;
     }
@@ -420,7 +425,7 @@ void Messenger::deliver(const ChatStore::Message &message)
         return;
     }
     m_inFlight.insert(id);
-    sendContent(c.peer, content, [this, id](bool ok, const QString &error) {
+    const Done finished = [this, id](bool ok, const QString &error) {
         m_inFlight.remove(id);
         if (ok) {
             if (m_store->message(id).status == QLatin1String("sending")) // a receipt may have come first
@@ -428,7 +433,13 @@ void Messenger::deliver(const ChatStore::Message &message)
         } else {
             deliveryFailed(id, error, error);
         }
-    });
+    };
+    if (group) {
+        content.group = c.peer;
+        fanOut(othersIn(c.id), content, finished);
+    } else {
+        sendContent(c.peer, content, finished);
+    }
 }
 
 void Messenger::deliveryFailed(qint64 message, const QString &error, const QString &why)
@@ -471,7 +482,9 @@ qint64 Messenger::sendFile(qint64 conversation, const QString &path, const QStri
     if (!Attachment::isValidType(type))
         type = QStringLiteral("application/octet-stream");
 
-    const bool direct = c.kind == QLatin1String("direct");
+    const bool direct = c.kind != QLatin1String("self"); // a person or a group: it goes out
+    if (c.left)
+        return fail(tr("You are no longer in this group."));
     if (direct && c.request)
         acceptRequest(conversation);
     const Protocol::Content content = Protocol::Content::text(caption);
@@ -625,6 +638,15 @@ void Messenger::markRead(qint64 conversation)
     const ChatStore::Conversation c = m_store->conversation(conversation);
     if (c.request)
         return; // seen only once accepted: until then they learn nothing
+    if (c.kind == QLatin1String("group")) {
+        const QHash<QString, QStringList> byAuthor = m_store->unseenUidsByAuthor(conversation);
+        m_store->markRead(conversation);
+        if (m_state == State::Online && !c.left) {
+            for (auto it = byAuthor.cbegin(); it != byAuthor.cend(); ++it)
+                sendReceipt(it.key(), Protocol::Content::Receipt::Read, it.value());
+        }
+        return;
+    }
     const QStringList ids = m_store->unseenUids(conversation);
     m_store->markRead(conversation);
     if (!ids.isEmpty() && c.kind == QLatin1String("direct") && m_state == State::Online)
@@ -639,8 +661,13 @@ void Messenger::acceptRequest(qint64 conversation)
     m_store->setAccepted(conversation);
     markRead(conversation); // read covers delivered
     downloadPending();      // their files, now
-    shareProfile(c.peer);   // my profile, to them
-    fetchAvatars();         // and their picture
+    if (c.kind == QLatin1String("group")) {
+        for (const QString &member : othersIn(conversation))
+            shareProfile(member);
+    } else {
+        shareProfile(c.peer); // my profile, to them
+    }
+    fetchAvatars(); // and their pictures
 }
 
 void Messenger::deleteConversation(qint64 conversation)
@@ -724,17 +751,33 @@ void Messenger::handleContent(const QString &from, const Protocol::Envelope &env
         fetchAvatars();
         return;
     }
-    qint64 conversation = m_store->directConversation(from);
+    if (content.type == Protocol::Content::Type::Group) {
+        handleGroupUpdate(from, content);
+        return;
+    }
+    if (content.type == Protocol::Content::Type::Leave) {
+        handleLeave(from, content);
+        return;
+    }
     if (content.type == Protocol::Content::Type::Receipt) {
-        if (conversation)
-            m_store->advanceStatus(conversation, content.receiptFor,
+        m_store->advanceStatusFrom(from, content.receiptFor,
                                    content.receipt == Protocol::Content::Receipt::Read ? QStringLiteral("read")
                                                                                        : QStringLiteral("delivered"));
         return;
     }
-    // Someone new: a message request.
-    if (!conversation)
-        conversation = m_store->addConversation(QStringLiteral("direct"), from, from, true);
+    qint64 conversation = 0;
+    if (!content.group.isEmpty()) {
+        // A group's: only a group I am in, only from one of its members.
+        conversation = m_store->groupConversation(content.group);
+        const ChatStore::Conversation c = m_store->conversation(conversation);
+        if (conversation == 0 || c.left || !m_store->isMember(conversation, from))
+            return;
+    } else {
+        conversation = m_store->directConversation(from);
+        // Someone new: a message request.
+        if (!conversation)
+            conversation = m_store->addConversation(QStringLiteral("direct"), from, from, true);
+    }
     if (conversation == 0 || m_store->hasMessage(conversation, content.id))
         return;
     // Their clock, unless it is far ahead of the server's.
@@ -816,12 +859,25 @@ QString Messenger::displayName(const QString &username) const
     return name.isEmpty() ? username : name;
 }
 
+QStringList Messenger::knownPeople() const
+{
+    QStringList people;
+    for (const ChatStore::Conversation &c : m_store->conversations()) {
+        if (c.request || c.left)
+            continue;
+        if (c.kind == QLatin1String("direct"))
+            people << c.peer;
+        else if (c.kind == QLatin1String("group"))
+            people << othersIn(c.id);
+    }
+    people.removeDuplicates();
+    return people;
+}
+
 void Messenger::shareProfileWithAll()
 {
-    for (const ChatStore::Conversation &c : m_store->conversations()) {
-        if (c.kind == QLatin1String("direct") && !c.request)
-            shareProfile(c.peer);
-    }
+    for (const QString &peer : knownPeople())
+        shareProfile(peer);
 }
 
 void Messenger::shareProfile(const QString &peer)
@@ -847,11 +903,14 @@ void Messenger::shareProfile(const QString &peer)
             m_client.uploadAttachment(sealed->blob, {},
                                       [this, draft, version](const QString &id, const ChatClient::Result &result) {
                                           m_avatarUploading = false;
-                                          if (!result.ok || m_store->myProfileVersion() != version)
-                                              return; // tried again on the next sign-in, or changed meanwhile
-                                          Attachment::Pointer uploaded = draft;
-                                          uploaded.id = id;
-                                          m_store->setMyAvatarPointer(uploaded, now());
+                                          if (!result.ok)
+                                              return; // tried again on the next sign-in
+                                          if (m_store->myProfileVersion() == version) {
+                                              Attachment::Pointer uploaded = draft;
+                                              uploaded.id = id;
+                                              m_store->setMyAvatarPointer(uploaded, now());
+                                          }
+                                          // Changed meanwhile or not: everyone gets the newest.
                                           shareProfileWithAll();
                                       });
             return;
@@ -860,8 +919,12 @@ void Messenger::shareProfile(const QString &peer)
     m_profileInFlight.insert(peer);
     sendContent(peer, Protocol::Content::profile(mine.name, pointer), [this, peer, version](bool ok, const QString &) {
         m_profileInFlight.remove(peer);
-        if (ok)
-            m_store->setProfileSent(peer, version);
+        if (!ok)
+            return; // on the next sign-in
+        m_store->setProfileSent(peer, version);
+        // Changed while this one was on its way: the newer one now.
+        if (m_store->myProfileVersion() > version)
+            shareProfile(peer);
     });
 }
 
@@ -869,14 +932,12 @@ void Messenger::fetchAvatars()
 {
     if (m_state != State::Online || m_avatarFetching)
         return;
-    for (const ChatStore::Conversation &c : m_store->conversations()) {
-        if (c.kind != QLatin1String("direct") || c.request)
-            continue;
-        const std::optional<Attachment::Pointer> pointer = m_store->pendingAvatar(c.peer);
+    for (const QString &person : knownPeople()) {
+        const std::optional<Attachment::Pointer> pointer = m_store->pendingAvatar(person);
         if (!pointer)
             continue;
         m_avatarFetching = true;
-        const QString peer = c.peer;
+        const QString peer = person;
         const Attachment::Pointer wanted = *pointer;
         m_client.downloadAttachment(
             wanted.id, Attachment::blobSize(wanted.size), {},
@@ -884,12 +945,244 @@ void Messenger::fetchAvatars()
                 m_avatarFetching = false;
                 if (result.error == QLatin1String("disconnected"))
                     return; // on the next sign-in
-                const auto image = result.ok ? Attachment::decrypt(blob, wanted.key, wanted.digest, wanted.size)
-                                             : std::nullopt;
-                // Kept only if it is a picture; otherwise the old one stays.
-                m_store->setAvatar(peer, image && !imageType(*image).isEmpty() ? *image : m_store->profile(peer).avatar);
+                // Their profile changed while this came (a newer picture, or none): this one is stale.
+                const auto still = m_store->pendingAvatar(peer);
+                if (still && still->id == wanted.id) {
+                    const auto image = result.ok ? Attachment::decrypt(blob, wanted.key, wanted.digest, wanted.size)
+                                                 : std::nullopt;
+                    // Kept only if it is a picture; otherwise the old one stays.
+                    m_store->setAvatar(peer,
+                                       image && !imageType(*image).isEmpty() ? *image : m_store->profile(peer).avatar);
+                }
                 fetchAvatars(); // the next one
             });
         return;
+    }
+}
+
+// --- Groups ---
+
+QStringList Messenger::othersIn(qint64 conversation) const
+{
+    QStringList members = m_store->group(conversation).members;
+    members.removeAll(username());
+    return members;
+}
+
+void Messenger::fanOut(const QStringList &to, const Protocol::Content &content, const Done &done)
+{
+    if (to.isEmpty()) {
+        done(true, QString());
+        return;
+    }
+    struct Progress
+    {
+        int left = 0;
+        QString again; // "disconnected" or "rate-limited": some must be tried again
+    };
+    auto progress = std::make_shared<Progress>();
+    progress->left = int(to.size());
+    for (const QString &member : to) {
+        sendContent(member, content, [progress, done](bool ok, const QString &error) {
+            if (!ok && (error == QLatin1String("disconnected") || error == QLatin1String("rate-limited")))
+                progress->again = error;
+            // Anything else (someone gone from the server): never reachable, not a reason to fail the rest.
+            if (--progress->left == 0)
+                done(progress->again.isEmpty(), progress->again);
+        });
+    }
+}
+
+void Messenger::checkPeople(const QStringList &people, const Done &done)
+{
+    if (people.isEmpty()) {
+        done(true, QString());
+        return;
+    }
+    const QString first = people.first();
+    const QStringList rest = people.mid(1);
+    if (!m_keys->sessionDevices(first).isEmpty()) {
+        checkPeople(rest, done);
+        return;
+    }
+    fetchSessions(first, [this, rest, done](bool ok, const QString &error) {
+        if (!ok)
+            done(false, error);
+        else
+            checkPeople(rest, done);
+    });
+}
+
+void Messenger::sendGroupUpdate(const ChatStore::Group &group, const QStringList &to)
+{
+    const Protocol::Content update =
+        Protocol::Content::groupUpdate(group.id, group.name, group.admin, group.members, group.revision);
+    QStringList recipients = to;
+    recipients.removeAll(username());
+    fanOut(recipients, update, [](bool, const QString &) {});
+}
+
+void Messenger::createGroup(const QString &name, const QStringList &members, const GroupDone &done)
+{
+    QStringList people;
+    for (const QString &member : members) {
+        const QString clean = Protocol::normalizeUsername(member);
+        if (clean.isEmpty()) {
+            done(0, tr("\"%1\" is not a username.").arg(member));
+            return;
+        }
+        if (m_store->isBlocked(clean)) {
+            done(0, tr("You have blocked %1.").arg(clean));
+            return;
+        }
+        if (clean != username() && !people.contains(clean))
+            people << clean;
+    }
+    if (people.isEmpty()) {
+        done(0, tr("A group needs someone besides you."));
+        return;
+    }
+    if (people.size() + 1 > Protocol::MaxGroupMembers) {
+        done(0, tr("A group has at most %1 people.").arg(Protocol::MaxGroupMembers));
+        return;
+    }
+    if (m_state != State::Online) {
+        done(0, tr("Not connected to the server."));
+        return;
+    }
+    const QString groupName = Protocol::cleanDisplayName(name);
+    checkPeople(people, [this, people, groupName, done](bool ok, const QString &error) {
+        if (!ok) {
+            done(0, error);
+            return;
+        }
+        ChatStore::Group group;
+        group.id = Protocol::newGroupId();
+        group.name = groupName.isEmpty() ? tr("Group") : groupName;
+        group.admin = username();
+        group.members = QStringList(people) << username();
+        group.revision = 1;
+        const qint64 conversation = m_store->addGroup(group, false);
+        group.conversation = conversation;
+        sendGroupUpdate(group, group.members);
+        for (const QString &member : people)
+            shareProfile(member);
+        done(conversation, QString());
+    });
+}
+
+void Messenger::changeGroup(qint64 conversation, const QString &name, const QStringList &members, const GroupDone &done)
+{
+    ChatStore::Group group = m_store->group(conversation);
+    if (group.conversation == 0 || group.admin != username() || m_store->conversation(conversation).left) {
+        done(0, tr("Only the group's admin can change it."));
+        return;
+    }
+    QStringList people{username()};
+    for (const QString &member : members) {
+        const QString clean = Protocol::normalizeUsername(member);
+        if (clean.isEmpty()) {
+            done(0, tr("\"%1\" is not a username.").arg(member));
+            return;
+        }
+        if (!people.contains(clean))
+            people << clean;
+    }
+    if (people.size() > Protocol::MaxGroupMembers) {
+        done(0, tr("A group has at most %1 people.").arg(Protocol::MaxGroupMembers));
+        return;
+    }
+    if (m_state != State::Online) {
+        done(0, tr("Not connected to the server."));
+        return;
+    }
+    QStringList added;
+    for (const QString &person : people) {
+        if (!group.members.contains(person))
+            added << person;
+    }
+    const QStringList before = group.members;
+    const QString groupName = Protocol::cleanDisplayName(name);
+    checkPeople(added, [this, group, people, before, added, groupName, done](bool ok, const QString &error) mutable {
+        if (!ok) {
+            done(0, error);
+            return;
+        }
+        if (!groupName.isEmpty())
+            group.name = groupName;
+        group.members = people;
+        ++group.revision;
+        m_store->updateGroup(group);
+        // To everyone in it, and to those taken out (so they know).
+        QStringList to = before;
+        for (const QString &person : people) {
+            if (!to.contains(person))
+                to << person;
+        }
+        sendGroupUpdate(group, to);
+        for (const QString &person : added)
+            shareProfile(person);
+        done(group.conversation, QString());
+    });
+}
+
+void Messenger::leaveGroup(qint64 conversation)
+{
+    const ChatStore::Group group = m_store->group(conversation);
+    if (group.conversation == 0 || m_store->conversation(conversation).left)
+        return;
+    const Protocol::Content leave = Protocol::Content::leave(group.id);
+    fanOut(othersIn(conversation), leave, [](bool, const QString &) {});
+    m_store->setLeft(conversation);
+}
+
+void Messenger::handleGroupUpdate(const QString &from, const Protocol::Content &content)
+{
+    const qint64 conversation = m_store->groupConversation(content.group);
+    ChatStore::Group group;
+    group.id = content.group;
+    group.name = content.groupName.isEmpty() ? tr("Group") : content.groupName;
+    group.admin = content.groupAdmin;
+    group.members = content.groupMembers;
+    group.revision = content.groupRevision;
+    const bool mine = content.groupMembers.contains(username());
+    if (conversation == 0) {
+        // A new group: from its admin, with me in it. From someone I have
+        // not accepted, it is a request, as their own message would be.
+        if (!mine || content.groupAdmin != from)
+            return;
+        const qint64 direct = m_store->directConversation(from);
+        const bool known = direct != 0 && !m_store->conversation(direct).request;
+        m_store->addGroup(group, !known);
+        return;
+    }
+    // Only its admin, and only newer.
+    const ChatStore::Group current = m_store->group(conversation);
+    if (from != current.admin || content.groupRevision <= current.revision)
+        return;
+    group.conversation = conversation;
+    m_store->updateGroup(group);
+    if (!mine)
+        m_store->setLeft(conversation);
+    else if (m_store->conversation(conversation).left)
+        m_store->setAccepted(conversation); // added back
+    for (const QString &member : group.members)
+        shareProfile(member); // new members get my profile (if accepted)
+}
+
+void Messenger::handleLeave(const QString &from, const Protocol::Content &content)
+{
+    const qint64 conversation = m_store->groupConversation(content.group);
+    if (conversation == 0 || !m_store->isMember(conversation, from))
+        return;
+    ChatStore::Group group = m_store->group(conversation);
+    group.members.removeAll(from);
+    if (group.admin == username() && !m_store->conversation(conversation).left) {
+        // I am the admin: the new list, to everyone.
+        ++group.revision;
+        m_store->updateGroup(group);
+        sendGroupUpdate(group, group.members);
+    } else {
+        m_store->updateGroup(group); // the same revision: the admin's next update still counts
     }
 }

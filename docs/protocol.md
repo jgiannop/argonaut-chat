@@ -73,6 +73,31 @@ kept (shown with the username), their picture fetched only once accepted.
 The picture is uploaded once and its pointer reused for 25 days (the server
 keeps it 30).
 
+### Groups
+
+Kept by their members; the server knows nothing of them (it sees only
+one-to-one messages). A group is a random id (32 hex digits), a name, an
+admin and a member list (at most 50, the admin among them):
+
+```json
+{"v":1, "t":"group", "id":"<uuid>", "sent":…, "group":"<32 hex>", "name":"Trip",
+ "admin":"alice", "members":["alice","bob","carol"], "revision":3}
+{"v":1, "t":"leave", "id":"<uuid>", "sent":…, "group":"<32 hex>"}
+{"v":1, "t":"text", …, "group":"<32 hex>"}
+```
+
+- The admin sends `group` to every member (and to those taken out) at each
+  change, the revision one higher. A new group is taken only from its admin
+  and only if I am in it; later updates only from the admin, only newer. A
+  group made by someone I have not accepted is a request.
+- A group text goes to each member, encrypted for each with the session
+  already there; it is taken only from a member of a group I am in. If some
+  members could not be reached, it goes again to all (the others drop the
+  copy by its id).
+- `leave` goes to the others; the admin then sends the new list.
+- Receipts go to the author: a group message is ✓✓ once a member has it,
+  read once a member has read it.
+
 ## Layer 2: CipherMessage (binary)
 
 The padded Content encrypted by the sender's `Session` for one device:

@@ -77,6 +77,18 @@ public:
     // Decrypted into `path` (the user's choice).
     bool saveAttachment(qint64 attachment, const QString &path, QString *error = nullptr) const;
 
+    // Groups, kept by their members: the server sees only one-to-one
+    // messages (each group message is encrypted for each member). Their
+    // creator is the admin: only the admin's updates count (and only newer
+    // ones); only members' messages are taken; a group made by someone I
+    // have not accepted comes as a request. At most Protocol::MaxGroupMembers.
+    using GroupDone = std::function<void(qint64 conversation, const QString &error)>;
+    void createGroup(const QString &name, const QStringList &members, const GroupDone &done);
+    // The admin only: a new name or members (added ones are checked first).
+    void changeGroup(qint64 conversation, const QString &name, const QStringList &members, const GroupDone &done);
+    void leaveGroup(qint64 conversation);
+    ChatStore::Group group(qint64 conversation) const { return m_store->group(conversation); }
+
     // Profiles: a display name and a picture, sent only inside encrypted
     // messages, to the people I write to or accept (and again to them all
     // when it changes); the server never has one. The picture: PNG or JPEG,
@@ -134,6 +146,19 @@ private:
     void deliveryFailed(qint64 message, const QString &error, const QString &why);
     // Fetches their attachments, one at a time, in accepted conversations.
     void downloadPending();
+    // `content` to each of `to`, each encrypted for them; done(true) once all
+    // have it (or cannot ever), done(false, "disconnected"/"rate-limited") if
+    // some must be tried again (the others will drop the copy by its id).
+    void fanOut(const QStringList &to, const Protocol::Content &content, const Done &done);
+    // Sessions with all of `people` (they must all exist), then `done`.
+    void checkPeople(const QStringList &people, const Done &done);
+    void sendGroupUpdate(const ChatStore::Group &group, const QStringList &to);
+    void handleGroupUpdate(const QString &from, const Protocol::Content &content);
+    void handleLeave(const QString &from, const Protocol::Content &content);
+    QStringList othersIn(qint64 conversation) const;
+    // Everyone I have accepted: direct peers, and members of my accepted groups.
+    QStringList knownPeople() const;
+
     // My profile to `peer` if they lack this version; to everyone accepted.
     void shareProfile(const QString &peer);
     void shareProfileWithAll();

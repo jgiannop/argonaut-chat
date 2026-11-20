@@ -1,5 +1,7 @@
 #include "Protocol.h"
 
+#include "Crypto.h"
+
 #include <QDateTime>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -192,6 +194,41 @@ Content Content::text(const QString &body)
     return content;
 }
 
+Content Content::groupUpdate(const QString &group, const QString &name, const QString &admin,
+                             const QStringList &members, int revision)
+{
+    Content content;
+    content.type = Type::Group;
+    content.id = newMessageId();
+    content.sentAt = QDateTime::currentMSecsSinceEpoch();
+    content.group = group;
+    content.groupName = cleanDisplayName(name);
+    content.groupAdmin = admin;
+    content.groupMembers = members;
+    content.groupRevision = revision;
+    return content;
+}
+
+Content Content::leave(const QString &group)
+{
+    Content content;
+    content.type = Type::Leave;
+    content.id = newMessageId();
+    content.sentAt = QDateTime::currentMSecsSinceEpoch();
+    content.group = group;
+    return content;
+}
+
+bool isValidGroupId(const QString &id)
+{
+    return Attachment::isValidId(id); // the same form: 32 lower-case hex digits
+}
+
+QString newGroupId()
+{
+    return QString::fromLatin1(Crypto::randomBytes(16).toHex());
+}
+
 Content Content::profile(const QString &name, const std::optional<Attachment::Pointer> &avatar)
 {
     Content content;
@@ -261,6 +298,11 @@ QByteArray encodeContent(const Content &content)
         if (content.body.toUtf8().size() > MaxTextBytes)
             return {};
         json.insert(QStringLiteral("t"), QStringLiteral("text"));
+        if (!content.group.isEmpty()) {
+            if (!isValidGroupId(content.group))
+                return {};
+            json.insert(QStringLiteral("group"), content.group);
+        }
         json.insert(QStringLiteral("body"), content.body);
         if (content.attachments.size() > MaxAttachments)
             return {};
@@ -273,6 +315,26 @@ QByteArray encodeContent(const Content &content)
             }
             json.insert(QStringLiteral("attachments"), list);
         }
+    } else if (content.type == Content::Type::Group) {
+        if (!isValidGroupId(content.group) || content.groupName != cleanDisplayName(content.groupName)
+            || !isValidUsername(content.groupAdmin) || !content.groupMembers.contains(content.groupAdmin)
+            || content.groupMembers.size() > MaxGroupMembers || content.groupRevision < 1)
+            return {};
+        for (const QString &member : content.groupMembers) {
+            if (!isValidUsername(member) || content.groupMembers.count(member) > 1)
+                return {};
+        }
+        json.insert(QStringLiteral("t"), QStringLiteral("group"));
+        json.insert(QStringLiteral("group"), content.group);
+        json.insert(QStringLiteral("name"), content.groupName);
+        json.insert(QStringLiteral("admin"), content.groupAdmin);
+        json.insert(QStringLiteral("members"), QJsonArray::fromStringList(content.groupMembers));
+        json.insert(QStringLiteral("revision"), content.groupRevision);
+    } else if (content.type == Content::Type::Leave) {
+        if (!isValidGroupId(content.group))
+            return {};
+        json.insert(QStringLiteral("t"), QStringLiteral("leave"));
+        json.insert(QStringLiteral("group"), content.group);
     } else if (content.type == Content::Type::Profile) {
         if (content.name != cleanDisplayName(content.name))
             return {};
@@ -326,6 +388,12 @@ std::optional<Content> decodeContent(const QByteArray &padded)
             return std::nullopt;
         content.type = Content::Type::Text;
         content.body = body.toString();
+        const QJsonValue group = json.value(QStringLiteral("group"));
+        if (!group.isUndefined()) {
+            if (!group.isString() || !isValidGroupId(group.toString()))
+                return std::nullopt;
+            content.group = group.toString();
+        }
         const QJsonValue attachments = json.value(QStringLiteral("attachments"));
         if (!attachments.isUndefined()) {
             if (!attachments.isArray() || attachments.toArray().isEmpty()
@@ -338,6 +406,37 @@ std::optional<Content> decodeContent(const QByteArray &padded)
                 content.attachments.append(*pointer);
             }
         }
+        return content;
+    }
+    if (type == QLatin1String("group") || type == QLatin1String("leave")) {
+        const QJsonValue group = json.value(QStringLiteral("group"));
+        if (!group.isString() || !isValidGroupId(group.toString()))
+            return std::nullopt;
+        content.group = group.toString();
+        if (type == QLatin1String("leave")) {
+            content.type = Content::Type::Leave;
+            return content;
+        }
+        content.type = Content::Type::Group;
+        const QJsonValue name = json.value(QStringLiteral("name"));
+        const QJsonValue admin = json.value(QStringLiteral("admin"));
+        const QJsonValue members = json.value(QStringLiteral("members"));
+        const auto revision = Json::integer(json.value(QStringLiteral("revision")), 1, std::numeric_limits<int>::max());
+        if (!name.isString() || name.toString().size() > 4 * MaxDisplayName || !admin.isString()
+            || !isValidUsername(admin.toString()) || !members.isArray() || members.toArray().isEmpty()
+            || members.toArray().size() > MaxGroupMembers || !revision)
+            return std::nullopt;
+        for (const QJsonValue &member : members.toArray()) {
+            if (!member.isString() || !isValidUsername(member.toString())
+                || content.groupMembers.contains(member.toString()))
+                return std::nullopt;
+            content.groupMembers << member.toString();
+        }
+        if (!content.groupMembers.contains(admin.toString()))
+            return std::nullopt;
+        content.groupName = cleanDisplayName(name.toString());
+        content.groupAdmin = admin.toString();
+        content.groupRevision = int(*revision);
         return content;
     }
     if (type == QLatin1String("profile")) {

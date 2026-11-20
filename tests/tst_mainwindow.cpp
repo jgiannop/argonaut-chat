@@ -378,6 +378,92 @@ private slots:
         }
     }
 
+    void groupsInTheWindow()
+    {
+        ServerStore serverStore(QDir::homePath() + QStringLiteral("/server6/server.sqlite"));
+        ChatServer server(&serverStore);
+        QVERIFY(server.listen());
+        const QUrl url(QStringLiteral("ws://127.0.0.1:%1").arg(server.port()));
+        auto signUp = [&](Messenger &m, const QString &name) {
+            std::optional<bool> ok;
+            m.signUp(url, name, [&](bool done, const QString &) { ok = done; });
+            return QTest::qWaitFor([&] { return ok.has_value(); }, 5000) && *ok;
+        };
+        ChatStore store(QDir::homePath() + QStringLiteral("/me6/chat.sqlite"));
+        KeyStore keys(&store);
+        Messenger me(&store, &keys);
+        QVERIFY(signUp(me, QStringLiteral("myself")));
+        ChatStore annaStore(QDir::homePath() + QStringLiteral("/anna6/chat.sqlite"));
+        KeyStore annaKeys(&annaStore);
+        Messenger anna(&annaStore, &annaKeys);
+        QVERIFY(signUp(anna, QStringLiteral("anna")));
+        ChatStore benStore(QDir::homePath() + QStringLiteral("/ben6/chat.sqlite"));
+        KeyStore benKeys(&benStore);
+        Messenger ben(&benStore, &benKeys);
+        QVERIFY(signUp(ben, QStringLiteral("ben")));
+        MainWindow window(&store, &me);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QSignalSpy notified(&window, &MainWindow::notified);
+
+        // A new group, through the dialog.
+        GroupDialog create(&me, 0, &window);
+        create.nameField()->setText(QStringLiteral("Book club"));
+        create.membersField()->setPlainText(QStringLiteral("anna, @ben\n"));
+        QCOMPARE(create.members(), (QStringList{QStringLiteral("anna"), QStringLiteral("ben")}));
+        create.okButton()->click();
+        QTRY_COMPARE_WITH_TIMEOUT(create.result(), int(QDialog::Accepted), 5000);
+        const qint64 club = create.conversation();
+        QVERIFY(club > 0);
+        window.openConversation(club);
+        QCOMPARE(window.findChild<QLabel *>(QStringLiteral("chatTitle"))->text(), QStringLiteral("Book club"));
+        QVERIFY(window.findChild<QLabel *>(QStringLiteral("chatSubtitle"))->text().contains(QStringLiteral("3 members")));
+
+        // Anna (a stranger to me: a group request for her) accepts and writes.
+        QTRY_VERIFY_WITH_TIMEOUT(annaStore.groupConversation(store.group(club).id) > 0, 5000);
+        const qint64 annaClub = annaStore.groupConversation(store.group(club).id);
+        anna.acceptRequest(annaClub);
+        window.openConversation(store.noteToSelf()); // elsewhere, so it notifies
+        anna.send(annaClub, QStringLiteral("I'm reading Ithaca"));
+        QTRY_COMPARE_WITH_TIMEOUT(notified.size(), 1, 5000);
+        QCOMPARE(notified.at(0).at(1).toString(), QStringLiteral("Book club · anna"));
+        window.openConversation(club);
+        QTRY_COMPARE(window.messages()->count(), 1);
+        QCOMPARE(window.messages()->item(0)->data(Qt::UserRole + 13).toString(), QStringLiteral("anna"));
+
+        // Members: mine to change; Anna's only to see.
+        GroupDialog mine(&me, club, &window);
+        QVERIFY(!mine.nameField()->isReadOnly());
+        QVERIFY(mine.okButton()->isVisible() || !mine.okButton()->isHidden());
+        GroupDialog hers(&anna, annaClub, &window);
+        QVERIFY(hers.nameField()->isReadOnly());
+        QVERIFY(hers.membersField()->isReadOnly());
+
+        // Ben makes his own group with me: a request in my window, saying who.
+        std::optional<qint64> benGroup;
+        ben.createGroup(QStringLiteral("Ben's party"), {QStringLiteral("myself")},
+                        [&](qint64 c, const QString &) { benGroup = c; });
+        QTRY_VERIFY_WITH_TIMEOUT(benGroup.has_value() && *benGroup > 0, 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(store.groupConversation(benStore.group(*benGroup).id) > 0, 5000);
+        const qint64 party = store.groupConversation(benStore.group(*benGroup).id);
+        window.openConversation(party);
+        QVERIFY(window.requestBar()->isVisible());
+        QVERIFY(window.findChild<QLabel *>(QStringLiteral("requestText"))->text().contains(QStringLiteral("added you to")));
+
+        // I leave the book club: read only.
+        window.openConversation(club);
+        QVERIFY(window.composer()->isVisible());
+        window.leaveGroup(false);
+        QVERIFY(store.conversation(club).left);
+        QVERIFY(!window.composer()->isVisible());
+        QVERIFY(window.findChild<QLabel *>(QStringLiteral("leftNote"))->isVisible());
+        if (qEnvironmentVariableIsSet("CHAT_TEST_GRAB")) {
+            window.resize(1000, 640);
+            QTest::qWait(200);
+            window.grab().save(qEnvironmentVariable("CHAT_TEST_GRAB"));
+        }
+    }
+
     void notificationContent()
     {
         using Notifications::Content;

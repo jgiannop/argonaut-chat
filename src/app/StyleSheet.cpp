@@ -19,6 +19,7 @@ QLabel#chatTitle { color: @fg; font-weight: bold; font-size: 15px; }
 QLabel#chatSubtitle { color: @dimFg; }
 QListView#messageList { border: none; outline: 0; }
 QWidget#requestBar { background: @window; border-top: 1px solid @border; }
+QLabel#leftNote { color: @dimFg; background: @window; border-top: 1px solid @border; padding: 16px; }
 QLabel#requestText { color: @fg; }
 QWidget#requestBar QPushButton { background: @pathBg; color: @fg; border: none; border-radius: 16px; padding: 7px 18px; }
 QWidget#requestBar QPushButton:hover { background: @hover; }

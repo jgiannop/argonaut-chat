@@ -50,6 +50,7 @@ enum Role {
     AttachmentRole, // the attachment's id, to save it
     AvatarRole,     // a conversation's picture (QPixmap), if they sent one
     PeerRole,       // a conversation's username (search finds it too)
+    AuthorRole,     // in a group, who wrote it (theirs only)
 };
 
 QString shortTime(const QDateTime &when)
@@ -168,6 +169,7 @@ public:
         QRect image; // relative to the bubble's top left
         QRect file;
         QRect text;
+        QRect author;
         int width = 0;
         int height = 0;
     };
@@ -181,6 +183,14 @@ public:
         const QFontMetrics smallMetrics(small);
         Layout l;
         int y = Pad;
+        const QString author = index.data(AuthorRole).toString();
+        if (!author.isEmpty()) {
+            QFont bold = option.font;
+            bold.setBold(true);
+            const QFontMetrics boldMetrics(bold);
+            l.author = QRect(Pad, y, qMin(most, boldMetrics.horizontalAdvance(author) + 2), boldMetrics.height());
+            y += boldMetrics.height() + 2;
+        }
         int width = smallMetrics.horizontalAdvance(footer);
         const QPixmap image = index.data(ImageRole).value<QPixmap>();
         if (!image.isNull()) {
@@ -205,6 +215,7 @@ public:
             y += t.height();
             width = qMax(width, t.width());
         }
+        width = qMax(width, l.author.width());
         l.width = width + 2 * Pad;
         l.height = y + smallMetrics.height() + Pad + 2;
         return l;
@@ -262,6 +273,15 @@ public:
         }
         p->setPen(mine ? QColor(Qt::white) : m_theme->fg);
         p->setFont(option.font);
+        if (!l.author.isNull()) {
+            QFont bold = option.font;
+            bold.setBold(true);
+            p->setFont(bold);
+            p->setPen(m_theme->accent);
+            p->drawText(l.author.translated(origin), Qt::AlignLeft | Qt::AlignVCenter, index.data(AuthorRole).toString());
+            p->setPen(mine ? QColor(Qt::white) : m_theme->fg);
+            p->setFont(option.font);
+        }
         const QString file = index.data(FileRole).toString();
         if (!file.isEmpty()) {
             QFont bold = option.font;
@@ -431,6 +451,11 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
     chatLayout->addWidget(m_messages, 1);
     chatLayout->addWidget(composer);
     chatLayout->addWidget(m_requestBar);
+    m_leftNote = new QLabel(tr("You are no longer in this group."), chat);
+    m_leftNote->setObjectName(QStringLiteral("leftNote"));
+    m_leftNote->setAlignment(Qt::AlignCenter);
+    m_leftNote->hide();
+    chatLayout->addWidget(m_leftNote);
 
     auto *split = new QSplitter(Qt::Horizontal, this);
     split->addWidget(sidebar);
@@ -520,6 +545,13 @@ void MainWindow::buildMenus()
     m_newChatAction = file->addAction(tr("New Chat…"), this, &MainWindow::newChat);
     m_newChatAction->setShortcut(QKeySequence::New);
     m_signUpAction = file->addAction(tr("Sign Up…"), this, &MainWindow::showSignUp);
+    m_newGroupAction = file->addAction(tr("New Group…"), this, [this] {
+        if (!m_messenger)
+            return;
+        GroupDialog dialog(m_messenger, 0, this);
+        if (dialog.exec() == QDialog::Accepted && dialog.conversation())
+            openConversation(dialog.conversation());
+    });
     m_profileAction = file->addAction(tr("Profile…"), this, [this] {
         if (!m_messenger)
             return;
@@ -538,6 +570,15 @@ void MainWindow::buildMenus()
 
     QMenu *conversation = menuBar()->addMenu(tr("&Conversation"));
     m_safetyAction = conversation->addAction(tr("Safety Number…"), this, &MainWindow::showSafetyNumber);
+    conversation->addSeparator();
+    m_membersAction = conversation->addAction(tr("Members…"), this, [this] {
+        if (!m_messenger)
+            return;
+        GroupDialog dialog(m_messenger, m_current, this);
+        dialog.exec();
+        updateHeader();
+    });
+    m_leaveAction = conversation->addAction(tr("Leave Group…"), this, [this] { leaveGroup(true); });
 
     QMenu *view = menuBar()->addMenu(tr("&View"));
     QMenu *notifications = view->addMenu(tr("Notifications"));
@@ -639,8 +680,21 @@ void MainWindow::updateHeader()
     const ChatStore::Conversation c = m_store->conversation(m_current);
     const bool direct = c.kind == QLatin1String("direct");
     m_title->setText(direct && m_messenger ? m_messenger->displayName(c.peer) : c.title);
+    const bool isGroup = c.kind == QLatin1String("group");
     if (c.kind == QLatin1String("self"))
         m_subtitle->setText(tr("Notes you keep for yourself, on this computer"));
+    else if (isGroup && c.left)
+        m_subtitle->setText(tr("You are no longer in this group"));
+    else if (isGroup && m_messenger) {
+        const ChatStore::Group g = m_messenger->group(c.id);
+        QStringList names;
+        for (const QString &member : g.members)
+            names << (member == m_messenger->username() ? tr("you") : m_messenger->displayName(member));
+        m_subtitle->setText(c.request ? tr("Group request from @%1").arg(g.admin)
+                                      : (g.members.size() == 1 ? tr("1 member: %1")
+                                                               : tr("%1 members: %2").arg(g.members.size()))
+                                            .arg(names.join(QStringLiteral(", "))));
+    }
     else if (direct && c.request)
         m_subtitle->setText(tr("@%1 · message request").arg(c.peer));
     else if (direct && m_messenger && m_messenger->safetyNumberHasChanged(c.peer))
@@ -652,14 +706,26 @@ void MainWindow::updateHeader()
     m_safety->setVisible(direct && m_messenger);
     if (m_safetyAction)
         m_safetyAction->setEnabled(direct && m_messenger);
-    // A request: answer it before writing.
-    const bool request = direct && c.request && m_messenger;
-    m_composer->setVisible(!request);
+    if (m_membersAction)
+        m_membersAction->setEnabled(isGroup && m_messenger && !c.left);
+    if (m_leaveAction)
+        m_leaveAction->setEnabled(isGroup && m_messenger && !c.left);
+    // A request: answer it before writing. A group I left: read only.
+    const bool request = (direct || isGroup) && c.request && m_messenger;
+    m_composer->setVisible(!request && !c.left);
     m_requestBar->setVisible(request);
-    if (request)
+    m_leftNote->setVisible(c.left);
+    if (request && isGroup) {
+        const QString admin = m_messenger->group(c.id).admin;
+        m_requestText->setText(tr("<b>%1</b> (@%2) added you to <b>%3</b>. They won't know you have seen its "
+                                  "messages until you accept.")
+                                   .arg(m_messenger->displayName(admin).toHtmlEscaped(), admin.toHtmlEscaped(),
+                                        c.title.toHtmlEscaped()));
+    } else if (request) {
         m_requestText->setText(tr("<b>%1</b> wants to chat with you. They won't know you have seen their messages "
                                   "until you accept.")
                                    .arg(c.peer.toHtmlEscaped()));
+    }
 }
 
 void MainWindow::acceptRequest()
@@ -674,7 +740,7 @@ void MainWindow::acceptRequest()
 void MainWindow::deleteRequest(bool ask)
 {
     const ChatStore::Conversation c = m_store->conversation(m_current);
-    if (!m_messenger || c.kind != QLatin1String("direct"))
+    if (!m_messenger || (c.kind != QLatin1String("direct") && c.kind != QLatin1String("group")))
         return;
     if (ask && QMessageBox::question(this, tr("Delete"),
                                      tr("Delete this conversation with %1? They can write to you again.").arg(c.peer))
@@ -687,16 +753,33 @@ void MainWindow::deleteRequest(bool ask)
 void MainWindow::blockRequest(bool ask)
 {
     const ChatStore::Conversation c = m_store->conversation(m_current);
-    if (!m_messenger || c.kind != QLatin1String("direct"))
+    if (!m_messenger || (c.kind != QLatin1String("direct") && c.kind != QLatin1String("group")))
         return;
+    // A group request: its admin is the one blocked, and the group goes.
+    const QString who = c.kind == QLatin1String("group") ? m_messenger->group(c.id).admin : c.peer;
     if (ask && QMessageBox::question(this, tr("Block"),
                                      tr("Block %1? Their messages will be dropped, and they will not know. "
                                         "You can unblock them in File › Blocked People.")
-                                         .arg(c.peer))
+                                         .arg(who))
                    != QMessageBox::Yes)
         return;
-    m_messenger->block(c.peer);
+    m_messenger->block(who);
+    if (c.kind == QLatin1String("group"))
+        m_messenger->deleteConversation(c.id);
     openConversation(m_store->noteToSelf());
+}
+
+void MainWindow::leaveGroup(bool ask)
+{
+    const ChatStore::Conversation c = m_store->conversation(m_current);
+    if (!m_messenger || c.kind != QLatin1String("group") || c.left)
+        return;
+    if (ask && QMessageBox::question(this, tr("Leave Group"),
+                                     tr("Leave %1? You will no longer get its messages.").arg(c.title))
+                   != QMessageBox::Yes)
+        return;
+    m_messenger->leaveGroup(c.id);
+    updateHeader();
 }
 
 void MainWindow::updateConnection()
@@ -727,6 +810,8 @@ void MainWindow::updateConnection()
         m_blockedAction->setEnabled(account);
     if (m_profileAction)
         m_profileAction->setEnabled(account);
+    if (m_newGroupAction)
+        m_newGroupAction->setEnabled(account);
 }
 
 void MainWindow::showNotice(const QString &text)
@@ -793,12 +878,15 @@ void MainWindow::showSafetyNumber()
 void MainWindow::reloadMessages()
 {
     m_messages->clear();
+    const bool group = m_store->conversation(m_current).kind == QLatin1String("group");
     for (const ChatStore::Message &m : m_store->messages(m_current)) {
         auto *item = new QListWidgetItem(m.body, m_messages);
         item->setData(IdRole, m.id);
         item->setData(OutgoingRole, m.outgoing());
         item->setData(TimeRole, QLocale().toString(m.sentAt.toLocalTime().time(), QLocale::ShortFormat));
         item->setData(StatusRole, m.status);
+        if (group && !m.outgoing())
+            item->setData(AuthorRole, m_messenger ? m_messenger->displayName(m.author) : m.author);
         const QList<ChatStore::StoredAttachment> attachments = m_store->attachments(m.id);
         if (!attachments.isEmpty()) {
             const ChatStore::StoredAttachment &a = attachments.first();
@@ -916,7 +1004,10 @@ void MainWindow::notify(qint64 conversation, const QString &from, const QString 
         return;
     // Their chosen name; for a request, with the username too (anyone can choose any name).
     const QString who = m_messenger ? m_messenger->displayName(from) : from;
-    const QString shownName = request && who != from ? QStringLiteral("%1 (@%2)").arg(who, from) : who;
+    QString shownName = request && who != from ? QStringLiteral("%1 (@%2)").arg(who, from) : who;
+    const ChatStore::Conversation c = m_store->conversation(conversation);
+    if (c.kind == QLatin1String("group"))
+        shownName = QStringLiteral("%1 · %2").arg(c.title, shownName);
     const auto shown = Notifications::make(Notifications::saved(), shownName, text, request);
     if (!shown)
         return;

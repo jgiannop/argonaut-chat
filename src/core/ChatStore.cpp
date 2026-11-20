@@ -122,6 +122,14 @@ void ChatStore::createTables()
                           " file TEXT NOT NULL DEFAULT '',"
                           " state TEXT NOT NULL)"));
     q.exec(QStringLiteral("CREATE INDEX IF NOT EXISTS attachments_by_message ON attachments(message)"));
+    q.exec(QStringLiteral("CREATE TABLE IF NOT EXISTS group_info ("
+                          " conversation INTEGER PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,"
+                          " admin TEXT NOT NULL,"
+                          " revision INTEGER NOT NULL)"));
+    q.exec(QStringLiteral("CREATE TABLE IF NOT EXISTS group_members ("
+                          " conversation INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,"
+                          " username TEXT NOT NULL,"
+                          " PRIMARY KEY (conversation, username))"));
     q.exec(QStringLiteral("CREATE TABLE IF NOT EXISTS my_profile ("
                           " id INTEGER PRIMARY KEY CHECK (id = 1),"
                           " name TEXT NOT NULL DEFAULT '',"
@@ -189,6 +197,7 @@ QList<ChatStore::Conversation> ChatStore::conversations() const
         c.peer = q.value(3).toString();
         c.lastActivity = QDateTime::fromMSecsSinceEpoch(q.value(4).toLongLong(), QTimeZone::utc());
         c.request = q.value(5).toString() == QLatin1String("request");
+        c.left = q.value(5).toString() == QLatin1String("left");
         c.lastText = q.value(6).toString();
         c.unread = q.value(7).toInt();
         out.append(c);
@@ -280,6 +289,11 @@ void ChatStore::deleteConversation(qint64 conversation)
     q.prepare(QStringLiteral("DELETE FROM messages WHERE conversation = ?"));
     q.addBindValue(conversation);
     q.exec();
+    for (const char *table : {"group_members", "group_info"}) {
+        q.prepare(QStringLiteral("DELETE FROM %1 WHERE conversation = ?").arg(QLatin1String(table)));
+        q.addBindValue(conversation);
+        q.exec();
+    }
     for (const QString &name : files)
         QFile::remove(m_attachments + QLatin1Char('/') + name);
     q.prepare(QStringLiteral("DELETE FROM conversations WHERE id = ? AND kind <> 'self'"));
@@ -736,4 +750,135 @@ void ChatStore::setProfileSent(const QString &username, int version)
     q.addBindValue(text(username));
     q.addBindValue(version);
     q.exec();
+}
+
+// --- Groups ---
+
+qint64 ChatStore::groupConversation(const QString &groupId) const
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT id FROM conversations WHERE kind = 'group' AND peer = ? LIMIT 1"));
+    q.addBindValue(text(groupId));
+    return q.exec() && q.next() ? q.value(0).toLongLong() : 0;
+}
+
+ChatStore::Group ChatStore::group(qint64 conversation) const
+{
+    Group g;
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT c.peer, c.title, i.admin, i.revision FROM conversations c"
+                             " JOIN group_info i ON i.conversation = c.id WHERE c.id = ? AND c.kind = 'group'"));
+    q.addBindValue(conversation);
+    if (!q.exec() || !q.next())
+        return g;
+    g.conversation = conversation;
+    g.id = q.value(0).toString();
+    g.name = q.value(1).toString();
+    g.admin = q.value(2).toString();
+    g.revision = q.value(3).toInt();
+    q.prepare(QStringLiteral("SELECT username FROM group_members WHERE conversation = ? ORDER BY username"));
+    q.addBindValue(conversation);
+    q.exec();
+    while (q.next())
+        g.members << q.value(0).toString();
+    return g;
+}
+
+namespace {
+
+void writeMembers(const QSqlDatabase &db, qint64 conversation, const QStringList &members)
+{
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral("DELETE FROM group_members WHERE conversation = ?"));
+    q.addBindValue(conversation);
+    q.exec();
+    q.prepare(QStringLiteral("INSERT OR IGNORE INTO group_members (conversation, username) VALUES (?, ?)"));
+    for (const QString &member : members) {
+        q.bindValue(0, conversation);
+        q.bindValue(1, member);
+        q.exec();
+    }
+}
+
+} // namespace
+
+qint64 ChatStore::addGroup(const Group &g, bool request)
+{
+    const qint64 conversation = addConversation(QStringLiteral("group"), g.name, g.id, request);
+    if (conversation == 0)
+        return 0;
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("INSERT INTO group_info (conversation, admin, revision) VALUES (?, ?, ?)"));
+    q.addBindValue(conversation);
+    q.addBindValue(text(g.admin));
+    q.addBindValue(g.revision);
+    q.exec();
+    writeMembers(m_db, conversation, g.members);
+    emit conversationsChanged();
+    return conversation;
+}
+
+void ChatStore::updateGroup(const Group &g)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("UPDATE conversations SET title = ? WHERE id = ?"));
+    q.addBindValue(text(g.name));
+    q.addBindValue(g.conversation);
+    q.exec();
+    q.prepare(QStringLiteral("UPDATE group_info SET admin = ?, revision = ? WHERE conversation = ?"));
+    q.addBindValue(text(g.admin));
+    q.addBindValue(g.revision);
+    q.addBindValue(g.conversation);
+    q.exec();
+    writeMembers(m_db, g.conversation, g.members);
+    emit conversationsChanged();
+    emit messagesChanged(g.conversation);
+}
+
+void ChatStore::setLeft(qint64 conversation)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("UPDATE conversations SET state = 'left' WHERE id = ? AND kind = 'group'"));
+    q.addBindValue(conversation);
+    q.exec();
+    emit conversationsChanged();
+    emit messagesChanged(conversation);
+}
+
+bool ChatStore::isMember(qint64 conversation, const QString &username) const
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT 1 FROM group_members WHERE conversation = ? AND username = ?"));
+    q.addBindValue(conversation);
+    q.addBindValue(text(username));
+    return q.exec() && q.next();
+}
+
+void ChatStore::advanceStatusFrom(const QString &from, const QStringList &uids, const QString &status)
+{
+    // Every conversation with them: direct, and the groups they are in.
+    QList<qint64> conversations;
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT id FROM conversations WHERE kind = 'direct' AND peer = ?"
+                             " UNION SELECT conversation FROM group_members WHERE username = ?"));
+    q.addBindValue(text(from));
+    q.addBindValue(text(from));
+    q.exec();
+    while (q.next())
+        conversations << q.value(0).toLongLong();
+    for (qint64 conversation : conversations)
+        advanceStatus(conversation, uids, status);
+}
+
+QHash<QString, QStringList> ChatStore::unseenUidsByAuthor(qint64 conversation) const
+{
+    QHash<QString, QStringList> out;
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT author, uid FROM messages WHERE conversation = ? AND seen = 0 AND author <> ''"
+                             " AND uid <> '' ORDER BY id"));
+    q.addBindValue(conversation);
+    q.exec();
+    while (q.next())
+        out[q.value(0).toString()] << q.value(1).toString();
+    return out;
 }

@@ -33,6 +33,7 @@ constexpr int MaxContentBytes = 128 * 1024;    // a padded Content
 constexpr int MaxCipherMessageBytes = 192 * 1024;
 constexpr int MaxReceiptIds = 1000;
 constexpr int MaxAttachments = 10; // per message
+constexpr int MaxGroupMembers = 50; // me included
 constexpr int PaddingBlock = 160;
 
 // Usernames: 3 to 32 characters, a-z 0-9 _ and ., starting with a letter, no
@@ -48,7 +49,7 @@ bool isValidMessageId(const QString &id);
 // Layer 1.
 struct Content
 {
-    enum class Type { Text, Receipt, Profile };
+    enum class Type { Text, Receipt, Profile, Group, Leave };
     enum class Receipt { Delivered, Read };
 
     Type type = Type::Text;
@@ -61,11 +62,26 @@ struct Content
     // Profile: the sender's display name (maybe empty) and picture (maybe none).
     QString name;
     std::optional<Attachment::Pointer> avatar;
+    // Text, Group, Leave: the group (32 hex digits; empty: a direct message).
+    QString group;
+    // Group (from its admin): its name, admin, members (the admin among
+    // them) and revision (each update one higher; older ones are ignored).
+    QString groupName;
+    QString groupAdmin;
+    QStringList groupMembers;
+    int groupRevision = 0;
 
     static Content text(const QString &body);
     static Content receiptOf(Receipt kind, const QStringList &ids);
     static Content profile(const QString &name, const std::optional<Attachment::Pointer> &avatar);
+    static Content groupUpdate(const QString &group, const QString &name, const QString &admin,
+                               const QStringList &members, int revision);
+    static Content leave(const QString &group);
 };
+
+// A group's id: 32 lower-case hex digits, random.
+bool isValidGroupId(const QString &id);
+QString newGroupId();
 
 // A display name as it may be shown: no control characters or direction
 // marks, white space simplified, at most MaxDisplayName characters.

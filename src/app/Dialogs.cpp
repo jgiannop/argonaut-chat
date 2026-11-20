@@ -19,7 +19,9 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPointer>
+#include <QPlainTextEdit>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QVBoxLayout>
 
 SignUpDialog::SignUpDialog(Messenger *messenger, QWidget *parent)
@@ -334,4 +336,84 @@ void ProfileDialog::save()
         return;
     }
     accept();
+}
+
+GroupDialog::GroupDialog(Messenger *messenger, qint64 conversation, QWidget *parent)
+    : QDialog(parent)
+    , m_messenger(messenger)
+    , m_conversation(conversation)
+{
+    const ChatStore::Group group = conversation ? m_messenger->group(conversation) : ChatStore::Group();
+    const bool admin = conversation == 0 || group.admin == m_messenger->username();
+    setWindowTitle(conversation == 0 ? tr("New Group") : tr("Group Members"));
+    auto *layout = new QVBoxLayout(this);
+    auto *intro = new QLabel(conversation == 0
+                                 ? tr("A group is kept by its members: the server sees only one-to-one messages. "
+                                      "You will be its admin. At most %1 people.")
+                                       .arg(Protocol::MaxGroupMembers)
+                             : admin ? tr("You are the admin: change its name, add or take out people.")
+                                     : tr("Only the admin (%1) can change the group.")
+                                           .arg(m_messenger->displayName(group.admin).toHtmlEscaped()),
+                             this);
+    intro->setWordWrap(true);
+    layout->addWidget(intro);
+    auto *form = new QFormLayout;
+    m_name = new QLineEdit(group.name, this);
+    m_name->setObjectName(QStringLiteral("groupName"));
+    m_name->setMaxLength(Protocol::MaxDisplayName);
+    m_name->setPlaceholderText(tr("The group's name"));
+    m_name->setReadOnly(!admin);
+    m_members = new QPlainTextEdit(this);
+    m_members->setObjectName(QStringLiteral("groupMembers"));
+    m_members->setPlaceholderText(tr("Their usernames: anna, bob, …"));
+    QStringList others = group.members;
+    others.removeAll(m_messenger->username());
+    m_members->setPlainText(others.join(QStringLiteral(", ")));
+    m_members->setReadOnly(!admin);
+    form->addRow(tr("Name:"), m_name);
+    form->addRow(tr("Members:"), m_members);
+    layout->addLayout(form);
+    m_message = new QLabel(this);
+    m_message->setWordWrap(true);
+    layout->addWidget(m_message);
+    auto *buttons = new QDialogButtonBox(admin ? QDialogButtonBox::Cancel : QDialogButtonBox::Close, this);
+    m_ok = buttons->addButton(conversation == 0 ? tr("Create") : tr("Save"), QDialogButtonBox::AcceptRole);
+    m_ok->setVisible(admin);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, this, &GroupDialog::apply);
+    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    resize(440, 320);
+}
+
+QStringList GroupDialog::members() const
+{
+    static const QRegularExpression separators(QStringLiteral("[,;\\s]+"));
+    QStringList out = m_members->toPlainText().split(separators, Qt::SkipEmptyParts);
+    for (QString &name : out) {
+        if (name.startsWith(QLatin1Char('@')))
+            name.remove(0, 1);
+    }
+    return out;
+}
+
+void GroupDialog::apply()
+{
+    m_ok->setEnabled(false);
+    m_message->setText(tr("Checking the people…"));
+    QPointer<GroupDialog> self(this);
+    const auto done = [self](qint64 conversation, const QString &error) {
+        if (!self)
+            return;
+        self->m_ok->setEnabled(true);
+        if (conversation == 0) {
+            self->m_message->setText(error);
+            return;
+        }
+        self->m_conversation = conversation;
+        self->accept();
+    };
+    if (m_conversation == 0)
+        m_messenger->createGroup(m_name->text(), members(), done);
+    else
+        m_messenger->changeGroup(m_conversation, m_name->text(), members(), done);
 }

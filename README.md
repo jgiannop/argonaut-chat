@@ -27,6 +27,9 @@ program: [docs/how-signal-works.md](docs/how-signal-works.md).
   with a new key each, as Signal does; the server keeps only the encrypted
   bytes, for 30 days. Pictures show in the conversation; a click saves a
   file. Kept encrypted on disk too.
+- **Groups** of up to 50 (File › New Group…): kept by their members, each
+  message encrypted for each member; the server cannot tell a group exists.
+  Its creator adds and removes people; anyone can leave.
 - **Your name and picture** (File › Profile…), sent only to the people you
   write to or accept, encrypted; the server never sees them. Others always
   see your username too.

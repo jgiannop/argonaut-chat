@@ -153,6 +153,45 @@ private slots:
         QCOMPARE(back->name, QString("Mallory"));
     }
 
+    void groups()
+    {
+        const QString gid = newGroupId();
+        QVERIFY(isValidGroupId(gid));
+        auto back = decodeContent(encodeContent(Content::groupUpdate(gid, "Trip", "alice", {"alice", "bob"}, 3)));
+        QVERIFY(back);
+        QCOMPARE(back->type, Content::Type::Group);
+        QCOMPARE(back->group, gid);
+        QCOMPARE(back->groupName, QString("Trip"));
+        QCOMPARE(back->groupAdmin, QString("alice"));
+        QCOMPARE(back->groupMembers, (QStringList{"alice", "bob"}));
+        QCOMPARE(back->groupRevision, 3);
+        QCOMPARE(decodeContent(encodeContent(Content::leave(gid)))->type, Content::Type::Leave);
+        Content text = Content::text("hi all");
+        text.group = gid;
+        QCOMPARE(decodeContent(encodeContent(text))->group, gid);
+
+        // Not sent: an admin not in it, twice the same member, too many, no revision, a bad id.
+        QVERIFY(encodeContent(Content::groupUpdate(gid, "x", "carol", {"alice", "bob"}, 1)).isEmpty());
+        QVERIFY(encodeContent(Content::groupUpdate(gid, "x", "alice", {"alice", "alice"}, 1)).isEmpty());
+        QStringList crowd{"alice"};
+        for (int i = 0; i < MaxGroupMembers; ++i)
+            crowd << QStringLiteral("p%1x").arg(i);
+        QVERIFY(encodeContent(Content::groupUpdate(gid, "x", "alice", crowd, 1)).isEmpty());
+        QVERIFY(encodeContent(Content::groupUpdate(gid, "x", "alice", {"alice"}, 0)).isEmpty());
+        QVERIFY(encodeContent(Content::groupUpdate("nope", "x", "alice", {"alice"}, 1)).isEmpty());
+        text.group = "../x";
+        QVERIFY(encodeContent(text).isEmpty());
+        // Not taken, from strangers, the same.
+        const QByteArray head = "{\"v\":1,\"t\":\"group\",\"id\":\"" + newMessageId().toLatin1()
+                                + "\",\"sent\":1,\"group\":\"" + gid.toLatin1() + "\",\"name\":\"x\",";
+        QVERIFY(!decodeContent(pad(head + "\"admin\":\"carol\",\"members\":[\"alice\"],\"revision\":1}")));
+        QVERIFY(!decodeContent(pad(head + "\"admin\":\"alice\",\"members\":[\"alice\",\"alice\"],\"revision\":1}")));
+        QVERIFY(!decodeContent(pad(head + "\"admin\":\"alice\",\"members\":[\"Alice\"],\"revision\":1}")));
+        QVERIFY(!decodeContent(pad(head + "\"admin\":\"alice\",\"members\":[\"alice\"],\"revision\":0}")));
+        QVERIFY(!decodeContent(pad(head + "\"admin\":\"alice\",\"members\":[],\"revision\":1}")));
+        QVERIFY(decodeContent(pad(head + "\"admin\":\"alice\",\"members\":[\"alice\"],\"revision\":1}")));
+    }
+
     void contentFromStrangers_data()
     {
         QTest::addColumn<QByteArray>("json");

@@ -8,6 +8,7 @@ class QImage;
 class QLabel;
 class QLineEdit;
 class QListWidget;
+class QPlainTextEdit;
 class QPushButton;
 
 // The first start: which server, and the username people will find you by.
@@ -91,6 +92,33 @@ private:
     QPushButton *m_save = nullptr;
     QPushButton *m_remove = nullptr;
     QByteArray m_avatar;
+};
+
+// A new group (conversation 0), or a group's name and members: changed by
+// its admin, only shown to the others.
+class GroupDialog : public QDialog
+{
+    Q_OBJECT
+
+public:
+    GroupDialog(Messenger *messenger, qint64 conversation, QWidget *parent = nullptr);
+
+    QLineEdit *nameField() const { return m_name; }
+    QPlainTextEdit *membersField() const { return m_members; }
+    QPushButton *okButton() const { return m_ok; }
+    qint64 conversation() const { return m_conversation; } // the new one, once made
+    // The usernames in the field: separated by commas, spaces or lines.
+    QStringList members() const;
+
+private:
+    void apply();
+
+    Messenger *m_messenger;
+    qint64 m_conversation;
+    QLineEdit *m_name = nullptr;
+    QPlainTextEdit *m_members = nullptr;
+    QLabel *m_message = nullptr;
+    QPushButton *m_ok = nullptr;
 };
 
 // The people whose messages are dropped, to unblock.

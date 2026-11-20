@@ -44,6 +44,8 @@ public:
     void acceptRequest();
     void deleteRequest(bool ask);
     void blockRequest(bool ask);
+    // The open group: left (`ask`: confirm first).
+    void leaveGroup(bool ask);
     // A file into the open conversation, with what is typed as its caption (the 📎 button).
     void attachFile(const QString &path);
     // An attachment, decrypted, into `path` (a click on it asks where).
@@ -101,6 +103,10 @@ private:
     QHash<qint64, int> m_progress;     // attachment -> percent up or down
     QHash<QString, QPixmap> m_avatars; // username -> their picture, small
     QAction *m_profileAction = nullptr;
+    QAction *m_newGroupAction = nullptr;
+    QAction *m_membersAction = nullptr;
+    QAction *m_leaveAction = nullptr;
+    QLabel *m_leftNote = nullptr;
     qint64 m_lastNotified = 0;
     bool m_quitting = false;
     QWidget *m_composer = nullptr;
