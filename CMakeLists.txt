@@ -18,8 +18,10 @@ include(GNUInstallDirs)
 qt_add_library(chat_core STATIC
     src/core/ChatStore.cpp src/core/ChatStore.h
     src/core/Crypto.cpp src/core/Crypto.h
+    src/core/Protocol.cpp src/core/Protocol.h
     src/core/RatchetSession.cpp src/core/RatchetSession.h
     src/core/SafetyNumber.cpp src/core/SafetyNumber.h
+    src/core/Session.cpp src/core/Session.h
     src/core/X3dh.cpp src/core/X3dh.h
 )
 target_include_directories(chat_core PUBLIC src/core)

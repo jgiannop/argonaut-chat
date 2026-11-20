@@ -1,0 +1,104 @@
+#pragma once
+
+#include "X3dh.h"
+
+#include <QByteArray>
+#include <QJsonObject>
+#include <QString>
+#include <QStringList>
+
+#include <optional>
+
+// What goes over the wire, in three layers (docs/protocol.md):
+//
+//   1. Content: what a person wrote (or a receipt), as JSON, padded to a
+//      multiple of 160 bytes (as Signal does) so its length shows little.
+//      Only ever seen encrypted outside this computer.
+//   2. CipherMessage: Content encrypted by a Session. Binary. The first
+//      messages of a conversation are "prekey" messages: they also carry what
+//      Bob needs for X3DH (Alice's identity key, her ephemeral key, which of
+//      his prekeys she used).
+//   3. The server's JSON: prekey bundles, and envelopes (a CipherMessage with
+//      who sent it and when, as the server says).
+//
+// Every decode function takes data from a stranger: sizes, types and ranges
+// are checked, and anything wrong gives nothing.
+namespace Protocol {
+
+constexpr int Version = 1;
+constexpr int MaxTextBytes = 64 * 1024;        // a text message's body, UTF-8
+constexpr int MaxContentBytes = 128 * 1024;    // a padded Content
+constexpr int MaxCipherMessageBytes = 192 * 1024;
+constexpr int MaxReceiptIds = 1000;
+constexpr int PaddingBlock = 160;
+
+// Usernames: 3 to 32 characters, a-z 0-9 _ and ., starting with a letter, no
+// ".." and no "." at the end; ASCII only (no look-alike letters from other
+// alphabets). Case does not matter: stored and compared in lower case.
+QString normalizeUsername(const QString &username); // empty if not valid
+bool isValidUsername(const QString &username);      // already normalized
+
+// A new message id (a UUID without braces).
+QString newMessageId();
+bool isValidMessageId(const QString &id);
+
+// Layer 1.
+struct Content
+{
+    enum class Type { Text, Receipt };
+    enum class Receipt { Delivered, Read };
+
+    Type type = Type::Text;
+    QString id;         // this message's id
+    qint64 sentAt = 0;  // ms since the epoch, UTC, as the sender's clock says
+    QString body;       // Text
+    Receipt receipt = Receipt::Delivered;
+    QStringList receiptFor; // Receipt: the ids of the messages it is for
+
+    static Content text(const QString &body);
+    static Content receiptOf(Receipt kind, const QStringList &ids);
+};
+
+// Padded. Empty if the content is not valid (too long, bad ids).
+QByteArray encodeContent(const Content &content);
+// Nothing for an unknown type, a later version, or anything malformed.
+std::optional<Content> decodeContent(const QByteArray &padded);
+
+// Signal's padding: 0x80, then zeros up to a multiple of `PaddingBlock`.
+QByteArray pad(const QByteArray &data);
+std::optional<QByteArray> unpad(const QByteArray &padded);
+
+// Layer 2. On the wire: kind (1 byte: 1 message, 2 prekey message), for a
+// prekey message identity key (32) | base key (32) | signed prekey id (4) |
+// has one-time prekey (1) | one-time prekey id (4), then the ratchet message.
+struct CipherMessage
+{
+    bool preKey = false;
+    QByteArray identityKey; // the sender's (prekey messages)
+    QByteArray baseKey;     // the sender's X3DH ephemeral key
+    quint32 signedPreKeyId = 0;
+    std::optional<quint32> oneTimePreKeyId;
+    QByteArray ratchetMessage; // RatchetSession::encrypt's output
+};
+
+QByteArray encodeCipherMessage(const CipherMessage &message);
+std::optional<CipherMessage> decodeCipherMessage(const QByteArray &data);
+
+// Layer 3: binary fields in standard base64.
+QJsonObject bundleToJson(const X3dh::PreKeyBundle &bundle);
+std::optional<X3dh::PreKeyBundle> bundleFromJson(const QJsonObject &json);
+
+// A CipherMessage as the server hands it over.
+struct Envelope
+{
+    QString id;           // the server's, to acknowledge it (1-64 printable ASCII)
+    QString from;         // username
+    quint32 fromDevice = 1;
+    qint64 serverTime = 0; // ms, when the server got it
+    QByteArray message;    // an encoded CipherMessage
+};
+
+QJsonObject envelopeToJson(const Envelope &envelope);
+std::optional<Envelope> envelopeFromJson(const QJsonObject &json);
+
+} // namespace Protocol
