@@ -2,6 +2,7 @@
 
 #include "CipherSql.h"
 
+#include <QTimeZone>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -116,7 +117,7 @@ ChatStore::Message messageFrom(const QSqlQuery &q)
     m.conversation = q.value(1).toLongLong();
     m.author = q.value(2).toString();
     m.body = q.value(3).toString();
-    m.sentAt = QDateTime::fromMSecsSinceEpoch(q.value(4).toLongLong(), Qt::UTC);
+    m.sentAt = QDateTime::fromMSecsSinceEpoch(q.value(4).toLongLong(), QTimeZone::utc());
     m.status = q.value(5).toString();
     m.uid = q.value(6).toString();
     return m;
@@ -149,7 +150,7 @@ QList<ChatStore::Conversation> ChatStore::conversations() const
         c.kind = q.value(1).toString();
         c.title = q.value(2).toString();
         c.peer = q.value(3).toString();
-        c.lastActivity = QDateTime::fromMSecsSinceEpoch(q.value(4).toLongLong(), Qt::UTC);
+        c.lastActivity = QDateTime::fromMSecsSinceEpoch(q.value(4).toLongLong(), QTimeZone::utc());
         c.request = q.value(5).toString() == QLatin1String("request");
         c.lastText = q.value(6).toString();
         c.unread = q.value(7).toInt();

@@ -18,9 +18,11 @@ endif()
 # The cryptography: libsodium (1.0.18 on Ubuntu 24.04).
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium>=1.0.18)
-# The local database: SQLCipher (4.5 on Ubuntu 24.04), and its key in the
+# The local database: SQLCipher (4.5 on Ubuntu 24.04, 4.13 on 26.04), and its key in the
 # system keyring through QtKeychain.
-pkg_check_modules(SQLCIPHER REQUIRED IMPORTED_TARGET sqlcipher>=4)
+# No version check: newer packages report the version of the SQLite inside
+# (3.51 for SQLCipher 4.13 on Ubuntu 26.04), older ones SQLCipher's own.
+pkg_check_modules(SQLCIPHER REQUIRED IMPORTED_TARGET sqlcipher)
 if(NOT CHAT_SERVER_ONLY)
     find_package(Qt6Keychain REQUIRED)
 endif()

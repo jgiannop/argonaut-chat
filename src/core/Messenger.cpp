@@ -2,6 +2,8 @@
 
 #include "SafetyNumber.h"
 
+#include <QTimeZone>
+
 Messenger::Messenger(ChatStore *store, KeyStore *keys, QObject *parent)
     : QObject(parent)
     , m_store(store)
@@ -338,7 +340,7 @@ qint64 Messenger::send(qint64 conversation, const QString &text)
         acceptRequest(conversation);
     const Protocol::Content content = Protocol::Content::text(text);
     const ChatStore::Message message =
-        m_store->addMessage(conversation, text, QString(), QDateTime::fromMSecsSinceEpoch(content.sentAt, Qt::UTC),
+        m_store->addMessage(conversation, text, QString(), QDateTime::fromMSecsSinceEpoch(content.sentAt, QTimeZone::utc()),
                             content.id, QStringLiteral("sending"));
     if (message.id != 0 && m_state == State::Online)
         deliver(message);
@@ -556,7 +558,7 @@ void Messenger::handleContent(const QString &from, const Protocol::Envelope &env
         return;
     // Their clock, unless it is far ahead of the server's.
     const qint64 sentAt = content.sentAt > envelope.serverTime + 5 * 60 * 1000 ? envelope.serverTime : content.sentAt;
-    m_store->addMessage(conversation, content.body, from, QDateTime::fromMSecsSinceEpoch(sentAt, Qt::UTC), content.id);
+    m_store->addMessage(conversation, content.body, from, QDateTime::fromMSecsSinceEpoch(sentAt, QTimeZone::utc()), content.id);
     if (!m_store->conversation(conversation).request)
         sendReceipt(from, Protocol::Content::Receipt::Delivered, {content.id});
 }
