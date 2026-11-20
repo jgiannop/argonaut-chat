@@ -120,6 +120,10 @@ Any request may also be answered `rate-limited`, with `retryAfter` (ms).
   once, at most 500 unacknowledged at a time. A message is deleted only
   when its device acknowledges it; until then it comes again on every
   sign-in. At most 10000 are queued per device.
+- **Keep-alive**: WebSocket pings both ways. The app pings every 30 s and
+  closes a connection silent for 10 s past that, then connects again; the
+  server pings every minute and drops a connection not heard from in two.
+  Routers drop quiet connections without a word: this notices.
 - **One-time prekeys**: at most 200 kept per device (the oldest dropped).
   When none are left, bundles come without one.
 - **TLS**: the server speaks plain WebSockets and listens on 127.0.0.1 by

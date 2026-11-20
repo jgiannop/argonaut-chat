@@ -2,9 +2,11 @@
 
 #include "Protocol.h"
 
+#include <QElapsedTimer>
 #include <QHash>
 #include <QJsonObject>
 #include <QObject>
+#include <QTimer>
 #include <QUrl>
 #include <QWebSocket>
 
@@ -17,6 +19,10 @@
 //
 // wss:// anywhere, with TLS errors never ignored; plain ws:// only to this
 // computer (tests, or a server behind a local proxy).
+//
+// Keep-alive: a ping every 30 s; a connection silent for 10 s past that is
+// taken as dead (routers drop quiet connections without a word) and closed,
+// so disconnected() comes and the Messenger connects again.
 //
 // Everything the server says is data from a stranger: an answer is accepted
 // only as JSON with "ok" exactly true, and envelopes are checked by
@@ -64,6 +70,9 @@ public:
     void uploadPreKeys(const std::optional<Protocol::PublicSignedPreKey> &signedPreKey,
                        const QList<Protocol::PublicOneTimePreKey> &oneTimePreKeys, const Callback &done);
 
+    // Tests: the ping interval and how long past it a silence is tolerated.
+    void setKeepAlive(int intervalMs, int timeoutMs);
+
     // Any request; `done` gets the answer (or "disconnected").
     void request(const QString &op, QJsonObject fields, const Callback &done);
 
@@ -77,10 +86,16 @@ signals:
 private:
     void onText(const QString &text);
     void onDisconnected();
+    void checkAlive();
+    void heard();
     // challenge, then `then` with the nonce.
     void withChallenge(const Callback &done, const std::function<void(const QByteArray &nonce)> &then);
 
     QWebSocket m_socket;
     qint64 m_nextRid = 1;
     QHash<qint64, Callback> m_pending;
+    QTimer m_keepAlive;
+    int m_timeoutMs = 10000;
+    QElapsedTimer m_clock;
+    qint64 m_lastHeard = 0; // m_clock's ms
 };

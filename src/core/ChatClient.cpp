@@ -35,6 +35,14 @@ ChatClient::ChatClient(QObject *parent)
 {
     m_socket.setMaxAllowedIncomingMessageSize(quint64(kMaxIncomingBytes));
     m_socket.setMaxAllowedIncomingFrameSize(quint64(kMaxIncomingBytes));
+    m_clock.start();
+    m_keepAlive.setInterval(30000);
+    connect(&m_keepAlive, &QTimer::timeout, this, &ChatClient::checkAlive);
+    connect(&m_socket, &QWebSocket::pong, this, &ChatClient::heard);
+    connect(&m_socket, &QWebSocket::connected, this, [this] {
+        heard();
+        m_keepAlive.start();
+    });
     connect(&m_socket, &QWebSocket::connected, this, &ChatClient::connected);
     connect(&m_socket, &QWebSocket::disconnected, this, &ChatClient::onDisconnected);
     connect(&m_socket, &QWebSocket::textMessageReceived, this, &ChatClient::onText);
@@ -75,6 +83,32 @@ bool ChatClient::open(const QUrl &url, QString *error)
     return true;
 }
 
+void ChatClient::setKeepAlive(int intervalMs, int timeoutMs)
+{
+    m_keepAlive.setInterval(intervalMs);
+    m_timeoutMs = timeoutMs;
+}
+
+void ChatClient::heard()
+{
+    m_lastHeard = m_clock.elapsed();
+}
+
+void ChatClient::checkAlive()
+{
+    if (!isConnected()) {
+        m_keepAlive.stop();
+        return;
+    }
+    // Nothing since the last ping and the time it had to answer: gone.
+    if (m_clock.elapsed() - m_lastHeard > m_keepAlive.interval() + m_timeoutMs) {
+        m_keepAlive.stop();
+        m_socket.abort();
+        return;
+    }
+    m_socket.ping();
+}
+
 void ChatClient::close()
 {
     m_socket.close();
@@ -101,6 +135,7 @@ void ChatClient::request(const QString &op, QJsonObject fields, const Callback &
 
 void ChatClient::onText(const QString &text)
 {
+    heard();
     const QJsonDocument document = QJsonDocument::fromJson(text.toUtf8());
     if (!document.isObject())
         return;
@@ -128,6 +163,7 @@ void ChatClient::onText(const QString &text)
 
 void ChatClient::onDisconnected()
 {
+    m_keepAlive.stop();
     const QHash<qint64, Callback> pending = std::exchange(m_pending, {});
     for (const Callback &done : pending) {
         if (done)

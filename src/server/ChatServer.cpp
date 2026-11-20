@@ -45,6 +45,10 @@ ChatServer::ChatServer(ServerStore *store, QObject *parent)
     , m_store(store)
 {
     connect(&m_server, &QWebSocketServer::newConnection, this, &ChatServer::onNewConnection);
+    m_clock.start();
+    m_keepAlive.setInterval(60 * 1000);
+    connect(&m_keepAlive, &QTimer::timeout, this, &ChatServer::pingAll);
+    m_keepAlive.start();
     m_prune.setInterval(5 * 60 * 1000);
     connect(&m_prune, &QTimer::timeout, this, [this] { m_limiter.prune(); });
     m_prune.start();
@@ -81,6 +85,23 @@ QString ChatServer::errorString() const
 QString ChatServer::deviceKey(const QString &username, quint32 device)
 {
     return username + QLatin1Char('/') + QString::number(device);
+}
+
+void ChatServer::setKeepAlive(int intervalMs)
+{
+    m_keepAlive.setInterval(intervalMs);
+}
+
+void ChatServer::pingAll()
+{
+    const qint64 now = m_clock.elapsed();
+    const QList<QWebSocket *> sockets = m_clients.keys();
+    for (QWebSocket *socket : sockets) {
+        if (now - m_clients.value(socket).lastHeard > 2 * qint64(m_keepAlive.interval()))
+            socket->abort(); // disconnected() cleans up
+        else
+            socket->ping();
+    }
 }
 
 QString ChatServer::addressOf(QWebSocket *socket) const
@@ -120,7 +141,12 @@ void ChatServer::onNewConnection()
         socket->setMaxAllowedIncomingFrameSize(quint64(MaxRequestBytes));
         Client client;
         client.address = address;
+        client.lastHeard = m_clock.elapsed();
         m_clients.insert(socket, client);
+        connect(socket, &QWebSocket::pong, this, [this, socket] {
+            if (m_clients.contains(socket))
+                m_clients[socket].lastHeard = m_clock.elapsed();
+        });
         ++m_perAddress[address];
         connect(socket, &QWebSocket::textMessageReceived, this,
                 [this, socket](const QString &text) { onText(socket, text); });
@@ -153,6 +179,7 @@ void ChatServer::onText(QWebSocket *socket, const QString &text)
 {
     if (!m_clients.contains(socket))
         return;
+    m_clients[socket].lastHeard = m_clock.elapsed();
     QJsonParseError error;
     const QJsonDocument document = QJsonDocument::fromJson(text.toUtf8(), &error);
     const QJsonObject request = document.object();

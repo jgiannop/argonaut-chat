@@ -9,6 +9,8 @@
 #include <QJsonArray>
 #include <QNetworkRequest>
 #include <QSignalSpy>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QWebSocket>
@@ -73,6 +75,40 @@ struct Person
         const auto content = Protocol::decodeContent(*plaintext);
         return content ? content->body : QStringLiteral("<bad content>");
     }
+};
+
+// A TCP relay that can stop passing anything on while both connections stay
+// open: a connection that died quietly (a router that forgot it).
+class Relay : public QObject
+{
+public:
+    explicit Relay(quint16 target)
+    {
+        m_server.listen(QHostAddress::LocalHost);
+        QObject::connect(&m_server, &QTcpServer::newConnection, this, [this, target] {
+            while (QTcpSocket *down = m_server.nextPendingConnection()) {
+                auto *up = new QTcpSocket(this);
+                up->connectToHost(QHostAddress::LocalHost, target);
+                pipe(down, up);
+                pipe(up, down);
+            }
+        });
+    }
+    quint16 port() const { return m_server.serverPort(); }
+    void freeze() { m_frozen = true; }
+
+private:
+    void pipe(QTcpSocket *from, QTcpSocket *to)
+    {
+        QObject::connect(from, &QTcpSocket::readyRead, this, [this, from, to] {
+            const QByteArray bytes = from->readAll();
+            if (!m_frozen)
+                to->write(bytes); // frozen: swallowed, nobody told
+        });
+    }
+
+    QTcpServer m_server;
+    bool m_frozen = false;
 };
 
 // Waits for the answer to one request.
@@ -477,6 +513,37 @@ private slots:
         // Rubbish in the header: the proxy's own address.
         auto h = openFrom("not an address");
         QVERIFY(settled(4));
+    }
+
+    void clientDropsADeadConnection()
+    {
+        Relay relay(m_server->port());
+        ChatClient client;
+        client.setKeepAlive(100, 100);
+        QSignalSpy lost(&client, &ChatClient::disconnected);
+        QVERIFY(client.open(QUrl(QStringLiteral("ws://127.0.0.1:%1").arg(relay.port()))));
+        QTRY_VERIFY_WITH_TIMEOUT(client.isConnected(), kWait);
+        // Alive: the server answers the pings, round after round.
+        QTest::qWait(600);
+        QVERIFY(client.isConnected());
+        QCOMPARE(lost.size(), 0);
+        // Quietly dead: noticed, and closed.
+        relay.freeze();
+        QTRY_COMPARE_WITH_TIMEOUT(lost.size(), 1, kWait);
+        QVERIFY(!client.isConnected());
+    }
+
+    void serverDropsADeadConnection()
+    {
+        m_server->setKeepAlive(100);
+        Relay relay(m_server->port());
+        QWebSocket socket; // Qt answers the server's pings by itself
+        socket.open(QUrl(QStringLiteral("ws://127.0.0.1:%1").arg(relay.port())));
+        QTRY_COMPARE_WITH_TIMEOUT(m_server->connectionCount(), 1, kWait);
+        QTest::qWait(600);
+        QCOMPARE(m_server->connectionCount(), 1);
+        relay.freeze();
+        QTRY_COMPARE_WITH_TIMEOUT(m_server->connectionCount(), 0, kWait);
     }
 
     void clientRefusesPlainRemote()

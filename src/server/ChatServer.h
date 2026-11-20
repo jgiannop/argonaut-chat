@@ -2,6 +2,7 @@
 
 #include "RateLimiter.h"
 
+#include <QElapsedTimer>
 #include <QHash>
 #include <QHostAddress>
 #include <QJsonObject>
@@ -29,6 +30,10 @@ class ServerStore;
 // connection. Over a limit the answer is "rate-limited" with "retryAfter"
 // (ms). One-time prekeys are handed out at most so often per device, then
 // bundles come without one: nobody can use up someone's stock.
+//
+// Keep-alive: every connection is pinged each minute (Qt answers pings by
+// itself); one not heard from in two minutes is dropped, so dead connections
+// (a laptop closed, a router that forgot) do not linger.
 //
 // Behind a reverse proxy every connection comes from this computer; with
 // setTrustProxy(true) the address is the last one in X-Forwarded-For, and
@@ -66,6 +71,8 @@ public:
     // Tests: the limiter's clock (ms).
     void setClock(RateLimiter::Clock clock) { m_limiter.setClock(std::move(clock)); }
     void setTrustProxy(bool trust) { m_trustProxy = trust; }
+    // Tests: the ping interval (a connection silent for two is dropped).
+    void setKeepAlive(int intervalMs);
 
     // Port 0: any free port (see port()).
     bool listen(const QHostAddress &address = QHostAddress::LocalHost, quint16 port = 0);
@@ -82,12 +89,14 @@ private:
         quint32 device = 0;
         int failedSignIns = 0;
         QSet<qint64> inFlight; // pushed, not yet acknowledged
+        qint64 lastHeard = 0;  // m_clock's ms
         bool signedIn() const { return !username.isEmpty(); }
     };
 
     void onNewConnection();
     void onText(QWebSocket *socket, const QString &text);
     void onDisconnected(QWebSocket *socket);
+    void pingAll();
 
     QJsonObject handle(QWebSocket *socket, Client &client, const QString &op, const QJsonObject &request);
     QJsonObject challenge(Client &client);
@@ -117,5 +126,7 @@ private:
     Limits m_limits;
     RateLimiter m_limiter;
     QTimer m_prune;
+    QTimer m_keepAlive;
+    QElapsedTimer m_clock;
     bool m_trustProxy = false;
 };
