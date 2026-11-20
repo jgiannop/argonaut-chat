@@ -14,4 +14,6 @@ function(chat_test name)
 endfunction()
 
 chat_test(store)
+chat_test(crypto)
+chat_test(ratchet)
 chat_test(mainwindow LIBRARY chat_app)

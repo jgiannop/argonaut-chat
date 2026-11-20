@@ -7,6 +7,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # 6.4 is what Ubuntu 24.04 ships, as for Argonaut and Argonaut Emails.
 find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets Network Sql)
+# The cryptography: libsodium (1.0.18 on Ubuntu 24.04).
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium>=1.0.18)
 qt_standard_project_setup()
 
 include(GNUInstallDirs)
@@ -14,9 +17,13 @@ include(GNUInstallDirs)
 # The messenger's engine: no widgets, so all of it can be tested headless.
 qt_add_library(chat_core STATIC
     src/core/ChatStore.cpp src/core/ChatStore.h
+    src/core/Crypto.cpp src/core/Crypto.h
+    src/core/RatchetSession.cpp src/core/RatchetSession.h
+    src/core/SafetyNumber.cpp src/core/SafetyNumber.h
+    src/core/X3dh.cpp src/core/X3dh.h
 )
 target_include_directories(chat_core PUBLIC src/core)
-target_link_libraries(chat_core PUBLIC Qt6::Core Qt6::Network Qt6::Sql)
+target_link_libraries(chat_core PUBLIC Qt6::Core Qt6::Network Qt6::Sql PRIVATE PkgConfig::SODIUM)
 target_compile_definitions(chat_core PUBLIC CHAT_VERSION="${PROJECT_VERSION}")
 
 # The window.
