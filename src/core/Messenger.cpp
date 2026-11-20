@@ -559,8 +559,10 @@ void Messenger::handleContent(const QString &from, const Protocol::Envelope &env
     // Their clock, unless it is far ahead of the server's.
     const qint64 sentAt = content.sentAt > envelope.serverTime + 5 * 60 * 1000 ? envelope.serverTime : content.sentAt;
     m_store->addMessage(conversation, content.body, from, QDateTime::fromMSecsSinceEpoch(sentAt, QTimeZone::utc()), content.id);
-    if (!m_store->conversation(conversation).request)
+    const bool request = m_store->conversation(conversation).request;
+    if (!request)
         sendReceipt(from, Protocol::Content::Receipt::Delivered, {content.id});
+    emit messageReceived(conversation, from, content.body, request);
 }
 
 // --- Safety numbers ---

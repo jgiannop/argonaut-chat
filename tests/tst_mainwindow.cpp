@@ -3,6 +3,7 @@
 #include "Dialogs.h"
 #include "KeyStore.h"
 #include "MainWindow.h"
+#include "Notifications.h"
 #include "Messenger.h"
 #include "ServerStore.h"
 #include "TestSupport.h"
@@ -12,6 +13,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QSignalSpy>
 #include <QToolButton>
 #include <QListWidget>
 #include <QPlainTextEdit>
@@ -215,6 +217,100 @@ private slots:
         blocked.unblockButton()->click();
         QCOMPARE(blocked.list()->count(), 0);
         QVERIFY(!me.isBlocked(QStringLiteral("spammer")));
+    }
+
+    void notificationContent()
+    {
+        using Notifications::Content;
+        auto text = Notifications::make(Content::NameAndMessage, QStringLiteral("anna"),
+                                        QStringLiteral("See you\n at  8"), false);
+        QCOMPARE(text->title, QStringLiteral("anna"));
+        QCOMPARE(text->body, QStringLiteral("See you at 8"));
+        QCOMPARE(Notifications::make(Content::NameAndMessage, QStringLiteral("anna"), QString(300, 'x'), false)->body.size(),
+                 200);
+        text = Notifications::make(Content::NameOnly, QStringLiteral("anna"), QStringLiteral("secret"), true);
+        QCOMPARE(text->title, QStringLiteral("Message request from anna"));
+        QVERIFY(!text->body.contains(QStringLiteral("secret")));
+        text = Notifications::make(Content::Nothing, QStringLiteral("anna"), QStringLiteral("secret"), false);
+        QVERIFY(!text->title.contains(QStringLiteral("anna")) && !text->body.contains(QStringLiteral("secret")));
+        QVERIFY(!Notifications::make(Content::Off, QStringLiteral("anna"), QStringLiteral("secret"), false));
+        // Kept in the settings; the default is name and message.
+        QCOMPARE(Notifications::saved(), Content::NameAndMessage);
+        Notifications::save(Content::NameOnly);
+        QCOMPARE(Notifications::saved(), Content::NameOnly);
+        Notifications::save(Content::NameAndMessage);
+    }
+
+    void notificationsAndUnread()
+    {
+        ServerStore serverStore(QDir::homePath() + QStringLiteral("/server3.sqlite"));
+        ChatServer server(&serverStore);
+        QVERIFY(server.listen());
+        const QUrl url(QStringLiteral("ws://127.0.0.1:%1").arg(server.port()));
+        auto signUp = [&](Messenger &m, const QString &name) {
+            std::optional<bool> ok;
+            m.signUp(url, name, [&](bool done, const QString &) { ok = done; });
+            return QTest::qWaitFor([&] { return ok.has_value(); }, 5000) && *ok;
+        };
+        ChatStore store(QDir::homePath() + QStringLiteral("/me3.sqlite"));
+        KeyStore keys(&store);
+        Messenger me(&store, &keys);
+        QVERIFY(signUp(me, QStringLiteral("myself")));
+        MainWindow window(&store, &me);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QSignalSpy notified(&window, &MainWindow::notified);
+
+        ChatStore annaStore(QDir::homePath() + QStringLiteral("/anna3.sqlite"));
+        KeyStore annaKeys(&annaStore);
+        Messenger anna(&annaStore, &annaKeys);
+        QVERIFY(signUp(anna, QStringLiteral("anna")));
+        std::optional<qint64> toMe;
+        anna.startConversation(QStringLiteral("myself"), [&](qint64 id, const QString &) { toMe = id; });
+        QTRY_VERIFY(toMe.has_value());
+
+        // A stranger's first message: a request.
+        anna.send(*toMe, QStringLiteral("Hi, it's Anna"));
+        QTRY_COMPARE_WITH_TIMEOUT(notified.size(), 1, 5000);
+        const qint64 fromAnna = store.directConversation(QStringLiteral("anna"));
+        QCOMPARE(notified.at(0).at(0).toLongLong(), fromAnna);
+        QCOMPARE(notified.at(0).at(1).toString(), QStringLiteral("Message request from anna"));
+        QCOMPARE(notified.at(0).at(2).toString(), QStringLiteral("Hi, it's Anna"));
+        QCOMPARE(window.unreadCount(), 1);
+
+        // Accepted elsewhere in the window; her next ones, by name, and counted.
+        me.acceptRequest(fromAnna);
+        anna.send(*toMe, QStringLiteral("Are you there?"));
+        anna.send(*toMe, QStringLiteral("Hello?"));
+        QTRY_COMPARE_WITH_TIMEOUT(notified.size(), 3, 5000);
+        QCOMPARE(notified.at(1).at(1).toString(), QStringLiteral("anna"));
+        QCOMPARE(notified.at(2).at(2).toString(), QStringLiteral("Hello?"));
+        QTRY_COMPARE(window.unreadCount(), 2);
+
+        // Less said, or nothing.
+        Notifications::save(Notifications::Content::NameOnly);
+        anna.send(*toMe, QStringLiteral("a secret"));
+        QTRY_COMPARE_WITH_TIMEOUT(notified.size(), 4, 5000);
+        QVERIFY(!notified.at(3).at(2).toString().contains(QStringLiteral("secret")));
+        Notifications::save(Notifications::Content::Off);
+        anna.send(*toMe, QStringLiteral("unheard"));
+        QTRY_COMPARE_WITH_TIMEOUT(store.messages(fromAnna).size(), 5, 5000);
+        QTest::qWait(100);
+        QCOMPARE(notified.size(), 4);
+        Notifications::save(Notifications::Content::NameAndMessage);
+
+        // Opened, and the window in front: read, and no notification for what comes.
+        window.openConversation(fromAnna);
+        QTRY_COMPARE(window.unreadCount(), 0);
+        window.activateWindow();
+        if (QTest::qWaitForWindowActive(&window)) {
+            anna.send(*toMe, QStringLiteral("you're here"));
+            QTRY_COMPARE_WITH_TIMEOUT(store.messages(fromAnna).size(), 6, 5000);
+            QTest::qWait(100);
+            QCOMPARE(notified.size(), 4);
+        } else {
+            qWarning("The window never became active here: \"no notification in front\" not checked.");
+        }
     }
 };
 

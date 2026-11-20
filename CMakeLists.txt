@@ -14,6 +14,8 @@ if(CHAT_SERVER_ONLY)
     find_package(Qt6 6.4 REQUIRED COMPONENTS Core Network Sql WebSockets)
 else()
     find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets Network Sql WebSockets)
+    # The unread count on the dock's icon (the Unity launcher API).
+    find_package(Qt6 6.4 QUIET COMPONENTS DBus)
 endif()
 # The cryptography: libsodium (1.0.18 on Ubuntu 24.04).
 find_package(PkgConfig REQUIRED)
@@ -54,11 +56,17 @@ qt_add_library(chat_app STATIC
     src/app/DatabaseKey.cpp src/app/DatabaseKey.h
     src/app/Dialogs.cpp src/app/Dialogs.h
     src/app/MainWindow.cpp src/app/MainWindow.h
+    src/app/Notifications.cpp src/app/Notifications.h
     src/app/StyleSheet.cpp src/app/StyleSheet.h
     src/app/Theme.cpp src/app/Theme.h
+    src/app/TrayIcon.cpp src/app/TrayIcon.h
 )
 target_include_directories(chat_app PUBLIC src/app)
 target_link_libraries(chat_app PUBLIC chat_core Qt6::Widgets PRIVATE Qt6Keychain::Qt6Keychain)
+if(Qt6DBus_FOUND AND UNIX AND NOT APPLE)
+    target_link_libraries(chat_app PRIVATE Qt6::DBus)
+    target_compile_definitions(chat_app PRIVATE CHAT_DBUS)
+endif()
 
 qt_add_executable(argonaut-chat src/app/main.cpp)
 target_link_libraries(argonaut-chat PRIVATE chat_app)

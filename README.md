@@ -23,6 +23,10 @@ program: [docs/how-signal-works.md](docs/how-signal-works.md).
 - **Message requests**: a stranger's first message waits as a request;
   until you accept, they get no receipts at all. Delete it, or block them
   (their messages are then dropped, and they are not told).
+- **Notifications and the tray**: a notification for each new message
+  (View › Notifications: name and message, name only, nothing, or off), the
+  unread count on the tray and dock icons; closing the window keeps it
+  receiving in the tray, File › Quit ends it.
 - **Safety numbers**: 60 digits to compare with someone; a warning when
   theirs changes.
 - **The relay server**, `argonaut-chat-server`: accounts, public keys and

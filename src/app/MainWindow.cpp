@@ -2,9 +2,13 @@
 
 #include "Dialogs.h"
 #include "Messenger.h"
+#include "Notifications.h"
+#include "TrayIcon.h"
 #include "StyleSheet.h"
 
 #include <QAction>
+#include <QCloseEvent>
+#include <QSettings>
 #include <QActionGroup>
 #include <QApplication>
 #include <QHBoxLayout>
@@ -343,6 +347,7 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
             openConversation(item->data(IdRole).toLongLong());
     });
     connect(m_store, &ChatStore::conversationsChanged, this, &MainWindow::reloadConversations);
+    connect(m_store, &ChatStore::conversationsChanged, this, &MainWindow::updateUnread);
     connect(m_store, &ChatStore::messagesChanged, this, [this](qint64 conversation) {
         if (conversation != m_current)
             return;
@@ -358,13 +363,26 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
             showNotice(tr("Your safety number with %1 has changed.").arg(username));
         });
         connect(m_messenger, &Messenger::problem, this, &MainWindow::showNotice);
+        connect(m_messenger, &Messenger::messageReceived, this, &MainWindow::notify);
     }
 
     buildMenus();
+    auto *trayMenu = new QMenu(this);
+    trayMenu->addAction(tr("Open Argonaut Chat"), this, &MainWindow::showAndRaise);
+    trayMenu->addSeparator();
+    trayMenu->addAction(tr("Quit"), this, &MainWindow::quit);
+    m_tray = new TrayIcon(trayMenu, this);
+    connect(m_tray, &TrayIcon::activated, this, &MainWindow::showAndRaise);
+    connect(m_tray, &TrayIcon::messageClicked, this, [this] {
+        showAndRaise();
+        if (m_lastNotified && m_store->conversation(m_lastNotified).id)
+            openConversation(m_lastNotified);
+    });
     updateConnection();
     applyTheme();
     m_store->noteToSelf(); // always there, as in Signal
     reloadConversations();
+    updateUnread();
     if (m_conversations->count() > 0)
         m_conversations->setCurrentRow(0);
 }
@@ -382,13 +400,28 @@ void MainWindow::buildMenus()
         dialog.exec();
     });
     file->addSeparator();
-    QAction *quit = file->addAction(tr("Quit"), this, &QWidget::close);
+    QAction *quit = file->addAction(tr("Quit"), this, &MainWindow::quit);
     quit->setShortcut(QKeySequence::Quit);
 
     QMenu *conversation = menuBar()->addMenu(tr("&Conversation"));
     m_safetyAction = conversation->addAction(tr("Safety Number…"), this, &MainWindow::showSafetyNumber);
 
     QMenu *view = menuBar()->addMenu(tr("&View"));
+    QMenu *notifications = view->addMenu(tr("Notifications"));
+    auto *notificationGroup = new QActionGroup(notifications);
+    const QList<QPair<QString, Notifications::Content>> choices{
+        {tr("Name and Message"), Notifications::Content::NameAndMessage},
+        {tr("Name Only"), Notifications::Content::NameOnly},
+        {tr("No Name or Message"), Notifications::Content::Nothing},
+        {tr("Off"), Notifications::Content::Off},
+    };
+    for (const auto &[label, content] : choices) {
+        QAction *a = notifications->addAction(label);
+        a->setCheckable(true);
+        a->setChecked(Notifications::saved() == content);
+        notificationGroup->addAction(a);
+        connect(a, &QAction::triggered, a, [content = content] { Notifications::save(content); });
+    }
     QMenu *themes = view->addMenu(tr("Theme"));
     connect(themes, &QMenu::aboutToShow, this, [themes] {
         themes->clear();
@@ -649,6 +682,69 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
         }
     }
     return QMainWindow::eventFilter(watched, event);
+}
+
+void MainWindow::notify(qint64 conversation, const QString &from, const QString &text, bool request)
+{
+    // In front of them already: nothing to say.
+    if (isActiveWindow() && !isMinimized() && conversation == m_current)
+        return;
+    const auto shown = Notifications::make(Notifications::saved(), from, text, request);
+    if (!shown)
+        return;
+    m_lastNotified = conversation;
+    m_tray->showMessage(shown->title, shown->body);
+    emit notified(conversation, shown->title, shown->body);
+}
+
+int MainWindow::unreadCount() const
+{
+    int count = 0;
+    for (const ChatStore::Conversation &c : m_store->conversations())
+        count += c.request ? (c.unread > 0 ? 1 : 0) : c.unread;
+    return count;
+}
+
+void MainWindow::updateUnread()
+{
+    if (m_tray)
+        m_tray->setUnread(unreadCount());
+}
+
+void MainWindow::showAndRaise()
+{
+    show();
+    if (isMinimized())
+        showNormal();
+    raise();
+    activateWindow();
+}
+
+void MainWindow::quit()
+{
+    m_quitting = true;
+    if (close())
+        QApplication::quit();
+    else
+        m_quitting = false;
+}
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    if (m_tray && m_tray->isAvailable() && m_messenger && m_messenger->hasAccount() && !m_quitting) {
+        // The window goes; the program stays in the tray and keeps receiving.
+        QApplication::setQuitOnLastWindowClosed(false);
+        hide();
+        event->ignore();
+        QSettings settings;
+        if (!settings.value(QStringLiteral("window/toldAboutTray")).toBool()) {
+            settings.setValue(QStringLiteral("window/toldAboutTray"), true);
+            m_tray->showMessage(tr("Argonaut Chat is still running"),
+                                tr("It keeps receiving messages in the tray. File › Quit ends it."));
+        }
+        return;
+    }
+    QMainWindow::closeEvent(event);
 }
 
 void MainWindow::changeEvent(QEvent *event)

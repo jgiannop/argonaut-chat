@@ -88,6 +88,8 @@ public:
 signals:
     void stateChanged(Messenger::State state);
     void safetyNumberChanged(const QString &username);
+    // A new text from someone (not a receipt, not one seen before, not blocked).
+    void messageReceived(qint64 conversation, const QString &from, const QString &text, bool request);
     // For people: something went wrong that they should know of.
     void problem(const QString &text);
 

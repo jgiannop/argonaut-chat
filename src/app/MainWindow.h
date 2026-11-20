@@ -6,6 +6,7 @@
 #include <QMainWindow>
 
 class Messenger;
+class TrayIcon;
 class QLabel;
 class QListWidget;
 class QToolButton;
@@ -45,8 +46,20 @@ public:
     void startChatWith(const QString &username);
     void showSignUp();
 
+    TrayIcon *tray() const { return m_tray; }
+    // The tray's number: unread messages, a request counting as one.
+    int unreadCount() const;
+    // Ends the program (File › Quit); closing the window only hides it while there is a tray.
+    void quit();
+    void showAndRaise();
+
+signals:
+    // A notification was shown (tests: the offscreen platform has no tray).
+    void notified(qint64 conversation, const QString &title, const QString &body);
+
 protected:
     void changeEvent(QEvent *event) override;
+    void closeEvent(QCloseEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
@@ -61,6 +74,8 @@ private:
     void newChat();
     void showSafetyNumber();
     void markCurrentRead();
+    void notify(qint64 conversation, const QString &from, const QString &text, bool request);
+    void updateUnread();
 
     ChatStore *m_store;
     Messenger *m_messenger;
@@ -71,6 +86,9 @@ private:
     QAction *m_newChatAction = nullptr;
     QAction *m_safetyAction = nullptr;
     QAction *m_blockedAction = nullptr;
+    TrayIcon *m_tray = nullptr;
+    qint64 m_lastNotified = 0;
+    bool m_quitting = false;
     QWidget *m_composer = nullptr;
     QWidget *m_requestBar = nullptr;
     QLabel *m_requestText = nullptr;
