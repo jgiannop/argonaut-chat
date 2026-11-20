@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Argonaut Chat
+GenericName=Messenger
+Comment=Private messages, encrypted end to end
+Exec=@CHAT_EXE@
+Icon=argonaut-chat
+Terminal=false
+Categories=Network;InstantMessaging;Chat;Qt;
+Keywords=messenger;chat;signal;encrypted;private;
+StartupWMClass=argonaut-chat

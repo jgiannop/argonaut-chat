@@ -15,3 +15,6 @@ CMakeLists.txt.user*
 # Crash dumps (only at the top: "core" alone would also hide src/core)
 /core
 /core.[0-9]*
+
+# Packages (packaging/build-debs.sh)
+/dist/

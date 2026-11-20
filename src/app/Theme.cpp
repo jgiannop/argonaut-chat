@@ -890,18 +890,15 @@ QIcon applicationIcon()
         p.setRenderHint(QPainter::Antialiasing);
         p.scale(size / 128.0, size / 128.0);
         p.setPen(Qt::NoPen);
-        // A speech bubble, its tail at the bottom left.
-        QPainterPath bubble;
-        bubble.addRoundedRect(QRectF(8, 12, 112, 88), 30, 30);
-        bubble.moveTo(26, 88);
-        bubble.lineTo(14, 120);
-        bubble.lineTo(54, 98);
-        bubble.closeSubpath();
+        // A speech bubble, its tail at the bottom left: two shapes in the
+        // same fill, as data/argonaut-chat.svg draws them (one path made of
+        // both left a sliver where they meet).
         QLinearGradient fill(0, 12, 0, 120);
         fill.setColorAt(0, QColor("#62a0ea"));
         fill.setColorAt(1, QColor("#1c71d8"));
         p.setBrush(fill);
-        p.drawPath(bubble.simplified());
+        p.drawRoundedRect(QRectF(8, 12, 112, 88), 30, 30);
+        p.drawPolygon(QPolygonF({QPointF(26, 88), QPointF(14, 120), QPointF(54, 98)}));
 
         // The Argo (Argonaut's mast, mainsail, jib and hull), in the bubble.
         p.translate(64, 58);

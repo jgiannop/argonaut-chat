@@ -44,6 +44,19 @@ PQXDH (the
 post-quantum start), contacts and profiles, groups, attachments, linked
 devices, calls.
 
+## Installing
+
+A package for Ubuntu 24.04 and one for 26.04, built by
+`packaging/build-debs.sh` (each in a clean container of its release, then
+installed on a fresh one to check it) into `dist/`:
+
+```bash
+sudo apt install ./dist/argonaut-chat_0.0.1_ubuntu24.04_amd64.deb   # or ubuntu26.04
+```
+
+It brings in what it needs (Qt 6, libsodium, SQLCipher, QtKeychain), and
+puts Argonaut Chat in the applications menu.
+
 ## Building
 
 Dependencies (Ubuntu 24.04): `cmake ninja-build pkg-config qt6-base-dev

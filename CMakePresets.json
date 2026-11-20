@@ -22,6 +22,18 @@
       }
     },
     {
+      "name": "package",
+      "displayName": "Package (.deb, installs into /usr)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/package",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_INSTALL_PREFIX": "/usr",
+        "BUILD_TESTING": "OFF",
+        "CHAT_PACKAGE": "ON"
+      }
+    },
+    {
       "name": "sanitize",
       "displayName": "Debug with memory-error checks (ASan + UBSan)",
       "generator": "Ninja",
@@ -45,6 +57,10 @@
     {
       "name": "sanitize",
       "configurePreset": "sanitize"
+    },
+    {
+      "name": "package",
+      "configurePreset": "package"
     }
   ],
   "testPresets": [

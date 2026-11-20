@@ -8,6 +8,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # CHAT_SERVER_ONLY: just argonaut-chat-server (a VPS: no widgets, no keyring,
 # no tests), as deploy/setup-server.sh builds it.
 option(CHAT_SERVER_ONLY "Build only argonaut-chat-server" OFF)
+# The app's .deb: every feature required (the dock count needs Qt D-Bus), and
+# the server left out of it (servers are set up by deploy/setup-server.sh).
+option(CHAT_PACKAGE "Build the app's package (cpack)" OFF)
 
 # 6.4 is what Ubuntu 24.04 ships, as for Argonaut and Argonaut Emails.
 if(CHAT_SERVER_ONLY)
@@ -16,6 +19,9 @@ else()
     find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets Network Sql WebSockets)
     # The unread count on the dock's icon (the Unity launcher API).
     find_package(Qt6 6.4 QUIET COMPONENTS DBus)
+    if(CHAT_PACKAGE AND NOT Qt6DBus_FOUND)
+        message(FATAL_ERROR "The package is to have every feature, and Qt D-Bus is missing (the unread count on the dock)")
+    endif()
 endif()
 # The cryptography: libsodium (1.0.18 on Ubuntu 24.04).
 find_package(PkgConfig REQUIRED)
@@ -71,6 +77,21 @@ endif()
 qt_add_executable(argonaut-chat src/app/main.cpp)
 target_link_libraries(argonaut-chat PRIVATE chat_app)
 install(TARGETS argonaut-chat RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+if(UNIX AND NOT APPLE)
+    # The absolute path: the desktop doesn't use the user's PATH.
+    set(CHAT_EXE "${CMAKE_INSTALL_FULL_BINDIR}/argonaut-chat")
+    configure_file(data/argonaut-chat.desktop.in ${CMAKE_CURRENT_BINARY_DIR}/argonaut-chat.desktop @ONLY)
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/argonaut-chat.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+    install(FILES data/argonaut-chat.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
+    # Let menus and the dock see the new entry right away.
+    install(CODE [[
+        find_program(UPDATE_DESKTOP_DATABASE update-desktop-database)
+        if(UPDATE_DESKTOP_DATABASE AND "$ENV{DESTDIR}" STREQUAL "")
+            execute_process(COMMAND ${UPDATE_DESKTOP_DATABASE} "${CMAKE_INSTALL_PREFIX}/share/applications")
+        endif()
+    ]])
+endif()
+install(FILES LICENSE README.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
 endif()
 
 # The relay server: a separate program, sharing chat_core (protocol, crypto).
@@ -84,7 +105,37 @@ target_link_libraries(chat_server PUBLIC chat_core)
 
 qt_add_executable(argonaut-chat-server src/server/main.cpp)
 target_link_libraries(argonaut-chat-server PRIVATE chat_server)
-install(TARGETS argonaut-chat-server RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+if(NOT CHAT_PACKAGE)
+    install(TARGETS argonaut-chat-server RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
+# ------------------------------------------------------------- package ---
+# The app as a .deb, as Argonaut Emails': `cmake --preset package && cmake
+# --build build/package && cpack --config build/package/CPackConfig.cmake`, or
+# packaging/build-debs.sh for each Ubuntu release in a clean container.
+# Library dependencies are worked out by dpkg-shlibdeps; Qt's platform
+# plugins are plugins, which it can't see, so they are named.
+if(CHAT_PACKAGE)
+    set(CPACK_PACKAGE_NAME "argonaut-chat")
+    set(CPACK_PACKAGE_VENDOR "johngiannop")
+    set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/jgiannop/argonaut-chat")
+    set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "A private messenger, encrypted end to end")
+    set(CPACK_PACKAGE_DESCRIPTION "Argonaut Chat is a private messenger like Signal, written in C++ and Qt 6, \
+the companion of the Argonaut file manager: messages encrypted end to end with the Signal Protocol's design \
+(X3DH and the Double Ratchet, on libsodium), sign-up by username, safety numbers, message requests, and the \
+history kept only on this computer, encrypted with SQLCipher, its key in the desktop's keyring.")
+    set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
+    set(CPACK_PACKAGE_DIRECTORY "${CMAKE_BINARY_DIR}")
+    set(CPACK_GENERATOR "DEB")
+    set(CPACK_DEBIAN_PACKAGE_MAINTAINER "johngiannop")
+    set(CPACK_DEBIAN_PACKAGE_SECTION "net")
+    set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://github.com/jgiannop/argonaut-chat")
+    set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
+    set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+    set(CPACK_DEBIAN_PACKAGE_DEPENDS "qt6-qpa-plugins")
+    set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "qt6-wayland, gnome-keyring | kwalletmanager")
+    include(CPack)
+endif()
 
 if(NOT CHAT_SERVER_ONLY)
     include(CTest)
