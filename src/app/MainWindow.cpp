@@ -1,0 +1,407 @@
+#include "MainWindow.h"
+
+#include "StyleSheet.h"
+
+#include <QAction>
+#include <QActionGroup>
+#include <QApplication>
+#include <QHBoxLayout>
+#include <QKeyEvent>
+#include <QLabel>
+#include <QLineEdit>
+#include <QListWidget>
+#include <QLocale>
+#include <QMenuBar>
+#include <QMessageBox>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPlainTextEdit>
+#include <QPushButton>
+#include <QScrollBar>
+#include <QSplitter>
+#include <QStyledItemDelegate>
+#include <QTextLayout>
+#include <QVBoxLayout>
+
+namespace {
+
+enum Role { IdRole = Qt::UserRole + 1, OutgoingRole, TimeRole, StatusRole, LastTextRole, UnreadRole };
+
+QString shortTime(const QDateTime &when)
+{
+    const QDateTime local = when.toLocalTime();
+    const QLocale locale;
+    if (local.date() == QDate::currentDate())
+        return locale.toString(local.time(), QLocale::ShortFormat);
+    if (local.date().daysTo(QDate::currentDate()) < 7)
+        return locale.toString(local.date(), QStringLiteral("ddd"));
+    return locale.toString(local.date(), QStringLiteral("d MMM"));
+}
+
+// A conversation in the list: a round picture with its first letter, its
+// name, the last message under it, the time and the unread count at the right.
+class ConversationDelegate : public QStyledItemDelegate
+{
+public:
+    ConversationDelegate(const Theme *theme, QObject *parent)
+        : QStyledItemDelegate(parent)
+        , m_theme(theme)
+    {
+    }
+
+    QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &) const override { return {option.rect.width(), 64}; }
+
+    void paint(QPainter *p, const QStyleOptionViewItem &option, const QModelIndex &index) const override
+    {
+        p->save();
+        p->setRenderHint(QPainter::Antialiasing);
+        const QRect r = option.rect.adjusted(2, 2, -2, -2);
+        if (option.state & (QStyle::State_Selected | QStyle::State_MouseOver)) {
+            QPainterPath bg;
+            bg.addRoundedRect(r, 8, 8);
+            p->fillPath(bg, (option.state & QStyle::State_Selected) ? m_theme->selected : m_theme->hover);
+        }
+        const QString title = index.data().toString();
+        const QRect avatar(r.left() + 8, r.center().y() - 20, 40, 40);
+        p->setPen(Qt::NoPen);
+        p->setBrush(m_theme->accent);
+        p->drawEllipse(avatar);
+        QFont letter = option.font;
+        letter.setBold(true);
+        letter.setPixelSize(17);
+        p->setFont(letter);
+        p->setPen(Qt::white);
+        p->drawText(avatar, Qt::AlignCenter, title.left(1).toUpper());
+
+        const int unread = index.data(UnreadRole).toInt();
+        const QRect text(avatar.right() + 12, r.top() + 10, r.right() - avatar.right() - 22, r.height() - 20);
+        QFont name = option.font;
+        name.setBold(true);
+        const QFontMetrics nameMetrics(name);
+        const QFontMetrics plain(option.font);
+        const QString time = index.data(TimeRole).toString();
+        const int timeWidth = plain.horizontalAdvance(time) + 8;
+        p->setFont(name);
+        p->setPen(m_theme->fg);
+        p->drawText(QRect(text.left(), text.top(), text.width() - timeWidth, nameMetrics.height()), Qt::AlignLeft | Qt::AlignVCenter,
+                    nameMetrics.elidedText(title, Qt::ElideRight, text.width() - timeWidth));
+        p->setFont(option.font);
+        p->setPen(m_theme->dimFg);
+        p->drawText(QRect(text.left(), text.top(), text.width(), nameMetrics.height()), Qt::AlignRight | Qt::AlignVCenter, time);
+        const QString last = index.data(LastTextRole).toString().simplified();
+        int lastWidth = text.width();
+        if (unread > 0) {
+            const QString count = QString::number(unread);
+            const int w = qMax(20, plain.horizontalAdvance(count) + 10);
+            const QRect badge(text.right() - w, text.bottom() - 19, w, 20);
+            QPainterPath pill;
+            pill.addRoundedRect(badge, 10, 10);
+            p->fillPath(pill, m_theme->accent);
+            p->setPen(Qt::white);
+            p->drawText(badge, Qt::AlignCenter, count);
+            lastWidth -= w + 6;
+        }
+        p->setPen(m_theme->dimFg);
+        p->drawText(QRect(text.left(), text.bottom() - plain.height(), lastWidth, plain.height()), Qt::AlignLeft | Qt::AlignVCenter,
+                    plain.elidedText(last, Qt::ElideRight, lastWidth));
+        p->restore();
+    }
+
+private:
+    const Theme *m_theme;
+};
+
+// A message as a bubble: mine at the right in the accent colour, theirs at
+// the left; the time (and for mine, whether it was sent) under the text.
+class BubbleDelegate : public QStyledItemDelegate
+{
+public:
+    BubbleDelegate(const Theme *theme, QObject *parent)
+        : QStyledItemDelegate(parent)
+        , m_theme(theme)
+    {
+    }
+
+    static constexpr int Pad = 10;
+
+    QRect textRect(const QStyleOptionViewItem &option, const QString &text) const
+    {
+        const int most = qMax(120, option.rect.width() * 7 / 10);
+        const QFontMetrics fm(option.font);
+        return fm.boundingRect(QRect(0, 0, most - 2 * Pad, 100000), Qt::TextWordWrap, text);
+    }
+
+    QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override
+    {
+        const QRect t = textRect(option, index.data().toString());
+        return {option.rect.width(), t.height() + 2 * Pad + QFontMetrics(option.font).height() + 10};
+    }
+
+    void paint(QPainter *p, const QStyleOptionViewItem &option, const QModelIndex &index) const override
+    {
+        p->save();
+        p->setRenderHint(QPainter::Antialiasing);
+        const bool mine = index.data(OutgoingRole).toBool();
+        const QString text = index.data().toString();
+        const QRect t = textRect(option, text);
+        QFont small = option.font;
+        small.setPointSizeF(option.font.pointSizeF() * 0.85);
+        const QFontMetrics smallMetrics(small);
+        QString footer = index.data(TimeRole).toString();
+        if (mine) {
+            const QString status = index.data(StatusRole).toString();
+            footer += status == QLatin1String("read") ? QStringLiteral("  ✓✓") : status == QLatin1String("delivered") ? QStringLiteral("  ✓✓")
+                      : status == QLatin1String("sent")                                                         ? QStringLiteral("  ✓")
+                                                                                                                 : QString();
+        }
+        const int width = qMax(t.width(), smallMetrics.horizontalAdvance(footer)) + 2 * Pad;
+        const int height = t.height() + smallMetrics.height() + 2 * Pad + 2;
+        const QRect bubble(mine ? option.rect.right() - 14 - width : option.rect.left() + 14, option.rect.top() + 4, width, height);
+        QPainterPath path;
+        path.addRoundedRect(bubble, 16, 16);
+        p->fillPath(path, mine ? m_theme->accent : m_theme->pathBg);
+        p->setPen(mine ? QColor(Qt::white) : m_theme->fg);
+        p->setFont(option.font);
+        p->drawText(QRect(bubble.left() + Pad, bubble.top() + Pad, t.width(), t.height()), Qt::TextWordWrap, text);
+        p->setFont(small);
+        QColor dim = mine ? QColor(255, 255, 255, 190) : m_theme->dimFg;
+        p->setPen(dim);
+        p->drawText(QRect(bubble.left() + Pad, bubble.bottom() - Pad - smallMetrics.height(), bubble.width() - 2 * Pad, smallMetrics.height()),
+                    Qt::AlignRight | Qt::AlignVCenter, footer);
+        p->restore();
+    }
+
+private:
+    const Theme *m_theme;
+};
+
+} // namespace
+
+MainWindow::MainWindow(ChatStore *store, QWidget *parent)
+    : QMainWindow(parent)
+    , m_store(store)
+    , m_theme(currentTheme())
+{
+    setWindowTitle(tr("Argonaut Chat"));
+    setWindowIcon(applicationIcon());
+    resize(1000, 700);
+
+    // The conversations.
+    auto *sidebar = new QWidget(this);
+    sidebar->setObjectName(QStringLiteral("sidebar"));
+    auto *sideLayout = new QVBoxLayout(sidebar);
+    sideLayout->setContentsMargins(0, 0, 0, 0);
+    sideLayout->setSpacing(0);
+    auto *sideTitle = new QLabel(tr("Chats"), sidebar);
+    sideTitle->setObjectName(QStringLiteral("sidebarTitle"));
+    auto *search = new QLineEdit(sidebar);
+    search->setObjectName(QStringLiteral("searchField"));
+    search->setPlaceholderText(tr("Search"));
+    search->setClearButtonEnabled(true);
+    m_conversations = new QListWidget(sidebar);
+    m_conversations->setObjectName(QStringLiteral("conversationList"));
+    m_conversations->setItemDelegate(new ConversationDelegate(&m_theme, m_conversations));
+    m_conversations->setMouseTracking(true);
+    m_conversations->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    sideLayout->addWidget(sideTitle);
+    sideLayout->addWidget(search);
+    sideLayout->addWidget(m_conversations, 1);
+    connect(search, &QLineEdit::textChanged, this, [this](const QString &text) {
+        for (int i = 0; i < m_conversations->count(); ++i) {
+            QListWidgetItem *item = m_conversations->item(i);
+            item->setHidden(!text.isEmpty() && !item->text().contains(text, Qt::CaseInsensitive));
+        }
+    });
+
+    // The chosen conversation.
+    auto *chat = new QWidget(this);
+    chat->setObjectName(QStringLiteral("chatPane"));
+    auto *chatLayout = new QVBoxLayout(chat);
+    chatLayout->setContentsMargins(0, 0, 0, 0);
+    chatLayout->setSpacing(0);
+    auto *header = new QWidget(chat);
+    header->setObjectName(QStringLiteral("chatHeader"));
+    auto *headerLayout = new QVBoxLayout(header);
+    headerLayout->setContentsMargins(16, 10, 16, 10);
+    headerLayout->setSpacing(2);
+    m_title = new QLabel(header);
+    m_title->setObjectName(QStringLiteral("chatTitle"));
+    m_subtitle = new QLabel(header);
+    m_subtitle->setObjectName(QStringLiteral("chatSubtitle"));
+    headerLayout->addWidget(m_title);
+    headerLayout->addWidget(m_subtitle);
+    m_messages = new QListWidget(chat);
+    m_messages->setObjectName(QStringLiteral("messageList"));
+    m_messages->setItemDelegate(new BubbleDelegate(&m_theme, m_messages));
+    m_messages->setSelectionMode(QAbstractItemView::NoSelection);
+    m_messages->setFocusPolicy(Qt::NoFocus);
+    m_messages->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    m_messages->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_messages->setResizeMode(QListView::Adjust);
+    m_messages->setWordWrap(true);
+    auto *composer = new QWidget(chat);
+    composer->setObjectName(QStringLiteral("composer"));
+    auto *composerLayout = new QHBoxLayout(composer);
+    composerLayout->setContentsMargins(12, 10, 12, 10);
+    m_compose = new QPlainTextEdit(composer);
+    m_compose->setObjectName(QStringLiteral("composeField"));
+    m_compose->setPlaceholderText(tr("Message"));
+    m_compose->setFixedHeight(40);
+    m_compose->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_compose->installEventFilter(this);
+    m_send = new QPushButton(tr("Send"), composer);
+    m_send->setObjectName(QStringLiteral("sendButton"));
+    m_send->setCursor(Qt::PointingHandCursor);
+    m_send->setEnabled(false);
+    composerLayout->addWidget(m_compose, 1);
+    composerLayout->addWidget(m_send);
+    chatLayout->addWidget(header);
+    chatLayout->addWidget(m_messages, 1);
+    chatLayout->addWidget(composer);
+
+    auto *split = new QSplitter(Qt::Horizontal, this);
+    split->addWidget(sidebar);
+    split->addWidget(chat);
+    split->setStretchFactor(1, 1);
+    split->setSizes({300, 700});
+    setCentralWidget(split);
+
+    connect(m_send, &QPushButton::clicked, this, &MainWindow::send);
+    connect(m_compose, &QPlainTextEdit::textChanged, this, [this] {
+        m_send->setEnabled(m_current != 0 && !m_compose->toPlainText().trimmed().isEmpty());
+        // The field grows with what is written, up to six lines.
+        const int lines = qBound(1, int(m_compose->document()->size().height()), 6);
+        m_compose->setFixedHeight(qMax(40, lines * m_compose->fontMetrics().lineSpacing() + 18));
+    });
+    connect(m_conversations, &QListWidget::currentItemChanged, this, [this](QListWidgetItem *item) {
+        if (item)
+            openConversation(item->data(IdRole).toLongLong());
+    });
+    connect(m_store, &ChatStore::conversationsChanged, this, &MainWindow::reloadConversations);
+    connect(m_store, &ChatStore::messagesChanged, this, [this](qint64 conversation) {
+        if (conversation == m_current)
+            reloadMessages();
+    });
+
+    buildMenus();
+    applyTheme();
+    m_store->noteToSelf(); // always there, as in Signal
+    reloadConversations();
+    if (m_conversations->count() > 0)
+        m_conversations->setCurrentRow(0);
+}
+
+void MainWindow::buildMenus()
+{
+    QMenu *file = menuBar()->addMenu(tr("&File"));
+    QAction *quit = file->addAction(tr("Quit"), this, &QWidget::close);
+    quit->setShortcut(QKeySequence::Quit);
+
+    QMenu *view = menuBar()->addMenu(tr("&View"));
+    QMenu *themes = view->addMenu(tr("Theme"));
+    connect(themes, &QMenu::aboutToShow, this, [themes] {
+        themes->clear();
+        auto *group = new QActionGroup(themes);
+        const QString current = savedThemeKey();
+        for (const ThemeChoice &choice : allThemes()) {
+            QAction *a = themes->addAction(choice.name);
+            a->setCheckable(true);
+            a->setChecked(choice.key == current);
+            group->addAction(a);
+            connect(a, &QAction::triggered, a, [key = choice.key] { setThemeKey(key); });
+        }
+    });
+
+    QMenu *help = menuBar()->addMenu(tr("&Help"));
+    help->addAction(tr("About Argonaut Chat"), this, [this] {
+        QMessageBox::about(this, tr("About Argonaut Chat"),
+                           tr("<b>Argonaut Chat</b> %1<br>A private messenger in Qt and C++, from the makers of Argonaut.<br>"
+                              "License: GPL-3.0-or-later")
+                               .arg(QStringLiteral(CHAT_VERSION)));
+    });
+}
+
+void MainWindow::reloadConversations()
+{
+    const QSignalBlocker block(m_conversations);
+    m_conversations->clear();
+    QListWidgetItem *current = nullptr;
+    for (const ChatStore::Conversation &c : m_store->conversations()) {
+        auto *item = new QListWidgetItem(c.title, m_conversations);
+        item->setData(IdRole, c.id);
+        item->setData(LastTextRole, c.lastText);
+        item->setData(TimeRole, c.lastText.isEmpty() ? QString() : shortTime(c.lastActivity));
+        item->setData(UnreadRole, c.id == m_current ? 0 : c.unread);
+        if (c.id == m_current)
+            current = item;
+    }
+    if (current)
+        m_conversations->setCurrentItem(current);
+}
+
+void MainWindow::openConversation(qint64 id)
+{
+    m_current = id;
+    const ChatStore::Conversation c = m_store->conversation(id);
+    m_title->setText(c.title);
+    m_subtitle->setText(c.kind == QLatin1String("self") ? tr("Notes you keep for yourself, on this computer") : c.peer);
+    m_store->markRead(id);
+    reloadMessages();
+    m_compose->setFocus();
+    m_send->setEnabled(!m_compose->toPlainText().trimmed().isEmpty());
+}
+
+void MainWindow::reloadMessages()
+{
+    m_messages->clear();
+    for (const ChatStore::Message &m : m_store->messages(m_current)) {
+        auto *item = new QListWidgetItem(m.body, m_messages);
+        item->setData(IdRole, m.id);
+        item->setData(OutgoingRole, m.outgoing());
+        item->setData(TimeRole, QLocale().toString(m.sentAt.toLocalTime().time(), QLocale::ShortFormat));
+        item->setData(StatusRole, m.status);
+    }
+    m_messages->scrollToBottom();
+}
+
+void MainWindow::send()
+{
+    const QString text = m_compose->toPlainText().trimmed();
+    if (text.isEmpty() || m_current == 0)
+        return;
+    m_store->addMessage(m_current, text);
+    m_compose->clear();
+}
+
+bool MainWindow::eventFilter(QObject *watched, QEvent *event)
+{
+    // Enter sends; Shift+Enter is a new line.
+    if (watched == m_compose && event->type() == QEvent::KeyPress) {
+        auto *key = static_cast<QKeyEvent *>(event);
+        if ((key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) && !(key->modifiers() & Qt::ShiftModifier)) {
+            send();
+            return true;
+        }
+    }
+    return QMainWindow::eventFilter(watched, event);
+}
+
+void MainWindow::changeEvent(QEvent *event)
+{
+    // A theme change arrives as PaletteChange (Qt 6), as in Argonaut Emails.
+    if (event->type() == QEvent::PaletteChange || event->type() == QEvent::ApplicationPaletteChange)
+        applyTheme();
+    QMainWindow::changeEvent(event);
+}
+
+void MainWindow::applyTheme()
+{
+    const Theme theme = currentTheme();
+    if (theme.id == m_themeId)
+        return;
+    m_themeId = theme.id;
+    m_theme = theme;
+    setStyleSheet(styleSheetFor(theme));
+    m_conversations->viewport()->update();
+    m_messages->viewport()->update();
+}
