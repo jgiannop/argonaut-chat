@@ -48,6 +48,8 @@ enum Role {
     ImageRole,      // a picture's preview (QPixmap)
     FileRole,       // the attachment's line: name, size, state
     AttachmentRole, // the attachment's id, to save it
+    AvatarRole,     // a conversation's picture (QPixmap), if they sent one
+    PeerRole,       // a conversation's username (search finds it too)
 };
 
 QString shortTime(const QDateTime &when)
@@ -86,15 +88,25 @@ public:
         }
         const QString title = index.data().toString();
         const QRect avatar(r.left() + 8, r.center().y() - 20, 40, 40);
-        p->setPen(Qt::NoPen);
-        p->setBrush(m_theme->accent);
-        p->drawEllipse(avatar);
-        QFont letter = option.font;
-        letter.setBold(true);
-        letter.setPixelSize(17);
-        p->setFont(letter);
-        p->setPen(Qt::white);
-        p->drawText(avatar, Qt::AlignCenter, title.left(1).toUpper());
+        const QPixmap picture = index.data(AvatarRole).value<QPixmap>();
+        if (!picture.isNull()) {
+            // Their picture, in a circle.
+            QPainterPath circle;
+            circle.addEllipse(avatar);
+            p->setClipPath(circle);
+            p->drawPixmap(avatar, picture);
+            p->setClipping(false);
+        } else {
+            p->setPen(Qt::NoPen);
+            p->setBrush(m_theme->accent);
+            p->drawEllipse(avatar);
+            QFont letter = option.font;
+            letter.setBold(true);
+            letter.setPixelSize(17);
+            p->setFont(letter);
+            p->setPen(Qt::white);
+            p->drawText(avatar, Qt::AlignCenter, title.left(1).toUpper());
+        }
 
         const int unread = index.data(UnreadRole).toInt();
         const QRect text(avatar.right() + 12, r.top() + 10, r.right() - avatar.right() - 22, r.height() - 20);
@@ -317,7 +329,8 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
     connect(search, &QLineEdit::textChanged, this, [this](const QString &text) {
         for (int i = 0; i < m_conversations->count(); ++i) {
             QListWidgetItem *item = m_conversations->item(i);
-            item->setHidden(!text.isEmpty() && !item->text().contains(text, Qt::CaseInsensitive));
+            item->setHidden(!text.isEmpty() && !item->text().contains(text, Qt::CaseInsensitive)
+                             && !item->data(PeerRole).toString().contains(text, Qt::CaseInsensitive));
         }
     });
 
@@ -439,6 +452,11 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
     });
     connect(m_store, &ChatStore::conversationsChanged, this, &MainWindow::reloadConversations);
     connect(m_store, &ChatStore::conversationsChanged, this, &MainWindow::updateUnread);
+    connect(m_store, &ChatStore::profileChanged, this, [this](const QString &username) {
+        m_avatars.remove(username);
+        reloadConversations();
+        updateHeader();
+    });
     connect(m_store, &ChatStore::messagesChanged, this, [this](qint64 conversation) {
         if (conversation != m_current)
             return;
@@ -502,6 +520,12 @@ void MainWindow::buildMenus()
     m_newChatAction = file->addAction(tr("New Chat…"), this, &MainWindow::newChat);
     m_newChatAction->setShortcut(QKeySequence::New);
     m_signUpAction = file->addAction(tr("Sign Up…"), this, &MainWindow::showSignUp);
+    m_profileAction = file->addAction(tr("Profile…"), this, [this] {
+        if (!m_messenger)
+            return;
+        ProfileDialog dialog(m_messenger, this);
+        dialog.exec();
+    });
     m_blockedAction = file->addAction(tr("Blocked People…"), this, [this] {
         if (!m_messenger)
             return;
@@ -560,8 +584,17 @@ void MainWindow::reloadConversations()
     m_conversations->clear();
     QListWidgetItem *current = nullptr;
     for (const ChatStore::Conversation &c : m_store->conversations()) {
-        auto *item = new QListWidgetItem(c.title, m_conversations);
+        const bool direct = c.kind == QLatin1String("direct");
+        auto *item = new QListWidgetItem(direct && m_messenger ? m_messenger->displayName(c.peer) : c.title,
+                                         m_conversations);
         item->setData(IdRole, c.id);
+        item->setData(PeerRole, c.peer);
+        // A request's picture is not even fetched: nothing a stranger sends shows before accepting.
+        if (direct && !c.request) {
+            const QPixmap picture = avatarFor(c.peer);
+            if (!picture.isNull())
+                item->setData(AvatarRole, picture);
+        }
         item->setData(LastTextRole, c.lastText);
         item->setData(TimeRole, c.lastText.isEmpty() ? QString() : shortTime(c.lastActivity));
         item->setData(UnreadRole, c.id == m_current || c.request ? 0 : c.unread);
@@ -605,7 +638,7 @@ void MainWindow::updateHeader()
 {
     const ChatStore::Conversation c = m_store->conversation(m_current);
     const bool direct = c.kind == QLatin1String("direct");
-    m_title->setText(c.title);
+    m_title->setText(direct && m_messenger ? m_messenger->displayName(c.peer) : c.title);
     if (c.kind == QLatin1String("self"))
         m_subtitle->setText(tr("Notes you keep for yourself, on this computer"));
     else if (direct && c.request)
@@ -692,6 +725,8 @@ void MainWindow::updateConnection()
         m_newChatAction->setEnabled(account);
     if (m_blockedAction)
         m_blockedAction->setEnabled(account);
+    if (m_profileAction)
+        m_profileAction->setEnabled(account);
 }
 
 void MainWindow::showNotice(const QString &text)
@@ -776,6 +811,21 @@ void MainWindow::reloadMessages()
         }
     }
     m_messages->scrollToBottom();
+}
+
+QPixmap MainWindow::avatarFor(const QString &username)
+{
+    if (!m_messenger)
+        return {};
+    if (const auto cached = m_avatars.constFind(username); cached != m_avatars.constEnd())
+        return *cached;
+    QPixmap picture;
+    QImage image;
+    const QByteArray data = m_messenger->avatar(username);
+    if (!data.isEmpty() && image.loadFromData(data))
+        picture = QPixmap::fromImage(image.scaled(80, 80, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation));
+    m_avatars.insert(username, picture);
+    return picture;
 }
 
 QPixmap MainWindow::previewFor(const ChatStore::StoredAttachment &a)
@@ -864,7 +914,10 @@ void MainWindow::notify(qint64 conversation, const QString &from, const QString 
     // In front of them already: nothing to say.
     if (isActiveWindow() && !isMinimized() && conversation == m_current)
         return;
-    const auto shown = Notifications::make(Notifications::saved(), from, text, request);
+    // Their chosen name; for a request, with the username too (anyone can choose any name).
+    const QString who = m_messenger ? m_messenger->displayName(from) : from;
+    const QString shownName = request && who != from ? QStringLiteral("%1 (@%2)").arg(who, from) : who;
+    const auto shown = Notifications::make(Notifications::saved(), shownName, text, request);
     if (!shown)
         return;
     m_lastNotified = conversation;

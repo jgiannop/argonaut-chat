@@ -290,6 +290,94 @@ private slots:
         }
     }
 
+    void profilesInTheWindow()
+    {
+        // Pictures made ready to send: square, 256×256, small.
+        QImage wide(800, 400, QImage::Format_RGB32);
+        wide.fill(QColor(200, 80, 40));
+        QImage made;
+        QVERIFY(made.loadFromData(ProfileDialog::preparePicture(wide)));
+        QCOMPARE(made.size(), QSize(256, 256));
+        QImage noise(1000, 1000, QImage::Format_RGB32);
+        for (int y = 0; y < noise.height(); ++y)
+            for (int x = 0; x < noise.width(); ++x)
+                noise.setPixel(x, y, qRgb(std::rand() % 256, std::rand() % 256, std::rand() % 256));
+        const QByteArray heavy = ProfileDialog::preparePicture(noise);
+        QVERIFY(heavy.size() <= Messenger::MaxAvatarBytes);
+        // Even noise fits: 256×256 is at most about 197 KB as PNG.
+        QImage back;
+        QVERIFY(back.loadFromData(heavy));
+        QCOMPARE(back.size(), QSize(256, 256));
+        QVERIFY(ProfileDialog::preparePicture(QImage()).isEmpty());
+
+        ServerStore serverStore(QDir::homePath() + QStringLiteral("/server5/server.sqlite"));
+        ChatServer server(&serverStore);
+        QVERIFY(server.listen());
+        const QUrl url(QStringLiteral("ws://127.0.0.1:%1").arg(server.port()));
+        auto signUp = [&](Messenger &m, const QString &name) {
+            std::optional<bool> ok;
+            m.signUp(url, name, [&](bool done, const QString &) { ok = done; });
+            return QTest::qWaitFor([&] { return ok.has_value(); }, 5000) && *ok;
+        };
+        ChatStore store(QDir::homePath() + QStringLiteral("/me5/chat.sqlite"));
+        KeyStore keys(&store);
+        Messenger me(&store, &keys);
+        QVERIFY(signUp(me, QStringLiteral("myself")));
+        ChatStore annaStore(QDir::homePath() + QStringLiteral("/anna5/chat.sqlite"));
+        KeyStore annaKeys(&annaStore);
+        Messenger anna(&annaStore, &annaKeys);
+        QVERIFY(signUp(anna, QStringLiteral("anna")));
+        MainWindow window(&store, &me);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+
+        // My profile, through the dialog.
+        const QString picturePath = QDir::homePath() + QStringLiteral("/me.png");
+        QVERIFY(wide.save(picturePath));
+        ProfileDialog dialog(&me, &window);
+        dialog.nameField()->setText(QStringLiteral("Me Myself"));
+        QVERIFY(dialog.setPicture(picturePath));
+        QVERIFY(!dialog.pictureLabel()->pixmap().isNull());
+        dialog.saveButton()->click();
+        QCOMPARE(dialog.result(), int(QDialog::Accepted));
+        QCOMPARE(me.myProfile().name, QStringLiteral("Me Myself"));
+        QVERIFY(!me.myProfile().avatar.isEmpty());
+
+        // I write to Anna; she accepts, and her name and picture come to me.
+        QImage annaPicture(300, 300, QImage::Format_RGB32);
+        annaPicture.fill(QColor(40, 160, 90));
+        QVERIFY(anna.setMyProfile(QStringLiteral("Anna K."), ProfileDialog::preparePicture(annaPicture)));
+        window.startChatWith(QStringLiteral("anna"));
+        QTRY_VERIFY(store.directConversation(QStringLiteral("anna")) > 0);
+        // My profile reaches her as soon as I open the chat; a conversation only with a message.
+        QTRY_COMPARE_WITH_TIMEOUT(anna.displayName(QStringLiteral("myself")), QStringLiteral("Me Myself"), 5000);
+        QCOMPARE(annaStore.directConversation(QStringLiteral("myself")), 0);
+        me.send(store.directConversation(QStringLiteral("anna")), QStringLiteral("Hi Anna"));
+        QTRY_VERIFY_WITH_TIMEOUT(annaStore.directConversation(QStringLiteral("myself")) > 0, 5000);
+        anna.acceptRequest(annaStore.directConversation(QStringLiteral("myself")));
+        QTRY_COMPARE_WITH_TIMEOUT(window.conversations()->item(0)->text(), QStringLiteral("Anna K."), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(!window.conversations()->item(0)->data(Qt::UserRole + 11).value<QPixmap>().isNull(), 5000);
+        QCOMPARE(window.findChild<QLabel *>(QStringLiteral("chatTitle"))->text(), QStringLiteral("Anna K."));
+        QVERIFY(window.findChild<QLabel *>(QStringLiteral("chatSubtitle"))->text().contains(QStringLiteral("@anna")));
+        // Anna has my picture too.
+        QTRY_VERIFY_WITH_TIMEOUT(!anna.avatar(QStringLiteral("myself")).isEmpty(), 5000);
+
+        // Search: by her name or her username.
+        auto search = window.findChild<QLineEdit *>(QStringLiteral("searchField"));
+        search->setText(QStringLiteral("K."));
+        QVERIFY(!window.conversations()->item(0)->isHidden());
+        search->setText(QStringLiteral("anna"));
+        QVERIFY(!window.conversations()->item(0)->isHidden());
+        search->setText(QStringLiteral("nobody"));
+        QVERIFY(window.conversations()->item(0)->isHidden());
+        search->clear();
+        if (qEnvironmentVariableIsSet("CHAT_TEST_GRAB")) {
+            window.resize(1000, 640);
+            QTest::qWait(200);
+            window.grab().save(qEnvironmentVariable("CHAT_TEST_GRAB"));
+        }
+    }
+
     void notificationContent()
     {
         using Notifications::Content;

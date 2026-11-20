@@ -57,6 +57,22 @@ blob, checks its size and digest, decrypts, and drops the padding. At most
 direction marks; types must look like `type/subtype`. On disk, both sides
 keep the blob as it was (the key in the encrypted database).
 
+### Profiles
+
+```json
+{"v":1, "t":"profile", "id":"<uuid>", "sent":…, "name":"Anna K.", "avatar":{…pointer…}}
+```
+
+A display name (at most 64 characters, no control characters or direction
+marks; cleaned again on arrival) and maybe a picture, sent as an attachment
+pointer (PNG or JPEG, at most 256 KB, `image/` only). Profiles travel only
+in encrypted messages: to the people one writes to or accepts, and again to
+all of them when it changes; the server never stores one. A profile is not
+a message: nothing is shown or acknowledged. A request's sender's name is
+kept (shown with the username), their picture fetched only once accepted.
+The picture is uploaded once and its pointer reused for 25 days (the server
+keeps it 30).
+
 ## Layer 2: CipherMessage (binary)
 
 The padded Content encrypted by the sender's `Session` for one device:

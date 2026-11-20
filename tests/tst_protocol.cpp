@@ -124,6 +124,35 @@ private slots:
         QVERIFY(encodeContent(noId).isEmpty());
     }
 
+    void profiles()
+    {
+        const Attachment::Pointer picture{"0123456789abcdef0123456789abcdef", QByteArray(32, 'k'), QByteArray(32, 'd'),
+                                          4000, "avatar", "image/png"};
+        auto back = decodeContent(encodeContent(Content::profile("Anna K.", picture)));
+        QVERIFY(back);
+        QCOMPARE(back->type, Content::Type::Profile);
+        QCOMPARE(back->name, QString("Anna K."));
+        QCOMPARE(back->avatar->id, picture.id);
+        back = decodeContent(encodeContent(Content::profile(QString(), std::nullopt)));
+        QVERIFY(back && back->name.isEmpty() && !back->avatar);
+        // Names: cleaned, and no longer than 64.
+        QCOMPARE(cleanDisplayName(QString("  Anna\t\nK.  ")), QString("Anna K."));
+        QCOMPARE(cleanDisplayName(QString(100, 'x')).size(), MaxDisplayName);
+        QCOMPARE(cleanDisplayName(QStringLiteral("Bank") + QChar(0x202E) + QStringLiteral("evil")), QString("Bankevil"));
+        // From strangers: a picture that is not a picture, a huge name, a name not a string.
+        const QByteArray id = newMessageId().toLatin1();
+        const QByteArray head = "{\"v\":1,\"t\":\"profile\",\"id\":\"" + id + "\",\"sent\":1,";
+        Attachment::Pointer notPicture = picture;
+        notPicture.type = "application/x-sh";
+        QVERIFY(!decodeContent(pad(head + "\"name\":\"x\",\"avatar\":"
+                                   + QJsonDocument(Attachment::toJson(notPicture)).toJson(QJsonDocument::Compact) + "}")));
+        QVERIFY(!decodeContent(pad(head + "\"name\":\"" + QByteArray(300, 'x') + "\"}")));
+        QVERIFY(!decodeContent(pad(head + "\"name\":5}")));
+        // What arrives is cleaned too.
+        back = decodeContent(pad(head + "\"name\":\"  Mal\\u202elory \"}"));
+        QCOMPARE(back->name, QString("Mallory"));
+    }
+
     void contentFromStrangers_data()
     {
         QTest::addColumn<QByteArray>("json");

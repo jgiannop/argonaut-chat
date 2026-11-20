@@ -6,6 +6,8 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QRegularExpression>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -120,6 +122,22 @@ void ChatStore::createTables()
                           " file TEXT NOT NULL DEFAULT '',"
                           " state TEXT NOT NULL)"));
     q.exec(QStringLiteral("CREATE INDEX IF NOT EXISTS attachments_by_message ON attachments(message)"));
+    q.exec(QStringLiteral("CREATE TABLE IF NOT EXISTS my_profile ("
+                          " id INTEGER PRIMARY KEY CHECK (id = 1),"
+                          " name TEXT NOT NULL DEFAULT '',"
+                          " avatar BLOB,"
+                          " version INTEGER NOT NULL DEFAULT 0,"
+                          " avatar_pointer TEXT NOT NULL DEFAULT '',"
+                          " avatar_uploaded INTEGER NOT NULL DEFAULT 0)"));
+    q.exec(QStringLiteral("CREATE TABLE IF NOT EXISTS profiles ("
+                          " username TEXT PRIMARY KEY,"
+                          " name TEXT NOT NULL DEFAULT '',"
+                          " avatar BLOB,"
+                          " pending_avatar TEXT NOT NULL DEFAULT '',"
+                          " updated INTEGER NOT NULL)"));
+    q.exec(QStringLiteral("CREATE TABLE IF NOT EXISTS profile_sent ("
+                          " username TEXT PRIMARY KEY,"
+                          " version INTEGER NOT NULL)"));
 }
 
 namespace {
@@ -588,4 +606,134 @@ QByteArray ChatStore::readBlob(const QString &name) const
     if (!file.open(QIODevice::ReadOnly))
         return {};
     return file.readAll();
+}
+
+// --- Profiles ---
+
+namespace {
+
+QString pointerText(const std::optional<Attachment::Pointer> &pointer)
+{
+    return pointer ? QString::fromUtf8(QJsonDocument(Attachment::toJson(*pointer)).toJson(QJsonDocument::Compact))
+                   : QStringLiteral("");
+}
+
+std::optional<Attachment::Pointer> pointerFrom(const QString &text)
+{
+    if (text.isEmpty())
+        return std::nullopt;
+    return Attachment::fromJson(QJsonDocument::fromJson(text.toUtf8()).object());
+}
+
+} // namespace
+
+ChatStore::Profile ChatStore::myProfile() const
+{
+    QSqlQuery q(m_db);
+    q.exec(QStringLiteral("SELECT name, avatar FROM my_profile WHERE id = 1"));
+    if (q.next())
+        return {q.value(0).toString(), q.value(1).toByteArray()};
+    return {};
+}
+
+int ChatStore::myProfileVersion() const
+{
+    QSqlQuery q(m_db);
+    q.exec(QStringLiteral("SELECT version FROM my_profile WHERE id = 1"));
+    return q.next() ? q.value(0).toInt() : 0;
+}
+
+void ChatStore::setMyProfile(const QString &name, const QByteArray &avatar)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("INSERT INTO my_profile (id, name, avatar, version, avatar_pointer, avatar_uploaded)"
+                             " VALUES (1, ?, ?, 1, '', 0) ON CONFLICT(id) DO UPDATE SET name = excluded.name,"
+                             " avatar = excluded.avatar, version = my_profile.version + 1, avatar_pointer = '',"
+                             " avatar_uploaded = 0"));
+    q.addBindValue(text(name));
+    q.addBindValue(avatar.isEmpty() ? QVariant() : QVariant(avatar));
+    q.exec();
+    emit profileChanged(QString());
+}
+
+std::optional<Attachment::Pointer> ChatStore::myAvatarPointer(qint64 notBefore) const
+{
+    QSqlQuery q(m_db);
+    q.exec(QStringLiteral("SELECT avatar_pointer, avatar_uploaded FROM my_profile WHERE id = 1"));
+    if (!q.next() || q.value(1).toLongLong() < notBefore)
+        return std::nullopt;
+    return pointerFrom(q.value(0).toString());
+}
+
+void ChatStore::setMyAvatarPointer(const Attachment::Pointer &pointer, qint64 uploadedAt)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("UPDATE my_profile SET avatar_pointer = ?, avatar_uploaded = ? WHERE id = 1"));
+    q.addBindValue(pointerText(pointer));
+    q.addBindValue(uploadedAt);
+    q.exec();
+}
+
+ChatStore::Profile ChatStore::profile(const QString &username) const
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT name, avatar FROM profiles WHERE username = ?"));
+    q.addBindValue(text(username));
+    if (q.exec() && q.next())
+        return {q.value(0).toString(), q.value(1).toByteArray()};
+    return {};
+}
+
+void ChatStore::setProfile(const QString &username, const QString &name,
+                           const std::optional<Attachment::Pointer> &avatarPointer)
+{
+    QSqlQuery q(m_db);
+    // No picture: the old one goes. Another picture: the old one stays until it is here.
+    q.prepare(QStringLiteral("INSERT INTO profiles (username, name, avatar, pending_avatar, updated)"
+                             " VALUES (?, ?, NULL, ?, ?) ON CONFLICT(username) DO UPDATE SET name = excluded.name,"
+                             " pending_avatar = excluded.pending_avatar, updated = excluded.updated,"
+                             " avatar = CASE WHEN excluded.pending_avatar = '' THEN NULL ELSE profiles.avatar END"));
+    q.addBindValue(text(username));
+    q.addBindValue(text(name));
+    q.addBindValue(pointerText(avatarPointer));
+    q.addBindValue(QDateTime::currentMSecsSinceEpoch());
+    q.exec();
+    emit profileChanged(username);
+}
+
+std::optional<Attachment::Pointer> ChatStore::pendingAvatar(const QString &username) const
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT pending_avatar FROM profiles WHERE username = ?"));
+    q.addBindValue(text(username));
+    if (q.exec() && q.next())
+        return pointerFrom(q.value(0).toString());
+    return std::nullopt;
+}
+
+void ChatStore::setAvatar(const QString &username, const QByteArray &avatar)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("UPDATE profiles SET avatar = ?, pending_avatar = '' WHERE username = ?"));
+    q.addBindValue(avatar.isEmpty() ? QVariant() : QVariant(avatar));
+    q.addBindValue(text(username));
+    q.exec();
+    emit profileChanged(username);
+}
+
+int ChatStore::profileSentVersion(const QString &username) const
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT version FROM profile_sent WHERE username = ?"));
+    q.addBindValue(text(username));
+    return q.exec() && q.next() ? q.value(0).toInt() : 0;
+}
+
+void ChatStore::setProfileSent(const QString &username, int version)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("INSERT OR REPLACE INTO profile_sent (username, version) VALUES (?, ?)"));
+    q.addBindValue(text(username));
+    q.addBindValue(version);
+    q.exec();
 }

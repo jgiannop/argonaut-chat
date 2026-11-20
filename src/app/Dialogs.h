@@ -4,6 +4,7 @@
 
 class Messenger;
 class QDialogButtonBox;
+class QImage;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -58,6 +59,38 @@ private:
     QLabel *m_number = nullptr;
     QLabel *m_state = nullptr;
     QPushButton *m_verify = nullptr;
+};
+
+// My profile: a display name and a picture. They go only to the people I
+// write to or accept, inside encrypted messages; the server never has them.
+class ProfileDialog : public QDialog
+{
+    Q_OBJECT
+
+public:
+    explicit ProfileDialog(Messenger *messenger, QWidget *parent = nullptr);
+
+    QLineEdit *nameField() const { return m_name; }
+    QLabel *pictureLabel() const { return m_picture; }
+    QPushButton *saveButton() const { return m_save; }
+    // A picture from a file (Choose Picture…), made ready to send.
+    bool setPicture(const QString &path, QString *error = nullptr);
+    void removePicture();
+    QByteArray picture() const { return m_avatar; }
+    // A square from the middle, 256×256, PNG (JPEG if that is too large).
+    static QByteArray preparePicture(const QImage &image);
+
+private:
+    void showPicture();
+    void save();
+
+    Messenger *m_messenger;
+    QLineEdit *m_name = nullptr;
+    QLabel *m_picture = nullptr;
+    QLabel *m_message = nullptr;
+    QPushButton *m_save = nullptr;
+    QPushButton *m_remove = nullptr;
+    QByteArray m_avatar;
 };
 
 // The people whose messages are dropped, to unblock.

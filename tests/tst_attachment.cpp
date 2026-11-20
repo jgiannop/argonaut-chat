@@ -79,7 +79,7 @@ private slots:
         QCOMPARE(safeName("photo.jpg"), QString("photo.jpg"));
         QCOMPARE(safeName("../../etc/passwd"), QString("passwd"));
         QCOMPARE(safeName("C:\\Users\\x\\report.pdf"), QString("report.pdf"));
-        QCOMPARE(safeName(QString::fromUtf8("invoice\u202Efdp.exe")), QString("invoicefdp.exe"));
+        QCOMPARE(safeName(QStringLiteral("invoice") + QChar(0x202E) + QStringLiteral("fdp.exe")), QString("invoicefdp.exe"));
         QCOMPARE(safeName(QString("a\nb\tc")), QString("abc"));
         QCOMPARE(safeName(""), QString("file"));
         QCOMPARE(safeName(".."), QString("file"));

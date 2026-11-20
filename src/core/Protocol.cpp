@@ -192,6 +192,31 @@ Content Content::text(const QString &body)
     return content;
 }
 
+Content Content::profile(const QString &name, const std::optional<Attachment::Pointer> &avatar)
+{
+    Content content;
+    content.type = Type::Profile;
+    content.id = newMessageId();
+    content.sentAt = QDateTime::currentMSecsSinceEpoch();
+    content.name = cleanDisplayName(name);
+    content.avatar = avatar;
+    return content;
+}
+
+QString cleanDisplayName(const QString &name)
+{
+    QString clean;
+    for (const QChar c : name) {
+        const char16_t u = c.unicode();
+        const bool control = u < 0x20 || u == 0x7f || (u >= 0x80 && u < 0xa0);
+        const bool direction = (u >= 0x200e && u <= 0x200f) || (u >= 0x202a && u <= 0x202e)
+                               || (u >= 0x2066 && u <= 0x2069);
+        clean += control ? QChar(u' ') : direction ? QChar() : c;
+    }
+    clean.remove(QChar());
+    return clean.simplified().left(MaxDisplayName).trimmed();
+}
+
 Content Content::receiptOf(Receipt kind, const QStringList &ids)
 {
     Content content;
@@ -248,6 +273,16 @@ QByteArray encodeContent(const Content &content)
             }
             json.insert(QStringLiteral("attachments"), list);
         }
+    } else if (content.type == Content::Type::Profile) {
+        if (content.name != cleanDisplayName(content.name))
+            return {};
+        json.insert(QStringLiteral("t"), QStringLiteral("profile"));
+        json.insert(QStringLiteral("name"), content.name);
+        if (content.avatar) {
+            if (!Attachment::fromJson(Attachment::toJson(*content.avatar)))
+                return {};
+            json.insert(QStringLiteral("avatar"), Attachment::toJson(*content.avatar));
+        }
     } else {
         if (content.receiptFor.isEmpty() || content.receiptFor.size() > MaxReceiptIds)
             return {};
@@ -302,6 +337,21 @@ std::optional<Content> decodeContent(const QByteArray &padded)
                     return std::nullopt;
                 content.attachments.append(*pointer);
             }
+        }
+        return content;
+    }
+    if (type == QLatin1String("profile")) {
+        content.type = Content::Type::Profile;
+        const QJsonValue name = json.value(QStringLiteral("name"));
+        if (!name.isString() || name.toString().size() > 4 * MaxDisplayName)
+            return std::nullopt;
+        content.name = cleanDisplayName(name.toString());
+        const QJsonValue avatar = json.value(QStringLiteral("avatar"));
+        if (!avatar.isUndefined()) {
+            const auto pointer = Attachment::fromJson(avatar);
+            if (!pointer || !pointer->type.startsWith(QLatin1String("image/")))
+                return std::nullopt;
+            content.avatar = pointer;
         }
         return content;
     }

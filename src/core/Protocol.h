@@ -48,7 +48,7 @@ bool isValidMessageId(const QString &id);
 // Layer 1.
 struct Content
 {
-    enum class Type { Text, Receipt };
+    enum class Type { Text, Receipt, Profile };
     enum class Receipt { Delivered, Read };
 
     Type type = Type::Text;
@@ -58,10 +58,19 @@ struct Content
     QList<Attachment::Pointer> attachments; // Text
     Receipt receipt = Receipt::Delivered;
     QStringList receiptFor; // Receipt: the ids of the messages it is for
+    // Profile: the sender's display name (maybe empty) and picture (maybe none).
+    QString name;
+    std::optional<Attachment::Pointer> avatar;
 
     static Content text(const QString &body);
     static Content receiptOf(Receipt kind, const QStringList &ids);
+    static Content profile(const QString &name, const std::optional<Attachment::Pointer> &avatar);
 };
+
+// A display name as it may be shown: no control characters or direction
+// marks, white space simplified, at most MaxDisplayName characters.
+constexpr int MaxDisplayName = 64;
+QString cleanDisplayName(const QString &name);
 
 // Padded. Empty if the content is not valid (too long, bad ids).
 QByteArray encodeContent(const Content &content);

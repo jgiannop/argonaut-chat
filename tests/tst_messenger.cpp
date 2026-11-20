@@ -469,6 +469,59 @@ private slots:
         QVERIFY(QDir(bob.store->attachmentFolder()).entryList(QDir::Files).isEmpty());
     }
 
+    void profiles()
+    {
+        Device alice(file("alice"));
+        Device bob(file("bob"));
+        QVERIFY(signUp(alice, "alice"));
+        QVERIFY(signUp(bob, "bob"));
+        // A picture: what matters here is that it starts as a PNG does.
+        const QByteArray picture = QByteArray("\x89PNG\r\n\x1a\n", 8) + Crypto::randomBytes(3000);
+        QString error;
+        QVERIFY(!alice.messenger->setMyProfile("Alice", "not a picture", &error));
+        QVERIFY(!error.isEmpty());
+        QVERIFY(!alice.messenger->setMyProfile("Alice", QByteArray("\x89PNG\r\n\x1a\n", 8) + QByteArray(300 * 1024, 'x')));
+        // Direction marks and controls go: no "evil" name that reads backwards.
+        QVERIFY(alice.messenger->setMyProfile(QStringLiteral("Alice") + QChar(0x202E) + QStringLiteral(" \n Smith  "), picture));
+        QCOMPARE(alice.messenger->myProfile().name, QString("Alice Smith"));
+
+        // She writes to Bob: her name reaches him even as a request; her picture waits.
+        const qint64 toBob = startConversation(alice, "bob");
+        alice.messenger->send(toBob, "hi");
+        QTRY_COMPARE_WITH_TIMEOUT(bob.messenger->displayName("alice"), QString("Alice Smith"), kWait);
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("alice") > 0, kWait);
+        const qint64 fromAlice = bob.store->directConversation("alice");
+        QTest::qWait(300);
+        QVERIFY(bob.messenger->avatar("alice").isEmpty());
+        QCOMPARE(bob.messenger->displayName("carol"), QString("carol")); // nobody's name: the username
+        // Accepted: the picture comes.
+        bob.messenger->acceptRequest(fromAlice);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.messenger->avatar("alice"), picture, kWait);
+        // A profile is not a message.
+        QTRY_COMPARE_WITH_TIMEOUT(bob.store->messages(fromAlice).size(), 1, kWait);
+
+        // Bob's, without a picture, to Alice.
+        QVERIFY(bob.messenger->setMyProfile("Bob B.", QByteArray()));
+        QTRY_COMPARE_WITH_TIMEOUT(alice.messenger->displayName("bob"), QString("Bob B."), kWait);
+        QVERIFY(alice.messenger->avatar("bob").isEmpty());
+
+        // Alice renames herself: the same picture, not uploaded again.
+        const int uploads = QDir(m_serverStore->attachmentFolder()).entryList(QDir::Files).size();
+        QVERIFY(alice.messenger->setMyProfile("Alice S.", picture));
+        QTRY_COMPARE_WITH_TIMEOUT(bob.messenger->displayName("alice"), QString("Alice S."), kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.messenger->avatar("alice"), picture, kWait);
+        QCOMPARE(QDir(m_serverStore->attachmentFolder()).entryList(QDir::Files).size(), uploads + 1); // a new version: once
+        // ... and takes her picture away.
+        QVERIFY(alice.messenger->setMyProfile("Alice S.", QByteArray()));
+        QTRY_VERIFY_WITH_TIMEOUT(bob.messenger->avatar("alice").isEmpty(), kWait);
+
+        // Kept over a restart.
+        bob.close();
+        bob.open();
+        QCOMPARE(bob.messenger->displayName("alice"), QString("Alice S."));
+        QCOMPARE(bob.store->messages(fromAlice).size(), 1);
+    }
+
     void keyStoreTrust()
     {
         Device alice(file("alice"));

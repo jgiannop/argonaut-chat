@@ -5,7 +5,14 @@
 #include "Protocol.h"
 #include "SafetyNumber.h"
 
+#include <QBuffer>
 #include <QDialogButtonBox>
+#include <QFileDialog>
+#include <QHBoxLayout>
+#include <QImage>
+#include <QImageReader>
+#include <QPainter>
+#include <QPainterPath>
 #include <QFontDatabase>
 #include <QFormLayout>
 #include <QLabel>
@@ -191,4 +198,140 @@ void BlockedDialog::reload()
     m_list->clear();
     m_list->addItems(m_messenger->blocked());
     m_unblock->setEnabled(false);
+}
+
+ProfileDialog::ProfileDialog(Messenger *messenger, QWidget *parent)
+    : QDialog(parent)
+    , m_messenger(messenger)
+{
+    setWindowTitle(tr("Profile"));
+    auto *layout = new QVBoxLayout(this);
+    auto *intro = new QLabel(tr("Your name and picture go only to the people you write to or accept, encrypted "
+                                "like your messages; the server never sees them. Everyone sees your username "
+                                "too."),
+                             this);
+    intro->setWordWrap(true);
+    layout->addWidget(intro);
+
+    auto *row = new QHBoxLayout;
+    m_picture = new QLabel(this);
+    m_picture->setObjectName(QStringLiteral("profilePicture"));
+    m_picture->setFixedSize(96, 96);
+    m_picture->setAlignment(Qt::AlignCenter);
+    row->addWidget(m_picture);
+    auto *pictureButtons = new QVBoxLayout;
+    auto *choose = new QPushButton(tr("Choose Picture…"), this);
+    m_remove = new QPushButton(tr("Remove Picture"), this);
+    pictureButtons->addWidget(choose);
+    pictureButtons->addWidget(m_remove);
+    pictureButtons->addStretch();
+    row->addLayout(pictureButtons);
+    row->addStretch();
+    layout->addLayout(row);
+
+    auto *form = new QFormLayout;
+    m_name = new QLineEdit(this);
+    m_name->setObjectName(QStringLiteral("profileName"));
+    m_name->setMaxLength(Protocol::MaxDisplayName);
+    m_name->setPlaceholderText(tr("Your name, as others will see it"));
+    form->addRow(tr("Name:"), m_name);
+    layout->addLayout(form);
+    m_message = new QLabel(this);
+    m_message->setWordWrap(true);
+    layout->addWidget(m_message);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, this);
+    m_save = buttons->addButton(tr("Save"), QDialogButtonBox::AcceptRole);
+    layout->addWidget(buttons);
+
+    const ChatStore::Profile mine = m_messenger->myProfile();
+    m_name->setText(mine.name);
+    m_avatar = mine.avatar;
+    showPicture();
+
+    connect(choose, &QPushButton::clicked, this, [this] {
+        const QString path = QFileDialog::getOpenFileName(this, tr("Choose a Picture"), QString(),
+                                                          tr("Pictures (*.png *.jpg *.jpeg *.webp *.bmp *.gif)"));
+        QString error;
+        if (!path.isEmpty() && !setPicture(path, &error))
+            m_message->setText(error);
+    });
+    connect(m_remove, &QPushButton::clicked, this, &ProfileDialog::removePicture);
+    connect(buttons, &QDialogButtonBox::accepted, this, &ProfileDialog::save);
+    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    resize(440, sizeHint().height());
+}
+
+QByteArray ProfileDialog::preparePicture(const QImage &image)
+{
+    if (image.isNull())
+        return {};
+    const int side = qMin(image.width(), image.height());
+    const QImage square = image.copy((image.width() - side) / 2, (image.height() - side) / 2, side, side)
+                              .scaled(256, 256, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
+                              .convertToFormat(QImage::Format_RGB32);
+    // Made anew: nothing of the original file (its metadata, where it was taken) goes along.
+    QByteArray out;
+    QBuffer buffer(&out);
+    buffer.open(QIODevice::WriteOnly);
+    square.save(&buffer, "PNG");
+    if (out.size() > Messenger::MaxAvatarBytes) {
+        out.clear();
+        buffer.seek(0);
+        square.save(&buffer, "JPEG", 85);
+    }
+    return out;
+}
+
+bool ProfileDialog::setPicture(const QString &path, QString *error)
+{
+    QImageReader reader(path);
+    reader.setAutoTransform(true);
+    const QImage image = reader.read();
+    const QByteArray prepared = preparePicture(image);
+    if (prepared.isEmpty()) {
+        if (error)
+            *error = tr("That is not a picture this program can read.");
+        return false;
+    }
+    m_avatar = prepared;
+    showPicture();
+    return true;
+}
+
+void ProfileDialog::removePicture()
+{
+    m_avatar.clear();
+    showPicture();
+}
+
+void ProfileDialog::showPicture()
+{
+    QImage image;
+    if (!m_avatar.isEmpty() && image.loadFromData(m_avatar)) {
+        QPixmap round(96, 96);
+        round.fill(Qt::transparent);
+        QPainter p(&round);
+        p.setRenderHint(QPainter::Antialiasing);
+        QPainterPath circle;
+        circle.addEllipse(0, 0, 96, 96);
+        p.setClipPath(circle);
+        p.drawImage(QRect(0, 0, 96, 96), image);
+        p.end();
+        m_picture->setPixmap(round);
+    } else {
+        m_picture->setPixmap(QPixmap());
+        m_picture->setText(tr("No picture"));
+    }
+    m_remove->setEnabled(!m_avatar.isEmpty());
+}
+
+void ProfileDialog::save()
+{
+    QString error;
+    if (!m_messenger->setMyProfile(m_name->text(), m_avatar, &error)) {
+        m_message->setText(error);
+        return;
+    }
+    accept();
 }

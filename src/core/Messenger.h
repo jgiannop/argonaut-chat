@@ -77,6 +77,18 @@ public:
     // Decrypted into `path` (the user's choice).
     bool saveAttachment(qint64 attachment, const QString &path, QString *error = nullptr) const;
 
+    // Profiles: a display name and a picture, sent only inside encrypted
+    // messages, to the people I write to or accept (and again to them all
+    // when it changes); the server never has one. The picture: PNG or JPEG,
+    // at most MaxAvatarBytes (the window makes it 256×256).
+    static constexpr qint64 MaxAvatarBytes = 256 * 1024;
+    bool setMyProfile(const QString &name, const QByteArray &avatar, QString *error = nullptr);
+    ChatStore::Profile myProfile() const { return m_store->myProfile(); }
+    // Their display name if they sent one, else their username.
+    QString displayName(const QString &username) const;
+    // Their picture (image bytes), once fetched; none for a request until accepted.
+    QByteArray avatar(const QString &username) const { return m_store->profile(username).avatar; }
+
     // Opened: their messages are seen, and they get read receipts (not for a request).
     void markRead(qint64 conversation);
     // A message request: accepted (they get the receipts now), deleted, or
@@ -122,6 +134,11 @@ private:
     void deliveryFailed(qint64 message, const QString &error, const QString &why);
     // Fetches their attachments, one at a time, in accepted conversations.
     void downloadPending();
+    // My profile to `peer` if they lack this version; to everyone accepted.
+    void shareProfile(const QString &peer);
+    void shareProfileWithAll();
+    // Their pictures still to fetch, accepted conversations only.
+    void fetchAvatars();
     // Encrypts `content` for every device of `to` and sends it.
     void sendContent(const QString &to, const Protocol::Content &content, const Done &done, bool retried = false);
     // Sessions with the devices of `to` that have none (or all, if `devices` lists them).
@@ -151,4 +168,7 @@ private:
     std::function<qint64()> m_clock;
     QSet<qint64> m_inFlight; // outbox messages being sent
     bool m_downloading = false;
+    bool m_avatarUploading = false;
+    bool m_avatarFetching = false;
+    QSet<QString> m_profileInFlight;
 };

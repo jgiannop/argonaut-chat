@@ -27,6 +27,9 @@ program: [docs/how-signal-works.md](docs/how-signal-works.md).
   with a new key each, as Signal does; the server keeps only the encrypted
   bytes, for 30 days. Pictures show in the conversation; a click saves a
   file. Kept encrypted on disk too.
+- **Your name and picture** (File › Profile…), sent only to the people you
+  write to or accept, encrypted; the server never sees them. Others always
+  see your username too.
 - **Notifications and the tray**: a notification for each new message
   (View › Notifications: name and message, name only, nothing, or off), the
   unread count on the tray and dock icons; closing the window keeps it

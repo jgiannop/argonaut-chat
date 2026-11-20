@@ -177,6 +177,8 @@ void Messenger::onConnected()
                        m_rotation.start();
                        flushOutbox();
                        downloadPending();
+                       shareProfileWithAll();
+                       fetchAvatars();
                    });
 }
 
@@ -190,6 +192,9 @@ void Messenger::onConnectionLost(const QString &why)
         return;
     m_inFlight.clear();
     m_downloading = false;
+    m_avatarUploading = false;
+    m_avatarFetching = false;
+    m_profileInFlight.clear();
     m_replenishing = false;
     m_rotating = false;
     m_rotation.stop();
@@ -292,6 +297,7 @@ void Messenger::startConversation(const QString &username,
         }
         const qint64 existing = m_store->directConversation(name);
         done(existing ? existing : m_store->addConversation(QStringLiteral("direct"), name, name), QString());
+        shareProfile(name); // they see who writes
     });
 }
 
@@ -633,6 +639,8 @@ void Messenger::acceptRequest(qint64 conversation)
     m_store->setAccepted(conversation);
     markRead(conversation); // read covers delivered
     downloadPending();      // their files, now
+    shareProfile(c.peer);   // my profile, to them
+    fetchAvatars();         // and their picture
 }
 
 void Messenger::deleteConversation(qint64 conversation)
@@ -706,6 +714,16 @@ void Messenger::handleContent(const QString &from, const Protocol::Envelope &env
 {
     if (m_store->isBlocked(from))
         return; // dropped, and they learn nothing
+    if (content.type == Protocol::Content::Type::Profile) {
+        // Kept, even before a request is accepted (shown with their username);
+        // the picture is fetched only once accepted.
+        std::optional<Attachment::Pointer> avatar = content.avatar;
+        if (avatar && avatar->size > MaxAvatarBytes)
+            avatar.reset();
+        m_store->setProfile(from, content.name, avatar);
+        fetchAvatars();
+        return;
+    }
     qint64 conversation = m_store->directConversation(from);
     if (content.type == Protocol::Content::Type::Receipt) {
         if (conversation)
@@ -760,4 +778,118 @@ QString Messenger::safetyNumber(const QString &username) const
 void Messenger::setVerified(const QString &username, bool verified)
 {
     m_keys->setVerified(username, verified);
+}
+
+// --- Profiles ---
+
+namespace {
+
+// PNG or JPEG, by their first bytes; empty if neither.
+QString imageType(const QByteArray &data)
+{
+    if (data.startsWith("\x89PNG\r\n\x1a\n"))
+        return QStringLiteral("image/png");
+    if (data.startsWith("\xff\xd8\xff"))
+        return QStringLiteral("image/jpeg");
+    return {};
+}
+
+constexpr qint64 kAvatarReuseMs = 25LL * 24 * 3600 * 1000; // the server keeps it 30 days
+
+} // namespace
+
+bool Messenger::setMyProfile(const QString &name, const QByteArray &avatar, QString *error)
+{
+    if (!avatar.isEmpty() && (avatar.size() > MaxAvatarBytes || imageType(avatar).isEmpty())) {
+        if (error)
+            *error = tr("The picture must be a PNG or JPEG of at most %1 KB.").arg(MaxAvatarBytes / 1024);
+        return false;
+    }
+    m_store->setMyProfile(Protocol::cleanDisplayName(name), avatar);
+    shareProfileWithAll();
+    return true;
+}
+
+QString Messenger::displayName(const QString &username) const
+{
+    const QString name = m_store->profile(username).name;
+    return name.isEmpty() ? username : name;
+}
+
+void Messenger::shareProfileWithAll()
+{
+    for (const ChatStore::Conversation &c : m_store->conversations()) {
+        if (c.kind == QLatin1String("direct") && !c.request)
+            shareProfile(c.peer);
+    }
+}
+
+void Messenger::shareProfile(const QString &peer)
+{
+    const int version = m_store->myProfileVersion();
+    if (m_state != State::Online || version == 0 || m_store->profileSentVersion(peer) >= version
+        || m_profileInFlight.contains(peer) || m_store->isBlocked(peer))
+        return;
+    const ChatStore::Profile mine = m_store->myProfile();
+    std::optional<Attachment::Pointer> pointer;
+    if (!mine.avatar.isEmpty()) {
+        pointer = m_store->myAvatarPointer(now() - kAvatarReuseMs);
+        if (!pointer) {
+            // The picture first, once for everyone; then the profile to each.
+            if (m_avatarUploading)
+                return;
+            const auto sealed = Attachment::encrypt(mine.avatar);
+            if (!sealed)
+                return;
+            m_avatarUploading = true;
+            const Attachment::Pointer draft{QString(), sealed->key, sealed->digest, mine.avatar.size(),
+                                            QStringLiteral("avatar"), imageType(mine.avatar)};
+            m_client.uploadAttachment(sealed->blob, {},
+                                      [this, draft, version](const QString &id, const ChatClient::Result &result) {
+                                          m_avatarUploading = false;
+                                          if (!result.ok || m_store->myProfileVersion() != version)
+                                              return; // tried again on the next sign-in, or changed meanwhile
+                                          Attachment::Pointer uploaded = draft;
+                                          uploaded.id = id;
+                                          m_store->setMyAvatarPointer(uploaded, now());
+                                          shareProfileWithAll();
+                                      });
+            return;
+        }
+    }
+    m_profileInFlight.insert(peer);
+    sendContent(peer, Protocol::Content::profile(mine.name, pointer), [this, peer, version](bool ok, const QString &) {
+        m_profileInFlight.remove(peer);
+        if (ok)
+            m_store->setProfileSent(peer, version);
+    });
+}
+
+void Messenger::fetchAvatars()
+{
+    if (m_state != State::Online || m_avatarFetching)
+        return;
+    for (const ChatStore::Conversation &c : m_store->conversations()) {
+        if (c.kind != QLatin1String("direct") || c.request)
+            continue;
+        const std::optional<Attachment::Pointer> pointer = m_store->pendingAvatar(c.peer);
+        if (!pointer)
+            continue;
+        m_avatarFetching = true;
+        const QString peer = c.peer;
+        const Attachment::Pointer wanted = *pointer;
+        m_client.downloadAttachment(
+            wanted.id, Attachment::blobSize(wanted.size), {},
+            [this, peer, wanted](const QByteArray &blob, const ChatClient::Result &result) {
+                m_avatarFetching = false;
+                if (result.error == QLatin1String("disconnected"))
+                    return; // on the next sign-in
+                const auto image = result.ok ? Attachment::decrypt(blob, wanted.key, wanted.digest, wanted.size)
+                                             : std::nullopt;
+                // Kept only if it is a picture; otherwise the old one stays.
+                m_store->setAvatar(peer, image && !imageType(*image).isEmpty() ? *image : m_store->profile(peer).avatar);
+                fetchAvatars(); // the next one
+            });
+        return;
+    }
 }

@@ -1,10 +1,14 @@
 #pragma once
 
+#include "Attachment.h"
+
 #include <QDateTime>
 #include <QObject>
 #include <QSqlDatabase>
 #include <QString>
 #include <QStringList>
+
+#include <optional>
 
 // The conversations and their messages, kept on this computer only, as
 // Signal keeps them (see docs/how-signal-works.md): one SQLite file,
@@ -122,12 +126,35 @@ public:
     QString writeBlob(const QByteArray &blob);
     QByteArray readBlob(const QString &file) const;
 
+    // Profiles: a display name and a picture (image bytes, small), mine and
+    // others'. Mine has a version, raised by every change, and the pointer of
+    // its picture once uploaded (reused for everyone until near its expiry).
+    struct Profile
+    {
+        QString name;
+        QByteArray avatar;
+    };
+    Profile myProfile() const;
+    int myProfileVersion() const;
+    void setMyProfile(const QString &name, const QByteArray &avatar);
+    std::optional<Attachment::Pointer> myAvatarPointer(qint64 notBefore) const; // uploaded at notBefore or later
+    void setMyAvatarPointer(const Attachment::Pointer &pointer, qint64 uploadedAt);
+    Profile profile(const QString &username) const;
+    // Theirs; `avatarPointer` is the picture still to fetch (none: no picture).
+    void setProfile(const QString &username, const QString &name, const std::optional<Attachment::Pointer> &avatarPointer);
+    std::optional<Attachment::Pointer> pendingAvatar(const QString &username) const;
+    void setAvatar(const QString &username, const QByteArray &avatar);
+    // The version of my profile each person has.
+    int profileSentVersion(const QString &username) const;
+    void setProfileSent(const QString &username, int version);
+
     // The open database, for KeyStore (the same file).
     QSqlDatabase database() const { return m_db; }
 
 signals:
     void conversationsChanged();
     void messagesChanged(qint64 conversation);
+    void profileChanged(const QString &username); // empty: mine
 
 private:
     void createTables();

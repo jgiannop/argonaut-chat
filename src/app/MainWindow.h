@@ -81,6 +81,7 @@ private:
     void showSafetyNumber();
     void markCurrentRead();
     QPixmap previewFor(const ChatStore::StoredAttachment &attachment);
+    QPixmap avatarFor(const QString &username);
     QString fileLine(const ChatStore::StoredAttachment &attachment, bool shownAsImage) const;
     void notify(qint64 conversation, const QString &from, const QString &text, bool request);
     void updateUnread();
@@ -98,6 +99,8 @@ private:
     QToolButton *m_attach = nullptr;
     QHash<qint64, QPixmap> m_previews; // attachment -> its picture, decrypted in memory
     QHash<qint64, int> m_progress;     // attachment -> percent up or down
+    QHash<QString, QPixmap> m_avatars; // username -> their picture, small
+    QAction *m_profileAction = nullptr;
     qint64 m_lastNotified = 0;
     bool m_quitting = false;
     QWidget *m_composer = nullptr;
