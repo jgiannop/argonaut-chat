@@ -100,7 +100,17 @@ jobs:
           $env:PATH = "$PWD\keychain\bin;$env:PATH"
           ctest --preset windows --timeout 300 2>&1 | Tee-Object -FilePath tests.log
           $code = $LASTEXITCODE
-          if ($code -ne 0) { python .github/scripts/errors_as_notes.py tests.log "tests" "FAIL!|Loc: |QFATAL|QWARN|Failed|Timeout|Not Run|Exception|tests passed|0xc0" }
+          if ($code -ne 0) {
+            python .github/scripts/errors_as_notes.py tests.log "tests" "Failed|Timeout|Not Run|Exception|tests passed"
+            # Each one that failed, run by hand: the end of what it printed, and how it ended.
+            $env:QT_QPA_PLATFORM = "offscreen"
+            foreach ($name in (Select-String -Path tests.log -Pattern '^\s*\d+ - (\w+) \(' | ForEach-Object { $_.Matches[0].Groups[1].Value })) {
+              "== tst_$name" | Out-File -Append -Encoding utf8 failed.log
+              cmd /c "build\windows\tests\tst_$name.exe 2>&1" | Select-Object -Last 60 | Out-File -Append -Encoding utf8 failed.log
+              "exit code: $LASTEXITCODE (0x$('{0:x}' -f $LASTEXITCODE))" | Out-File -Append -Encoding utf8 failed.log
+            }
+            python .github/scripts/errors_as_notes.py failed.log "tests, by hand" "."
+          }
           exit $code
 
       - name: Put the program and its libraries together
