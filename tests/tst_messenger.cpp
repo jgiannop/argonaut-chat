@@ -1246,6 +1246,85 @@ private slots:
         QCOMPARE(bob.store->message(theirs).body, QString("Meet at 9"));
     }
 
+    void typing()
+    {
+        qint64 clock = QDateTime::currentMSecsSinceEpoch();
+        Device alice(file("alice"));
+        Device bob(file("bob"));
+        Device carol(file("carol"));
+        for (Device *d : {&alice, &bob, &carol})
+            d->messenger->setClock([&clock] { return clock; });
+        QVERIFY(signUp(alice, "alice"));
+        QVERIFY(signUp(bob, "bob"));
+        QVERIFY(signUp(carol, "carol"));
+        const qint64 toBob = startConversation(alice, "bob");
+        alice.messenger->send(toBob, "hi");
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("alice") > 0, kWait);
+        const qint64 toAlice = bob.store->directConversation("alice");
+
+        // A request: nothing either way.
+        alice.messenger->setTyping(toBob, true);
+        QTest::qWait(300);
+        QVERIFY(bob.messenger->typingIn(toAlice).isEmpty());
+        alice.messenger->setTyping(toBob, false);
+        bob.messenger->acceptRequest(toAlice);
+
+        QSignalSpy changed(bob.messenger.get(), &Messenger::typingChanged);
+        alice.messenger->setTyping(toBob, true);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.messenger->typingIn(toAlice), QStringList{"alice"}, kWait);
+        QVERIFY(!changed.isEmpty());
+        alice.messenger->setTyping(toBob, false);
+        QTRY_VERIFY_WITH_TIMEOUT(bob.messenger->typingIn(toAlice).isEmpty(), kWait);
+        // Her message ends it.
+        alice.messenger->setTyping(toBob, true);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.messenger->typingIn(toAlice).size(), 1, kWait);
+        alice.messenger->send(toBob, "there");
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(toAlice), QString("there"), kWait);
+        QVERIFY(bob.messenger->typingIn(toAlice).isEmpty());
+        // Silence: gone after a while.
+        alice.messenger->setTyping(toBob, true);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.messenger->typingIn(toAlice).size(), 1, kWait);
+        clock += Messenger::TypingShownMs + 1;
+        bob.messenger->expireTyping();
+        QVERIFY(bob.messenger->typingIn(toAlice).isEmpty());
+        alice.messenger->setTyping(toBob, false);
+
+        // Never kept for later: Bob away, nothing waits for him.
+        bob.messenger->stop();
+        QTRY_VERIFY_WITH_TIMEOUT(!m_server->isOnline("bob", 1), kWait);
+        alice.messenger->setTyping(toBob, true);
+        QTest::qWait(300);
+        QCOMPARE(m_serverStore->queuedCount("bob", 1), 0);
+        alice.messenger->setTyping(toBob, false);
+        bob.messenger->start();
+        QTRY_COMPARE_WITH_TIMEOUT(bob.messenger->state(), Messenger::State::Online, kWait);
+
+        // Off: not shown, not sent.
+        bob.messenger->setTypingIndicators(false);
+        alice.messenger->setTyping(toBob, true);
+        QTest::qWait(300);
+        QVERIFY(bob.messenger->typingIn(toAlice).isEmpty());
+        alice.messenger->setTyping(toBob, false);
+        QSignalSpy aliceSees(alice.messenger.get(), &Messenger::typingChanged);
+        bob.messenger->setTyping(toAlice, true);
+        QTest::qWait(300);
+        QVERIFY(aliceSees.isEmpty());
+        bob.messenger->setTypingIndicators(true);
+
+        // In a group: who.
+        std::optional<qint64> group;
+        alice.messenger->createGroup("Lunch", {"bob", "carol"}, [&](qint64 c, const QString &) { group = c; });
+        QTRY_VERIFY_WITH_TIMEOUT(group.has_value() && *group > 0, kWait);
+        const QString gid = alice.store->group(*group).id;
+        QTRY_VERIFY_WITH_TIMEOUT(carol.store->groupConversation(gid) > 0, kWait);
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->groupConversation(gid) > 0, kWait);
+        carol.messenger->acceptRequest(carol.store->groupConversation(gid));
+        bob.messenger->acceptRequest(bob.store->groupConversation(gid));
+        carol.messenger->setTyping(carol.store->groupConversation(gid), true);
+        QTRY_COMPARE_WITH_TIMEOUT(alice.messenger->typingIn(*group), QStringList{"carol"}, kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.messenger->typingIn(bob.store->groupConversation(gid)), QStringList{"carol"}, kWait);
+    }
+
     void keyStoreTrust()
     {
         Device alice(file("alice"));

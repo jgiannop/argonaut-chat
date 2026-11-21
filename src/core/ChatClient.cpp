@@ -245,13 +245,17 @@ std::optional<QList<ChatClient::DeviceBundle>> ChatClient::bundles(const Result 
     return out;
 }
 
-void ChatClient::send(const QString &to, const QHash<quint32, QByteArray> &messages, const Callback &done)
+void ChatClient::send(const QString &to, const QHash<quint32, QByteArray> &messages, const Callback &done,
+                      bool onlineOnly)
 {
     QJsonArray list;
     for (auto it = messages.cbegin(); it != messages.cend(); ++it)
         list.append(QJsonObject{{QStringLiteral("device"), double(it.key())},
                                 {QStringLiteral("message"), Protocol::Json::base64(it.value())}});
-    request(QStringLiteral("send"), {{QStringLiteral("to"), to}, {QStringLiteral("messages"), list}}, done);
+    QJsonObject fields{{QStringLiteral("to"), to}, {QStringLiteral("messages"), list}};
+    if (onlineOnly)
+        fields.insert(QStringLiteral("online"), true);
+    request(QStringLiteral("send"), fields, done);
 }
 
 void ChatClient::acknowledge(const QStringList &ids, const Callback &done)

@@ -37,6 +37,8 @@ Messenger::Messenger(ChatStore *store, KeyStore *keys, QObject *parent)
         if (m_state == State::Online)
             flushOutbox();
     });
+    m_typingExpiry.setInterval(1000);
+    connect(&m_typingExpiry, &QTimer::timeout, this, &Messenger::expireTyping);
     m_reconnect.setSingleShot(true);
     connect(&m_reconnect, &QTimer::timeout, this, &Messenger::connectNow);
     connect(&m_client, &ChatClient::connected, this, &Messenger::onConnected);
@@ -406,6 +408,7 @@ qint64 Messenger::send(qint64 conversation, const QString &text, qint64 replyTo)
                             content.id, QStringLiteral("sending"));
     if (message.id != 0 && quote)
         m_store->setQuote(message.id, quote->id, quote->author, quote->text);
+    m_typingSentAt.remove(conversation); // the message says it: no "stopped" needed
     if (message.id != 0 && c.expireSeconds > 0) {
         m_store->setMessageExpiry(message.id, c.expireSeconds, now()); // mine: from now
         scheduleExpiry();
@@ -443,6 +446,115 @@ void Messenger::flushOutbox()
     sendPendingReactions();
     sendPendingEdits();
     sendPendingDeletes();
+}
+
+// --- Typing ---
+
+void Messenger::setTypingIndicators(bool on)
+{
+    if (on == m_typingIndicators)
+        return;
+    if (!on) {
+        // Off: say so where I was typing, and show nobody's.
+        for (const qint64 conversation : m_typingSentAt.keys())
+            setTyping(conversation, false);
+        const QList<qint64> shown = m_typing.keys();
+        m_typing.clear();
+        for (const qint64 conversation : shown)
+            emit typingChanged(conversation);
+    }
+    m_typingIndicators = on;
+}
+
+void Messenger::setTyping(qint64 conversation, bool typing)
+{
+    if (!typing && !m_typingSentAt.contains(conversation))
+        return;
+    if (typing && (!m_typingIndicators || m_state != State::Online))
+        return;
+    if (typing && m_typingSentAt.contains(conversation) && now() - m_typingSentAt.value(conversation) < TypingRepeatMs)
+        return; // said already
+    const ChatStore::Conversation c = m_store->conversation(conversation);
+    const bool group = c.kind == QLatin1String("group");
+    if ((c.kind != QLatin1String("direct") && !group) || c.request || c.left)
+        return;
+    if (typing)
+        m_typingSentAt.insert(conversation, now());
+    else
+        m_typingSentAt.remove(conversation);
+    if (m_state != State::Online)
+        return;
+    const Protocol::Content content = Protocol::Content::typingNow(typing, group ? c.peer : QString());
+    const Done ignore = [](bool, const QString &) {};
+    if (group)
+        fanOut(othersIn(c.id), content, ignore);
+    else
+        sendContent(c.peer, content, ignore);
+}
+
+QStringList Messenger::typingIn(qint64 conversation) const
+{
+    QStringList who = m_typing.value(conversation).keys();
+    who.sort();
+    return who;
+}
+
+void Messenger::expireTyping()
+{
+    const qint64 t = now();
+    for (auto it = m_typing.begin(); it != m_typing.end();) {
+        bool changed = false;
+        for (auto person = it->begin(); person != it->end();) {
+            if (*person <= t) {
+                person = it->erase(person);
+                changed = true;
+            } else {
+                ++person;
+            }
+        }
+        const qint64 conversation = it.key();
+        it = it->isEmpty() ? m_typing.erase(it) : std::next(it);
+        if (changed)
+            emit typingChanged(conversation);
+    }
+    if (m_typing.isEmpty())
+        m_typingExpiry.stop();
+}
+
+void Messenger::stopShowingTyping(qint64 conversation, const QString &who)
+{
+    auto it = m_typing.find(conversation);
+    if (it == m_typing.end() || !it->remove(who))
+        return;
+    if (it->isEmpty())
+        m_typing.erase(it);
+    emit typingChanged(conversation);
+}
+
+void Messenger::handleTyping(const QString &from, const Protocol::Envelope &envelope, const Protocol::Content &content)
+{
+    // Off, or late (a server before 0.2 queues it): not shown.
+    if (!m_typingIndicators || qAbs(QDateTime::currentMSecsSinceEpoch() - envelope.serverTime) > 30000)
+        return;
+    qint64 conversation = 0;
+    if (!content.group.isEmpty()) {
+        conversation = m_store->groupConversation(content.group);
+        if (conversation == 0 || !m_store->isMember(conversation, from))
+            return;
+    } else {
+        conversation = m_store->directConversation(from);
+    }
+    const ChatStore::Conversation c = m_store->conversation(conversation);
+    if (conversation == 0 || c.request || c.left)
+        return; // nothing for a stranger, nor for a group I am out of
+    if (!content.typing) {
+        stopShowingTyping(conversation, from);
+        return;
+    }
+    m_typing[conversation].insert(from, now() + TypingShownMs);
+    if (!m_typingExpiry.isActive())
+        m_typingExpiry.start();
+    emit typingChanged(conversation);
 }
 
 // --- Editing ---
@@ -982,7 +1094,7 @@ void Messenger::sendContent(const QString &to, const Protocol::Content &content,
         } else {
             done(false, result.message.isEmpty() ? result.error : result.message);
         }
-    });
+    }, content.type == Protocol::Content::Type::Typing); // worthless later: never queued
 }
 
 void Messenger::sendReceipt(const QString &to, Protocol::Content::Receipt kind, const QStringList &ids)
@@ -1159,6 +1271,10 @@ void Messenger::handleContent(const QString &from, const Protocol::Envelope &env
         handleEdit(from, envelope, content, false);
         return;
     }
+    if (content.type == Protocol::Content::Type::Typing) {
+        handleTyping(from, envelope, content);
+        return;
+    }
     if (content.type == Protocol::Content::Type::Receipt) {
         m_store->advanceStatusFrom(from, content.receiptFor,
                                    content.receipt == Protocol::Content::Receipt::Read ? QStringLiteral("read")
@@ -1201,6 +1317,7 @@ void Messenger::handleContent(const QString &from, const Protocol::Envelope &env
         a.state = QStringLiteral("download");
         m_store->addAttachment(a);
     }
+    stopShowingTyping(conversation, from); // it came
     const bool request = m_store->conversation(conversation).request;
     if (!request) {
         sendReceipt(from, Protocol::Content::Receipt::Delivered, {content.id});
@@ -1910,6 +2027,8 @@ void Messenger::handleSync(const Protocol::Envelope &envelope, const Protocol::C
     case Protocol::Content::Type::Edit:
         handleEdit(username(), envelope, content, true); // edited on another device of mine
         return;
+    case Protocol::Content::Type::Typing:
+        return; // my own typing, elsewhere: nothing to show
     }
 }
 

@@ -268,6 +268,25 @@ private slots:
         QVERIFY(!menu->findChild<QAction *>(QStringLiteral("editAction")));
     }
 
+    void typingIndicatorsSetting()
+    {
+        ChatStore store(TestSupport::home() + QStringLiteral("/typing.sqlite"));
+        KeyStore keys(&store);
+        Messenger messenger(&store, &keys);
+        {
+            MainWindow window(&store, &messenger);
+            QVERIFY(window.typingIndicatorsAction()->isChecked()); // on at first, as Signal's
+            QVERIFY(messenger.typingIndicators());
+            window.typingIndicatorsAction()->setChecked(false);
+            QVERIFY(!messenger.typingIndicators());
+        }
+        // Remembered.
+        MainWindow again(&store, &messenger);
+        QVERIFY(!again.typingIndicatorsAction()->isChecked());
+        again.typingIndicatorsAction()->setChecked(true);
+        QVERIFY(messenger.typingIndicators());
+    }
+
     void othersMessagesAreUnreadUntilOpened()
     {
         ChatStore store(TestSupport::home() + QStringLiteral("/unread.sqlite"));

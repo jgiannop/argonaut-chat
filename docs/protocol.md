@@ -90,6 +90,20 @@ of UTF-8 with no letters, digits, spaces, controls or direction marks.
 `sentTo` only to my own other devices (a group's has `group`). A reaction
 never starts a conversation. Versions before 0.2 drop it unread.
 
+### Typing
+
+```json
+{"v":1, "t":"typing", "id":"<uuid>", "sent":…, "action":"started"|"stopped", "group":"<32 hex>"?}
+```
+
+"started" when someone begins writing, again every 10 s while they go on,
+"stopped" when they clear the field or stop for 5 s; a message from them
+ends it too, and shown "typing…" goes after 15 s without news. Sent with
+`"online": true` (above), so it is never queued; one more than 30 s old
+by the server's clock is ignored (a server before 0.2 queues it). Not to
+or from requests, and not at all when View › Typing Indicators is off
+(neither sent nor shown, as Signal's). Versions before 0.2 drop it unread.
+
 ### Editing
 
 The author of a text may change it, up to 24 hours after sending it, as
@@ -239,7 +253,7 @@ people). The server sends one thing unasked: `{"op":"deliver","envelope":{…}}`
 | `register` | `username`, `identityKey`, `signedPreKey`, `oneTimePreKeys` (≤ 100), `signature` | `device` (1) | `taken`, `bad-username`, `denied` |
 | `login` | `username`, `device`, `signature` | `prekeys` (one-time prekeys left) | `denied` |
 | `keys` | `username` | `devices`: `[{device, bundle}]` | `not-found`; takes one one-time prekey per device |
-| `send` | `to`, `messages`: `[{device, message}]` | | `devices` (with the right list), `not-found`, `full` |
+| `send` | `to`, `messages`: `[{device, message}]`, `online`? | | `devices` (with the right list), `not-found`, `full`; `online: true` (0.2): only to their devices connected now, never kept for later (typing indicators) |
 | `ack` | `ids` (≤ 1000) | | only the device's own messages |
 | `prekeys` | `signedPreKey`?, `oneTimePreKeys` | `prekeys` | `denied` (a signature that is not the device's) |
 

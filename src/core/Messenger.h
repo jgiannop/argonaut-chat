@@ -135,6 +135,21 @@ public:
     // Their picture (image bytes), once fetched; none for a request until accepted.
     QByteArray avatar(const QString &username) const { return m_store->profile(username).avatar; }
 
+    // Typing indicators (as Signal's): "started" again every TypingRepeatMs
+    // while typing, "stopped" when sent or cleared; theirs shown until
+    // TypingShownMs without news, or their message. Online only: never
+    // queued, and one older than 30 s by the server's clock is ignored. Off:
+    // neither sent nor shown. Not in requests.
+    static constexpr qint64 TypingRepeatMs = 10000;
+    static constexpr qint64 TypingShownMs = 15000;
+    void setTypingIndicators(bool on);
+    bool typingIndicators() const { return m_typingIndicators; }
+    void setTyping(qint64 conversation, bool typing);
+    // Who is typing there now (usernames).
+    QStringList typingIn(qint64 conversation) const;
+    // Tests (and the timer): forgets those whose time is up.
+    void expireTyping();
+
     // Editing (as Signal's): my text, sent, at most EditMs ago; everyone
     // (my other devices too) sees the new text, marked edited. Files stay.
     static constexpr qint64 EditMs = 24LL * 3600 * 1000;
@@ -179,6 +194,8 @@ signals:
     void messageReceived(qint64 conversation, const QString &from, const QString &text, bool request);
     // For people: something went wrong that they should know of.
     void problem(const QString &text);
+    // Who is typing in `conversation` changed (typingIn).
+    void typingChanged(qint64 conversation);
     // Someone reacted to a message of mine (not a removal, not in a request).
     void reactionReceived(qint64 conversation, const QString &from, const QString &emoji, const QString &onText);
     // An attachment going up or coming down.
@@ -218,6 +235,8 @@ private:
     void sendPendingDeletes();
     void handleEdit(const QString &from, const Protocol::Envelope &envelope, const Protocol::Content &content, bool mine);
     void sendPendingEdits();
+    void handleTyping(const QString &from, const Protocol::Envelope &envelope, const Protocol::Content &content);
+    void stopShowingTyping(qint64 conversation, const QString &who);
     QStringList othersIn(qint64 conversation) const;
     // Everyone I have accepted: direct peers, and members of my accepted groups.
     QStringList knownPeople() const;
@@ -276,6 +295,10 @@ private:
     QSet<qint64> m_deletesInFlight;
     QSet<qint64> m_editsInFlight;
     qint64 m_lastLocalTime = 0;
+    bool m_typingIndicators = true;
+    QHash<qint64, qint64> m_typingSentAt;            // where I said I am typing: when
+    QHash<qint64, QHash<QString, qint64>> m_typing;  // who types where: until when
+    QTimer m_typingExpiry;
     bool m_downloading = false;
     bool m_avatarUploading = false;
     bool m_avatarFetching = false;

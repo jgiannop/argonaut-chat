@@ -5,6 +5,7 @@
 
 #include <QHash>
 #include <QMainWindow>
+#include <QTimer>
 #include <QPixmap>
 
 class Messenger;
@@ -73,6 +74,7 @@ public:
     // Enter saves, Esc or ✕ leaves it as it was. cancelReply() ends it too.
     void startEdit(qint64 message);
     qint64 editing() const { return m_editing; }
+    QAction *typingIndicatorsAction() const { return m_typingAction; }
     QWidget *replyBar() const { return m_replyBar; }
     QLabel *replyLabel() const { return m_replyLabel; }
     // Delete for Me / for Everyone (`ask`: confirm first).
@@ -104,6 +106,8 @@ private:
     QPixmap previewFor(const ChatStore::StoredAttachment &attachment);
     QPixmap avatarFor(const QString &username);
     QString fileLine(const ChatStore::StoredAttachment &attachment, bool shownAsImage) const;
+    // "typing…", "Anna is typing…": empty when nobody is.
+    QString typingText(qint64 conversation) const;
     // "You", or their name: who wrote what a reply answers.
     QString quoteAuthorName(const QString &author) const;
     void notify(qint64 conversation, const QString &from, const QString &text, bool request);
@@ -137,6 +141,8 @@ private:
     QLabel *m_replyLabel = nullptr;
     qint64 m_replyTo = 0;
     qint64 m_editing = 0;
+    QTimer m_typingIdle; // "stopped" 5 s after the last key
+    QAction *m_typingAction = nullptr;
     QWidget *m_requestBar = nullptr;
     QLabel *m_requestText = nullptr;
     QPushButton *m_acceptButton = nullptr;

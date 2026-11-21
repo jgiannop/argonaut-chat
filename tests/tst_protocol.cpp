@@ -322,6 +322,22 @@ private slots:
         QVERIFY(!decodeContent(pad(head + ",\"body\":5}")));
     }
 
+    void typing()
+    {
+        const QString gid = newGroupId();
+        auto back = decodeContent(encodeContent(Content::typingNow(true, gid)));
+        QVERIFY(back && back->type == Content::Type::Typing && back->typing);
+        QCOMPARE(back->group, gid);
+        back = decodeContent(encodeContent(Content::typingNow(false)));
+        QVERIFY(back && !back->typing && back->group.isEmpty());
+        const QByteArray head = "{\"v\":1,\"t\":\"typing\",\"id\":\"" + newMessageId().toLatin1() + "\",\"sent\":1";
+        QVERIFY(decodeContent(pad(head + ",\"action\":\"started\"}")));
+        QVERIFY(!decodeContent(pad(head + "}")));
+        QVERIFY(!decodeContent(pad(head + ",\"action\":\"dancing\"}")));
+        QVERIFY(!decodeContent(pad(head + ",\"action\":true}")));
+        QVERIFY(!decodeContent(pad(head + ",\"action\":\"started\",\"group\":5}")));
+    }
+
     void contentFromStrangers_data()
     {
         QTest::addColumn<QByteArray>("json");

@@ -427,6 +427,13 @@ QJsonObject ChatServer::send(const Client &client, const QJsonObject &request)
         return fail(QStringLiteral("devices"), QStringLiteral("Their devices have changed."),
                     {{QStringLiteral("devices"), expected}});
     }
+    // "online": only to the devices connected now, kept no longer than until
+    // they acknowledge it (typing indicators: worthless later). Others get nothing.
+    if (request.value(QStringLiteral("online")) == QJsonValue(true)) {
+        devices.erase(std::remove_if(devices.begin(), devices.end(),
+                                     [&](quint32 device) { return !m_online.contains(deviceKey(to, device)); }),
+                      devices.end());
+    }
     for (quint32 device : devices) {
         if (m_store->queuedCount(to, device) >= ServerStore::MaxQueuedMessages)
             return fail(QStringLiteral("full"), QStringLiteral("Their queue is full."));

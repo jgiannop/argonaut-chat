@@ -62,7 +62,7 @@ struct Quote
 
 struct Content
 {
-    enum class Type { Text, Receipt, Profile, Group, Leave, Timer, Reaction, Delete, Edit };
+    enum class Type { Text, Receipt, Profile, Group, Leave, Timer, Reaction, Delete, Edit, Typing };
     enum class Receipt { Delivered, Read };
 
     Type type = Type::Text;
@@ -83,6 +83,8 @@ struct Content
     // Text: the message it answers (a reply). Reaction, Delete, Edit: the
     // message it is about (its id and author; `text` unused).
     std::optional<Quote> quote;
+    // Typing: started (true) or stopped.
+    bool typing = false;
     // Reaction: one emoji (`isValidReaction`); `remove`: taken back.
     QString emoji;
     bool remove = false;
@@ -104,6 +106,8 @@ struct Content
     static Content leave(const QString &group);
     static Content timer(qint64 seconds, const QString &group = QString());
     // On the message `targetId` by `targetAuthor`; empty `emoji` with `remove`.
+    // I am typing (or stopped) in a direct conversation, or a group's.
+    static Content typingNow(bool started, const QString &group = QString());
     // My message `targetId` now says `body` (`me`: my username).
     static Content edit(const QString &targetId, const QString &me, const QString &body, const QString &group = QString());
     // Deletes my message `targetId` for everyone (`me`: my username).

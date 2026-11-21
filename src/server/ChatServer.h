@@ -101,6 +101,8 @@ public:
     // Port 0: any free port (see port()).
     bool listen(const QHostAddress &address = QHostAddress::LocalHost, quint16 port = 0);
     quint16 port() const;
+    // A device signed in on a connection now (tests).
+    bool isOnline(const QString &username, quint32 device) const { return m_online.contains(deviceKey(username, device)); }
     QString errorString() const;
     int connectionCount() const { return int(m_clients.size()); }
 

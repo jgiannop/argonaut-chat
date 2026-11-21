@@ -63,8 +63,10 @@ public:
     // The answer's devices: see bundles().
     void fetchKeys(const QString &username, const Callback &done);
     static std::optional<QList<DeviceBundle>> bundles(const Result &result);
-    // One CipherMessage per device of theirs.
-    void send(const QString &to, const QHash<quint32, QByteArray> &messages, const Callback &done);
+    // One CipherMessage per device of theirs. `onlineOnly`: to those connected
+    // now, never queued for later (a server before 0.2 queues it anyway).
+    void send(const QString &to, const QHash<quint32, QByteArray> &messages, const Callback &done,
+              bool onlineOnly = false);
     // Envelopes safely kept: the server forgets them.
     void acknowledge(const QStringList &ids, const Callback &done = {});
     void uploadPreKeys(const std::optional<Protocol::PublicSignedPreKey> &signedPreKey,

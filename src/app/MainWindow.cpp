@@ -605,6 +605,19 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
         // The field grows with what is written, up to six lines.
         const int lines = qBound(1, int(m_compose->document()->size().height()), 6);
         m_compose->setFixedHeight(qMax(40, lines * m_compose->fontMetrics().lineSpacing() + 18));
+        // Typing: said while there is something new written, and for 5 s after the last key.
+        if (m_messenger && m_current != 0 && m_editing == 0) {
+            const bool typing = !m_compose->toPlainText().trimmed().isEmpty();
+            m_messenger->setTyping(m_current, typing);
+            if (typing)
+                m_typingIdle.start();
+        }
+    });
+    m_typingIdle.setSingleShot(true);
+    m_typingIdle.setInterval(5000);
+    connect(&m_typingIdle, &QTimer::timeout, this, [this] {
+        if (m_messenger && m_current != 0)
+            m_messenger->setTyping(m_current, false);
     });
     connect(m_conversations, &QListWidget::currentItemChanged, this, [this](QListWidgetItem *item) {
         if (item)
@@ -655,6 +668,20 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
         });
         connect(m_messenger, &Messenger::problem, this, &MainWindow::showNotice);
         connect(m_messenger, &Messenger::messageReceived, this, &MainWindow::notify);
+        connect(m_messenger, &Messenger::typingChanged, this, [this](qint64 conversation) {
+            if (conversation == m_current)
+                updateHeader();
+            // In the list too, in place of the last message.
+            for (int i = 0; i < m_conversations->count(); ++i) {
+                QListWidgetItem *item = m_conversations->item(i);
+                if (item->data(IdRole).toLongLong() != conversation)
+                    continue;
+                const QString typing = typingText(conversation);
+                const ChatStore::Conversation c = m_store->conversation(conversation);
+                item->setData(LastTextRole, !typing.isEmpty() ? typing
+                                            : c.lastDeleted ? tr("This message was deleted") : c.lastText);
+            }
+        });
         connect(m_messenger, &Messenger::reactionReceived, this,
                 [this](qint64 conversation, const QString &from, const QString &emoji, const QString &onText) {
                     notify(conversation, from, tr("Reacted %1 to “%2”").arg(emoji, onText), false);
@@ -755,6 +782,19 @@ void MainWindow::buildMenus()
         notificationGroup->addAction(a);
         connect(a, &QAction::triggered, a, [content = content] { Notifications::save(content); });
     }
+    m_typingAction = view->addAction(tr("Typing Indicators"));
+    m_typingAction->setObjectName(QStringLiteral("typingIndicatorsAction"));
+    m_typingAction->setCheckable(true);
+    m_typingAction->setToolTip(tr("Show when others are typing, and let them see when you are"));
+    m_typingAction->setChecked(QSettings().value(QStringLiteral("privacy/typingIndicators"), true).toBool());
+    if (m_messenger)
+        m_messenger->setTypingIndicators(m_typingAction->isChecked());
+    m_typingAction->setEnabled(m_messenger != nullptr);
+    connect(m_typingAction, &QAction::toggled, this, [this](bool on) {
+        QSettings().setValue(QStringLiteral("privacy/typingIndicators"), on);
+        if (m_messenger)
+            m_messenger->setTypingIndicators(on);
+    });
     QMenu *themes = view->addMenu(tr("Theme"));
     connect(themes, &QMenu::aboutToShow, this, [themes] {
         themes->clear();
@@ -808,8 +848,11 @@ void MainWindow::reloadConversations()
 
 void MainWindow::openConversation(qint64 id)
 {
-    if (id != m_current)
+    if (id != m_current) {
         cancelReply(); // a reply belongs to its conversation
+        if (m_messenger && m_current != 0)
+            m_messenger->setTyping(m_current, false);
+    }
     m_current = id;
     // The list shows which one is open, however it was opened.
     {
@@ -874,6 +917,8 @@ void MainWindow::updateHeader()
         m_subtitle->setText(direct ? QStringLiteral("@") + c.peer : c.peer);
     if (c.expireSeconds > 0)
         m_subtitle->setText(m_subtitle->text() + QStringLiteral(" · ⏱ ") + Messenger::describeTimer(c.expireSeconds));
+    if (const QString typing = typingText(c.id); !typing.isEmpty())
+        m_subtitle->setText(typing);
     if (m_timerMenu) {
         m_timerMenu->setEnabled(m_messenger && c.id != 0 && !c.left && !c.request);
         for (QAction *a : m_timerMenu->actions())
@@ -1173,6 +1218,22 @@ void MainWindow::attachFile(const QString &path)
     }
     m_compose->clear();
     cancelReply();
+}
+
+QString MainWindow::typingText(qint64 conversation) const
+{
+    if (!m_messenger)
+        return {};
+    const QStringList who = m_messenger->typingIn(conversation);
+    if (who.isEmpty())
+        return {};
+    if (m_store->conversation(conversation).kind != QLatin1String("group"))
+        return tr("typing…");
+    if (who.size() == 1)
+        return tr("%1 is typing…").arg(m_messenger->displayName(who.first()));
+    if (who.size() == 2)
+        return tr("%1 and %2 are typing…").arg(m_messenger->displayName(who.at(0)), m_messenger->displayName(who.at(1)));
+    return tr("%1 people are typing…").arg(who.size());
 }
 
 QString MainWindow::quoteAuthorName(const QString &author) const

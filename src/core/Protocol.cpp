@@ -234,6 +234,17 @@ Content Content::reaction(const QString &targetId, const QString &targetAuthor, 
     return content;
 }
 
+Content Content::typingNow(bool started, const QString &group)
+{
+    Content content;
+    content.type = Type::Typing;
+    content.id = newMessageId();
+    content.sentAt = QDateTime::currentMSecsSinceEpoch();
+    content.typing = started;
+    content.group = group;
+    return content;
+}
+
 Content Content::edit(const QString &targetId, const QString &me, const QString &body, const QString &group)
 {
     Content content;
@@ -425,6 +436,13 @@ QByteArray encodeContent(const Content &content)
             json.insert(QStringLiteral("group"), content.group);
         if (!content.sentTo.isEmpty())
             json.insert(QStringLiteral("sentTo"), content.sentTo);
+    } else if (content.type == Content::Type::Typing) {
+        if (!content.group.isEmpty() && !isValidGroupId(content.group))
+            return {};
+        json.insert(QStringLiteral("t"), QStringLiteral("typing"));
+        json.insert(QStringLiteral("action"), content.typing ? QStringLiteral("started") : QStringLiteral("stopped"));
+        if (!content.group.isEmpty())
+            json.insert(QStringLiteral("group"), content.group);
     } else if (content.type == Content::Type::Edit) {
         if (!content.quote || !isValidMessageId(content.quote->id) || !isValidUsername(content.quote->author)
             || content.body.toUtf8().size() > MaxTextBytes
@@ -581,6 +599,17 @@ std::optional<Content> decodeContent(const QByteArray &padded)
         content.expireSeconds = *seconds;
         content.group = group.toString();
         content.sentTo = sentTo.toString();
+        return content;
+    }
+    if (type == QLatin1String("typing")) {
+        content.type = Content::Type::Typing;
+        const QString action = json.value(QStringLiteral("action")).toString();
+        const QJsonValue group = json.value(QStringLiteral("group"));
+        if ((action != QLatin1String("started") && action != QLatin1String("stopped"))
+            || (!group.isUndefined() && (!group.isString() || !isValidGroupId(group.toString()))))
+            return std::nullopt;
+        content.typing = action == QLatin1String("started");
+        content.group = group.toString();
         return content;
     }
     if (type == QLatin1String("delete") || type == QLatin1String("edit")) {
