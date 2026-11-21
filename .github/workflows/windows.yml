@@ -124,7 +124,6 @@ jobs:
             Copy-Item build\windows\argonaut-chat.exe dist\
             # vcpkg's libraries, which its toolchain copied beside the program.
             Copy-Item build\windows\*.dll dist\
-            Copy-Item keychain\bin\*.dll dist\
             Copy-Item LICENSE dist\LICENSE.txt
           } catch {
             Write-Output "::error title=build: folder::$_"
@@ -139,6 +138,9 @@ jobs:
             python .github/scripts/errors_as_notes.py deploy.log "build: windeployqt" "."
             exit 1
           }
+          # QtKeychain after windeployqt: by its "qt6" name it takes it for one of
+          # Qt's own and looks for it in Qt's folder. It needs only Qt Core.
+          Copy-Item keychain\bin\*.dll dist\
           # Microsoft's C++ runtime (VCRUNTIME140.dll and the others): a fresh
           # Windows doesn't have it, and the program won't start.
           $crt = Get-ChildItem "$env:VCToolsRedistDir\x64" -Directory -Filter "Microsoft.VC*.CRT" | Select-Object -First 1
