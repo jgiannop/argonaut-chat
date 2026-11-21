@@ -35,7 +35,7 @@ public:
 #ifdef Q_OS_WIN
         // Windows takes its folders from the system, not from the variables
         // above: Qt's test folders, and settings in a file here, not the registry.
-        QStandardPaths::setTestMode(true);
+        QStandardPaths::setTestModeEnabled(true);
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_dir.path() + QStringLiteral("/config"));
 #endif
