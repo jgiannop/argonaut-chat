@@ -90,6 +90,21 @@ of UTF-8 with no letters, digits, spaces, controls or direction marks.
 `sentTo` only to my own other devices (a group's has `group`). A reaction
 never starts a conversation. Versions before 0.2 drop it unread.
 
+### Editing
+
+The author of a text may change it, up to 24 hours after sending it, as
+Signal allows; its files stay:
+
+```json
+{"v":1, "t":"edit", "id":"<uuid>", "sent":…, "target":{"id":"<its uuid>", "author":"<the sender>"},
+ "body":"Meet at 6", "group":"<32 hex>"?, "sentTo":"<username>"?}
+```
+
+The same checks as a delete (below): only the author's own message, in
+its conversation, within 48 hours by the server's clock; an edit older
+than the one already applied (by `sent`) is ignored. It shows as edited.
+Replies keep the words they quoted. Versions before 0.2 drop it unread.
+
 ### Deleting for everyone
 
 The author of a message may delete it for everyone, up to 24 hours after

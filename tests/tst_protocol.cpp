@@ -304,6 +304,24 @@ private slots:
                                    + "\",\"author\":\"bob\"},\"sentTo\":7}")));
     }
 
+    void edits()
+    {
+        const QString target = newMessageId();
+        auto back = decodeContent(encodeContent(Content::edit(target, "alice", "Meet at 6")));
+        QVERIFY(back);
+        QCOMPARE(back->type, Content::Type::Edit);
+        QCOMPARE(back->quote->id, target);
+        QCOMPARE(back->quote->author, QString("alice"));
+        QCOMPARE(back->body, QString("Meet at 6"));
+        QVERIFY(encodeContent(Content::edit(target, "alice", QString(MaxTextBytes + 1, QLatin1Char('x')))).isEmpty());
+        QVERIFY(encodeContent(Content::edit("x", "alice", "y")).isEmpty());
+        const QByteArray head = "{\"v\":1,\"t\":\"edit\",\"id\":\"" + newMessageId().toLatin1() + "\",\"sent\":1,"
+                                "\"target\":{\"id\":\"" + target.toLatin1() + "\",\"author\":\"bob\"}";
+        QVERIFY(decodeContent(pad(head + ",\"body\":\"new\"}")));
+        QVERIFY(!decodeContent(pad(head + "}")));
+        QVERIFY(!decodeContent(pad(head + ",\"body\":5}")));
+    }
+
     void contentFromStrangers_data()
     {
         QTest::addColumn<QByteArray>("json");

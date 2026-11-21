@@ -135,6 +135,12 @@ public:
     // Their picture (image bytes), once fetched; none for a request until accepted.
     QByteArray avatar(const QString &username) const { return m_store->profile(username).avatar; }
 
+    // Editing (as Signal's): my text, sent, at most EditMs ago; everyone
+    // (my other devices too) sees the new text, marked edited. Files stay.
+    static constexpr qint64 EditMs = 24LL * 3600 * 1000;
+    bool canEdit(qint64 message) const;
+    bool edit(qint64 message, const QString &text);
+
     // Deleting (as Signal's). For me: from this computer only, any message.
     // For everyone: mine, sent, at most DeleteForEveryoneMs ago; the others
     // and my other devices keep only "This message was deleted".
@@ -210,6 +216,8 @@ private:
     void sendPendingReactions();
     void handleDelete(const QString &from, const Protocol::Envelope &envelope, const Protocol::Content &content, bool mine);
     void sendPendingDeletes();
+    void handleEdit(const QString &from, const Protocol::Envelope &envelope, const Protocol::Content &content, bool mine);
+    void sendPendingEdits();
     QStringList othersIn(qint64 conversation) const;
     // Everyone I have accepted: direct peers, and members of my accepted groups.
     QStringList knownPeople() const;
@@ -241,6 +249,9 @@ private:
     void replenishPreKeys();
     void rotateSignedPreKey();
     qint64 now() const;
+    // now(), but later than the last one it gave: two edits or reactions in
+    // the same millisecond still have their order (and the newer one stays pending).
+    qint64 nextLocalTime();
 
     ChatStore *m_store;
     KeyStore *m_keys;
@@ -263,6 +274,8 @@ private:
     QSet<qint64> m_inFlight; // outbox messages being sent
     QSet<qint64> m_reactionsInFlight; // messages whose reaction of mine is being sent
     QSet<qint64> m_deletesInFlight;
+    QSet<qint64> m_editsInFlight;
+    qint64 m_lastLocalTime = 0;
     bool m_downloading = false;
     bool m_avatarUploading = false;
     bool m_avatarFetching = false;

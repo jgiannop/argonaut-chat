@@ -59,6 +59,7 @@ public:
         QString quoteText;
         bool isReply() const { return !quoteAuthor.isEmpty(); }
         bool deleted = false; // deleted for everyone: no text, files or reactions left
+        qint64 editedAt = 0;  // ms; 0: never edited
         bool outgoing() const { return author.isEmpty(); }
     };
 
@@ -128,6 +129,12 @@ public:
     qint64 nextExpiry() const;
     // A note in the conversation, not a message from anyone.
     qint64 addSystemNote(qint64 conversation, const QString &text, const QDateTime &at);
+
+    // Editing: its text now `body`, edited at `at` (ms). `pending`: mine, to be sent.
+    void editMessage(qint64 message, const QString &body, qint64 at, bool pending = false);
+    QList<qint64> pendingEdits() const;
+    // Sent: the edit made at `at` (a newer one stays pending).
+    void setEditSent(qint64 message, qint64 at);
 
     // Deleting. For me: gone from here, with its files and reactions.
     void deleteMessage(qint64 message);

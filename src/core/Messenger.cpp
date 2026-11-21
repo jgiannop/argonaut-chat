@@ -252,6 +252,12 @@ void Messenger::replenishPreKeys()
     });
 }
 
+qint64 Messenger::nextLocalTime()
+{
+    m_lastLocalTime = qMax(now(), m_lastLocalTime + 1);
+    return m_lastLocalTime;
+}
+
 qint64 Messenger::now() const
 {
     return m_clock ? m_clock() : QDateTime::currentMSecsSinceEpoch();
@@ -435,7 +441,97 @@ void Messenger::flushOutbox()
     for (const ChatStore::Message &message : m_store->outbox())
         deliver(message);
     sendPendingReactions();
+    sendPendingEdits();
     sendPendingDeletes();
+}
+
+// --- Editing ---
+
+bool Messenger::canEdit(qint64 message) const
+{
+    const ChatStore::Message m = m_store->message(message);
+    const ChatStore::Conversation c = m_store->conversation(m.conversation);
+    if (m.id == 0 || !m.outgoing() || m.system || m.deleted)
+        return false;
+    if (c.kind == QLatin1String("self"))
+        return true; // a note: whenever
+    const bool sent = m.status == QLatin1String("sent") || m.status == QLatin1String("delivered")
+                      || m.status == QLatin1String("read");
+    return sent && !m.uid.isEmpty() && (c.kind == QLatin1String("direct") || c.kind == QLatin1String("group")) && !c.left
+           && now() - m.sentAt.toMSecsSinceEpoch() <= EditMs;
+}
+
+bool Messenger::edit(qint64 message, const QString &text)
+{
+    const ChatStore::Message m = m_store->message(message);
+    const bool hasFiles = !m_store->attachments(message).isEmpty();
+    if (!canEdit(message) || text == m.body || (text.isEmpty() && !hasFiles)
+        || text.toUtf8().size() > Protocol::MaxTextBytes)
+        return false;
+    const bool note = m_store->conversation(m.conversation).kind == QLatin1String("self");
+    m_store->editMessage(message, text, qMax(nextLocalTime(), m.editedAt + 1), !note);
+    sendPendingEdits();
+    return true;
+}
+
+void Messenger::sendPendingEdits()
+{
+    if (m_state != State::Online)
+        return;
+    for (const qint64 id : m_store->pendingEdits()) {
+        if (m_editsInFlight.contains(id))
+            continue; // the newest goes once this one is done
+        const ChatStore::Message m = m_store->message(id);
+        const ChatStore::Conversation c = m_store->conversation(m.conversation);
+        const bool group = c.kind == QLatin1String("group");
+        if ((c.kind != QLatin1String("direct") && !group) || c.left) {
+            m_store->setEditSent(id, m.editedAt);
+            continue;
+        }
+        const Protocol::Content content = Protocol::Content::edit(m.uid, username(), m.body, group ? c.peer : QString());
+        Protocol::Content copy = content;
+        if (!group)
+            copy.sentTo = c.peer;
+        const qint64 at = m.editedAt;
+        m_editsInFlight.insert(id);
+        const Done done = [this, id, at, copy](bool ok, const QString &error) {
+            m_editsInFlight.remove(id);
+            if (!ok && (error == QLatin1String("disconnected") || error == QLatin1String("rate-limited")))
+                return; // again with the outbox
+            m_store->setEditSent(id, at);
+            if (ok)
+                syncToMyDevices(copy);
+            sendPendingEdits(); // a newer one made meanwhile
+        };
+        if (group)
+            fanOut(othersIn(c.id), content, done);
+        else
+            sendContent(c.peer, content, done);
+    }
+}
+
+void Messenger::handleEdit(const QString &from, const Protocol::Envelope &envelope, const Protocol::Content &content,
+                           bool mine)
+{
+    if (!content.quote || content.quote->author != from)
+        return; // only one's own messages
+    qint64 conversation = 0;
+    if (!content.group.isEmpty()) {
+        conversation = m_store->groupConversation(content.group);
+        if (conversation == 0 || !m_store->isMember(conversation, from))
+            return;
+    } else {
+        conversation = m_store->directConversation(mine ? content.sentTo : from);
+    }
+    const qint64 target = conversation ? m_store->messageByUid(conversation, content.quote->id) : 0;
+    const ChatStore::Message m = m_store->message(target);
+    // Theirs (mine, from another device of mine), not long ago by the server's
+    // clock, and newer than the edit already here (they may come out of order).
+    if (target == 0 || m.system || m.deleted || (mine ? !m.outgoing() : m.author != from)
+        || envelope.serverTime - m.sentAt.toMSecsSinceEpoch() > 2 * EditMs || content.sentAt < m.editedAt
+        || (content.body.isEmpty() && m_store->attachments(target).isEmpty()))
+        return;
+    m_store->editMessage(target, content.body, content.sentAt);
 }
 
 // --- Deleting ---
@@ -543,7 +639,7 @@ bool Messenger::react(qint64 message, const QString &emoji)
         return false;
     if (emoji.isEmpty() && m_store->myReaction(message).isEmpty())
         return true; // nothing to take back
-    m_store->setReaction(message, QString(), emoji, now(), true);
+    m_store->setReaction(message, QString(), emoji, nextLocalTime(), true);
     sendPendingReactions();
     return true;
 }
@@ -1057,6 +1153,10 @@ void Messenger::handleContent(const QString &from, const Protocol::Envelope &env
     }
     if (content.type == Protocol::Content::Type::Delete) {
         handleDelete(from, envelope, content, false);
+        return;
+    }
+    if (content.type == Protocol::Content::Type::Edit) {
+        handleEdit(from, envelope, content, false);
         return;
     }
     if (content.type == Protocol::Content::Type::Receipt) {
@@ -1806,6 +1906,9 @@ void Messenger::handleSync(const Protocol::Envelope &envelope, const Protocol::C
         return;
     case Protocol::Content::Type::Delete:
         handleDelete(username(), envelope, content, true); // deleted on another device of mine
+        return;
+    case Protocol::Content::Type::Edit:
+        handleEdit(username(), envelope, content, true); // edited on another device of mine
         return;
     }
 }

@@ -62,13 +62,13 @@ struct Quote
 
 struct Content
 {
-    enum class Type { Text, Receipt, Profile, Group, Leave, Timer, Reaction, Delete };
+    enum class Type { Text, Receipt, Profile, Group, Leave, Timer, Reaction, Delete, Edit };
     enum class Receipt { Delivered, Read };
 
     Type type = Type::Text;
     QString id;         // this message's id
     qint64 sentAt = 0;  // ms since the epoch, UTC, as the sender's clock says
-    QString body;       // Text (with attachments: their caption, maybe empty)
+    QString body;       // Text (with attachments: their caption, maybe empty); Edit: the new text
     QList<Attachment::Pointer> attachments; // Text
     Receipt receipt = Receipt::Delivered;
     QStringList receiptFor; // Receipt: the ids of the messages it is for
@@ -80,8 +80,8 @@ struct Content
     // Text, to my own other devices only: whom I sent it to (a username), so
     // they show it as mine (a group's has `group` instead). Timer, Reaction too.
     QString sentTo;
-    // Text: the message it answers (a reply). Reaction, Delete: the message
-    // it is about (its id and author; `text` unused).
+    // Text: the message it answers (a reply). Reaction, Delete, Edit: the
+    // message it is about (its id and author; `text` unused).
     std::optional<Quote> quote;
     // Reaction: one emoji (`isValidReaction`); `remove`: taken back.
     QString emoji;
@@ -104,6 +104,8 @@ struct Content
     static Content leave(const QString &group);
     static Content timer(qint64 seconds, const QString &group = QString());
     // On the message `targetId` by `targetAuthor`; empty `emoji` with `remove`.
+    // My message `targetId` now says `body` (`me`: my username).
+    static Content edit(const QString &targetId, const QString &me, const QString &body, const QString &group = QString());
     // Deletes my message `targetId` for everyone (`me`: my username).
     static Content deletion(const QString &targetId, const QString &me, const QString &group = QString());
     static Content reaction(const QString &targetId, const QString &targetAuthor, const QString &emoji, bool remove,

@@ -223,6 +223,51 @@ private slots:
         QCOMPARE(menu->actions().first()->objectName(), QStringLiteral("deleteForMeAction"));
     }
 
+    void editAMessage()
+    {
+        ChatStore store(TestSupport::home() + QStringLiteral("/editing.sqlite"));
+        KeyStore keys(&store);
+        Messenger messenger(&store, &keys);
+        MainWindow window(&store, &messenger);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        const int editedRole = Qt::UserRole + 20;
+        QTest::keyClicks(window.composeField(), QStringLiteral("Buy bred"));
+        QTest::keyClick(window.composeField(), Qt::Key_Return);
+        const qint64 note = store.messages(store.noteToSelf()).last().id;
+        std::unique_ptr<QMenu> menu(window.messageMenu(note));
+        QAction *edit = menu->findChild<QAction *>(QStringLiteral("editAction"));
+        QVERIFY(edit);
+        edit->trigger();
+        QCOMPARE(window.editing(), note);
+        QCOMPARE(window.composeField()->toPlainText(), QStringLiteral("Buy bred"));
+        QVERIFY(window.replyBar()->isVisible());
+        QVERIFY(window.replyLabel()->text().startsWith(QStringLiteral("Editing")));
+        // Esc: as it was, the field empty again.
+        QTest::keyClick(window.composeField(), Qt::Key_Escape);
+        QCOMPARE(window.editing(), 0);
+        QVERIFY(window.composeField()->toPlainText().isEmpty());
+        QCOMPARE(store.message(note).body, QStringLiteral("Buy bred"));
+
+        window.startEdit(note);
+        QTest::keyClick(window.composeField(), Qt::Key_Backspace);
+        QTest::keyClick(window.composeField(), Qt::Key_Backspace);
+        QTest::keyClicks(window.composeField(), QStringLiteral("ead"));
+        QTest::keyClick(window.composeField(), Qt::Key_Return);
+        QCOMPARE(store.message(note).body, QStringLiteral("Buy bread"));
+        QCOMPARE(window.editing(), 0);
+        QVERIFY(window.composeField()->toPlainText().isEmpty());
+        QCOMPARE(window.messages()->count(), 1); // the same message, not a new one
+        QCOMPARE(window.messages()->item(0)->text(), QStringLiteral("Buy bread"));
+        QVERIFY(window.messages()->item(0)->data(editedRole).toBool());
+        // Theirs: no Edit.
+        const qint64 anna = store.addConversation(QStringLiteral("direct"), QStringLiteral("anna"), QStringLiteral("anna"));
+        const qint64 theirs = store.addMessage(anna, QStringLiteral("hi"), QStringLiteral("anna")).id;
+        window.openConversation(anna);
+        menu.reset(window.messageMenu(theirs));
+        QVERIFY(!menu->findChild<QAction *>(QStringLiteral("editAction")));
+    }
+
     void othersMessagesAreUnreadUntilOpened()
     {
         ChatStore store(TestSupport::home() + QStringLiteral("/unread.sqlite"));

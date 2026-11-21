@@ -69,6 +69,10 @@ public:
     void replyTo(qint64 message);
     void cancelReply();
     qint64 replyingTo() const { return m_replyTo; }
+    // Edit (mine, as Signal's): the text back in the field, the bar says so;
+    // Enter saves, Esc or ✕ leaves it as it was. cancelReply() ends it too.
+    void startEdit(qint64 message);
+    qint64 editing() const { return m_editing; }
     QWidget *replyBar() const { return m_replyBar; }
     QLabel *replyLabel() const { return m_replyLabel; }
     // Delete for Me / for Everyone (`ask`: confirm first).
@@ -132,6 +136,7 @@ private:
     QWidget *m_replyBar = nullptr;
     QLabel *m_replyLabel = nullptr;
     qint64 m_replyTo = 0;
+    qint64 m_editing = 0;
     QWidget *m_requestBar = nullptr;
     QLabel *m_requestText = nullptr;
     QPushButton *m_acceptButton = nullptr;

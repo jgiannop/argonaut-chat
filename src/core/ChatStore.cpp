@@ -137,6 +137,9 @@ void ChatStore::createTables()
     addColumn(QStringLiteral("messages"), QStringLiteral("expire_seconds"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
     addColumn(QStringLiteral("messages"), QStringLiteral("expires_at"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
     addColumn(QStringLiteral("messages"), QStringLiteral("system"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
+    // Added with editing.
+    addColumn(QStringLiteral("messages"), QStringLiteral("edited_at"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
+    addColumn(QStringLiteral("messages"), QStringLiteral("edit_pending"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
     // Added with deleting for everyone.
     addColumn(QStringLiteral("messages"), QStringLiteral("deleted"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
     addColumn(QStringLiteral("messages"), QStringLiteral("delete_pending"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
@@ -184,7 +187,7 @@ namespace {
 
 const QString kMessageColumns =
     QStringLiteral("id, conversation, author, body, sent_at, status, uid, expire_seconds, expires_at, system,"
-                   " quote_uid, quote_author, quote_text, deleted");
+                   " quote_uid, quote_author, quote_text, deleted, edited_at");
 
 ChatStore::Message messageFrom(const QSqlQuery &q)
 {
@@ -203,6 +206,7 @@ ChatStore::Message messageFrom(const QSqlQuery &q)
     m.quoteAuthor = q.value(11).toString();
     m.quoteText = q.value(12).toString();
     m.deleted = q.value(13).toBool();
+    m.editedAt = q.value(14).toLongLong();
     return m;
 }
 
@@ -473,6 +477,40 @@ QStringList dropAttachments(QSqlDatabase &db, qint64 message)
 }
 
 } // namespace
+
+void ChatStore::editMessage(qint64 message, const QString &body, qint64 at, bool pending)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("UPDATE messages SET body = ?, edited_at = ?, edit_pending = ? WHERE id = ? AND deleted = 0"));
+    q.addBindValue(text(body));
+    q.addBindValue(at);
+    q.addBindValue(pending ? 1 : 0);
+    q.addBindValue(message);
+    if (q.exec()) {
+        emit messagesChanged(this->message(message).conversation);
+        emit conversationsChanged();
+    }
+}
+
+QList<qint64> ChatStore::pendingEdits() const
+{
+    QList<qint64> out;
+    QSqlQuery q(m_db);
+    if (q.exec(QStringLiteral("SELECT id FROM messages WHERE edit_pending = 1 AND deleted = 0 ORDER BY id"))) {
+        while (q.next())
+            out << q.value(0).toLongLong();
+    }
+    return out;
+}
+
+void ChatStore::setEditSent(qint64 message, qint64 at)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("UPDATE messages SET edit_pending = 0 WHERE id = ? AND edited_at = ?"));
+    q.addBindValue(message);
+    q.addBindValue(at);
+    q.exec();
+}
 
 void ChatStore::deleteMessage(qint64 message)
 {

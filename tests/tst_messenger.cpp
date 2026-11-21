@@ -1147,6 +1147,105 @@ private slots:
         QCOMPARE(bob.last(toAlice), QString("keep me"));
     }
 
+    void editing()
+    {
+        qint64 clock = QDateTime::currentMSecsSinceEpoch();
+        Device alice(file("alice"));
+        Device bob(file("bob"));
+        Device dave(file("dave"));
+        for (Device *d : {&alice, &bob, &dave})
+            d->messenger->setClock([&clock] { return clock; });
+        QVERIFY(signUp(alice, "alice"));
+        QVERIFY(signUp(bob, "bob"));
+        QVERIFY(signUp(dave, "dave"));
+        const qint64 toBob = startConversation(alice, "bob");
+        const qint64 plan = alice.messenger->send(toBob, "Meet at 5");
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("alice") > 0, kWait);
+        const qint64 toAlice = bob.store->directConversation("alice");
+        bob.messenger->acceptRequest(toAlice);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(toAlice), QString("Meet at 5"), kWait);
+        const qint64 theirs = bob.store->messages(toAlice).last().id;
+        const qint64 reply = bob.messenger->send(toAlice, "ok", theirs);
+        QTRY_COMPARE_WITH_TIMEOUT(alice.last(toBob), QString("ok"), kWait);
+
+        Device laptop(file("laptop"));
+        std::optional<QString> code;
+        std::optional<bool> linked;
+        laptop.messenger->linkThisDevice(m_url, [&](const QString &shown) { code = shown; },
+                                         [&](bool ok, const QString &) { linked = ok; });
+        QTRY_VERIFY_WITH_TIMEOUT(code.has_value(), kWait);
+        alice.messenger->linkDevice(*code, [](bool, const QString &) {});
+        QTRY_VERIFY_WITH_TIMEOUT(linked.has_value() && *linked, kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(alice.messenger->myDevices().size(), 2, kWait);
+        const QString planUid = alice.store->message(plan).uid;
+        // Her laptop learns of it now (it was sent before the link): a new message, then an edit of that.
+        const qint64 later = alice.messenger->send(toBob, "Bring the map");
+        const QString laterUid = alice.store->message(later).uid;
+        const qint64 laptopToBob = [&] {
+            [[maybe_unused]] const bool there = QTest::qWaitFor([&] { return laptop.store->directConversation("bob") > 0; }, kWait);
+            return laptop.store->directConversation("bob");
+        }();
+        QTRY_VERIFY_WITH_TIMEOUT(laptop.store->messageByUid(laptopToBob, laterUid) > 0, kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(toAlice), QString("Bring the map"), kWait);
+
+        // Only mine, only sent.
+        QVERIFY(!bob.messenger->canEdit(theirs));
+        QVERIFY(!bob.messenger->edit(theirs, "Meet at 6"));
+        QVERIFY(alice.messenger->canEdit(plan));
+        QVERIFY(!alice.messenger->edit(plan, "Meet at 5")); // the same
+        QVERIFY(!alice.messenger->edit(plan, QString()));  // nothing left
+        QVERIFY(alice.messenger->edit(plan, "Meet at 6"));
+        QCOMPARE(alice.store->message(plan).body, QString("Meet at 6"));
+        QVERIFY(alice.store->message(plan).editedAt > 0);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.store->message(theirs).body, QString("Meet at 6"), kWait);
+        QVERIFY(bob.store->message(theirs).editedAt > 0);
+        // A reply keeps the words it answered.
+        QCOMPARE(bob.store->message(reply).quoteText, QString("Meet at 5"));
+        QTRY_VERIFY_WITH_TIMEOUT(alice.store->pendingEdits().isEmpty(), kWait);
+        // And on her laptop, the one it has.
+        QVERIFY(alice.messenger->edit(later, "Bring the map and water"));
+        const qint64 laptopLater = laptop.store->messageByUid(laptopToBob, laterUid);
+        QTRY_COMPARE_WITH_TIMEOUT(laptop.store->message(laptopLater).body, QString("Bring the map and water"), kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(toAlice), QString("Bring the map and water"), kWait);
+
+        // Twice quickly: the last wins.
+        QVERIFY(alice.messenger->edit(plan, "Meet at 7"));
+        QVERIFY(alice.messenger->edit(plan, "Meet at 8"));
+        QTRY_COMPARE_WITH_TIMEOUT(bob.store->message(theirs).body, QString("Meet at 8"), kWait);
+        QTRY_VERIFY_WITH_TIMEOUT(alice.store->pendingEdits().isEmpty(), kWait);
+        QTest::qWait(200);
+        QCOMPARE(bob.store->message(theirs).body, QString("Meet at 8"));
+
+        // Offline: it goes when she is back.
+        alice.messenger->stop();
+        QVERIFY(alice.messenger->edit(plan, "Meet at 9"));
+        QCOMPARE(alice.store->pendingEdits().size(), 1);
+        alice.messenger->start();
+        QTRY_COMPARE_WITH_TIMEOUT(bob.store->message(theirs).body, QString("Meet at 9"), kWait);
+
+        // A day later: too late. A deleted one: never.
+        clock += Messenger::EditMs + 60000;
+        QVERIFY(!alice.messenger->canEdit(plan));
+        clock -= Messenger::EditMs + 60000;
+        QVERIFY(alice.messenger->deleteForEveryone(later));
+        QVERIFY(!alice.messenger->canEdit(later));
+        // A note to self: any time.
+        const qint64 note = alice.messenger->send(alice.store->noteToSelf(), "milk");
+        QVERIFY(alice.messenger->edit(note, "milk, eggs"));
+        QCOMPARE(alice.store->message(note).body, QString("milk, eggs"));
+        QVERIFY(alice.store->pendingEdits().isEmpty());
+
+        // Forgeries by Dave: editing Alice's message, as himself and as her.
+        const qint64 daveToBob = startConversation(dave, "bob");
+        dave.messenger->send(daveToBob, "hi");
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("dave") > 0, kWait);
+        sendByHand(dave, "bob", {Protocol::Content::edit(planUid, "alice", "Meet at midnight, come alone"),
+                                 Protocol::Content::edit(planUid, "dave", "Meet at midnight, come alone")});
+        QTRY_COMPARE_WITH_TIMEOUT(m_serverStore->queuedCount("bob", 1), 0, kWait);
+        QTest::qWait(200);
+        QCOMPARE(bob.store->message(theirs).body, QString("Meet at 9"));
+    }
+
     void keyStoreTrust()
     {
         Device alice(file("alice"));

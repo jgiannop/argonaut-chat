@@ -234,6 +234,18 @@ Content Content::reaction(const QString &targetId, const QString &targetAuthor, 
     return content;
 }
 
+Content Content::edit(const QString &targetId, const QString &me, const QString &body, const QString &group)
+{
+    Content content;
+    content.type = Type::Edit;
+    content.id = newMessageId();
+    content.sentAt = QDateTime::currentMSecsSinceEpoch();
+    content.quote = Quote{targetId, me, QString()};
+    content.body = body;
+    content.group = group;
+    return content;
+}
+
 Content Content::deletion(const QString &targetId, const QString &me, const QString &group)
 {
     Content content;
@@ -413,6 +425,20 @@ QByteArray encodeContent(const Content &content)
             json.insert(QStringLiteral("group"), content.group);
         if (!content.sentTo.isEmpty())
             json.insert(QStringLiteral("sentTo"), content.sentTo);
+    } else if (content.type == Content::Type::Edit) {
+        if (!content.quote || !isValidMessageId(content.quote->id) || !isValidUsername(content.quote->author)
+            || content.body.toUtf8().size() > MaxTextBytes
+            || (!content.group.isEmpty() && !isValidGroupId(content.group))
+            || (!content.sentTo.isEmpty() && !isValidUsername(content.sentTo)))
+            return {};
+        json.insert(QStringLiteral("t"), QStringLiteral("edit"));
+        json.insert(QStringLiteral("target"), QJsonObject{{QStringLiteral("id"), content.quote->id},
+                                                          {QStringLiteral("author"), content.quote->author}});
+        json.insert(QStringLiteral("body"), content.body);
+        if (!content.group.isEmpty())
+            json.insert(QStringLiteral("group"), content.group);
+        if (!content.sentTo.isEmpty())
+            json.insert(QStringLiteral("sentTo"), content.sentTo);
     } else if (content.type == Content::Type::Delete) {
         if (!content.quote || !isValidMessageId(content.quote->id) || !isValidUsername(content.quote->author)
             || (!content.group.isEmpty() && !isValidGroupId(content.group))
@@ -557,8 +583,14 @@ std::optional<Content> decodeContent(const QByteArray &padded)
         content.sentTo = sentTo.toString();
         return content;
     }
-    if (type == QLatin1String("delete")) {
-        content.type = Content::Type::Delete;
+    if (type == QLatin1String("delete") || type == QLatin1String("edit")) {
+        content.type = type == QLatin1String("edit") ? Content::Type::Edit : Content::Type::Delete;
+        if (content.type == Content::Type::Edit) {
+            const QJsonValue body = json.value(QStringLiteral("body"));
+            if (!body.isString() || body.toString().toUtf8().size() > MaxTextBytes)
+                return std::nullopt;
+            content.body = body.toString();
+        }
         const QJsonValue target = json.value(QStringLiteral("target"));
         const QJsonValue id = target.toObject().value(QStringLiteral("id"));
         const QJsonValue author = target.toObject().value(QStringLiteral("author"));

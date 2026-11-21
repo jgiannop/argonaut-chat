@@ -61,6 +61,7 @@ enum Role {
     QuoteTextRole,   // a reply: the start of what it answers
     ReactionsRole,   // its reactions as shown: "👍 2  ❤️"
     DeletedRole,     // deleted for everyone: only a mark is left
+    EditedRole,      // edited after it was sent
 };
 
 QString shortTime(const QDateTime &when)
@@ -258,6 +259,8 @@ public:
     static QString footerFor(const QModelIndex &index, bool *read)
     {
         QString footer = index.data(TimeRole).toString();
+        if (index.data(EditedRole).toBool())
+            footer = QCoreApplication::translate("MainWindow", "edited") + QStringLiteral(" · ") + footer;
         if (index.data(ExpireRole).toBool())
             footer = QStringLiteral("⏱ ") + footer;
         *read = false;
@@ -1058,6 +1061,7 @@ void MainWindow::reloadMessages()
         auto *item = new QListWidgetItem(m.deleted ? tr("This message was deleted") : m.body, m_messages);
         item->setData(IdRole, m.id);
         item->setData(DeletedRole, m.deleted);
+        item->setData(EditedRole, m.editedAt > 0 && !m.deleted);
         item->setData(OutgoingRole, m.outgoing());
         item->setData(TimeRole, QLocale().toString(m.sentAt.toLocalTime().time(), QLocale::ShortFormat));
         item->setData(StatusRole, m.status);
@@ -1158,6 +1162,10 @@ void MainWindow::attachFile(const QString &path)
 {
     if (!m_messenger || m_current == 0)
         return;
+    if (m_editing != 0) {
+        m_compose->clear();
+        cancelReply(); // a file is a new message, not an edit
+    }
     QString error;
     if (m_messenger->sendFile(m_current, path, m_compose->toPlainText().trimmed(), &error, m_replyTo) == 0) {
         showNotice(error);
@@ -1192,6 +1200,10 @@ QMenu *MainWindow::messageMenu(qint64 message)
     reply->setObjectName(QStringLiteral("replyAction"));
     // Not where nothing can be written: a request, a group I left.
     reply->setEnabled(m_messenger && !c.request && !c.left);
+    if (m_messenger && m_messenger->canEdit(message)) {
+        menu->addAction(tr("Edit"), this, [this, message] { startEdit(message); })
+            ->setObjectName(QStringLiteral("editAction"));
+    }
     // React: the quick ones, mine ticked (again: taken back).
     QMenu *react = menu->addMenu(tr("React"));
     react->setObjectName(QStringLiteral("reactMenu"));
@@ -1254,6 +1266,10 @@ void MainWindow::replyTo(qint64 message)
     const auto quote = m.conversation == m_current ? m_messenger->quoteOf(message) : std::nullopt;
     if (!quote)
         return;
+    if (m_editing != 0) {
+        m_compose->clear();
+        m_editing = 0;
+    }
     m_replyTo = message;
     const QString text = quote->text.isEmpty() ? tr("a message") : quote->text;
     m_replyLabel->setText(tr("Replying to %1: %2").arg(quoteAuthorName(quote->author), text));
@@ -1261,9 +1277,26 @@ void MainWindow::replyTo(qint64 message)
     m_compose->setFocus();
 }
 
+void MainWindow::startEdit(qint64 message)
+{
+    if (!m_messenger || !m_messenger->canEdit(message) || m_store->message(message).conversation != m_current)
+        return;
+    const ChatStore::Message m = m_store->message(message);
+    m_replyTo = 0;
+    m_editing = message;
+    m_replyLabel->setText(tr("Editing: %1").arg(m.body.simplified().left(200)));
+    m_replyBar->show();
+    m_compose->setPlainText(m.body);
+    m_compose->moveCursor(QTextCursor::End);
+    m_compose->setFocus();
+}
+
 void MainWindow::cancelReply()
 {
+    if (m_editing != 0 && m_compose)
+        m_compose->clear(); // the old text was only put there to change
     m_replyTo = 0;
+    m_editing = 0;
     if (m_replyBar)
         m_replyBar->hide();
 }
@@ -1281,6 +1314,14 @@ bool MainWindow::saveAttachment(qint64 attachment, const QString &path)
 void MainWindow::send()
 {
     const QString text = m_compose->toPlainText().trimmed();
+    if (m_editing != 0) {
+        // Saved: the new text (unchanged or impossible: nothing happens).
+        if (m_messenger && !text.isEmpty())
+            m_messenger->edit(m_editing, text);
+        m_compose->clear();
+        cancelReply();
+        return;
+    }
     if (text.isEmpty() || m_current == 0)
         return;
     if (m_messenger)
@@ -1300,7 +1341,9 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
             send();
             return true;
         }
-        if (key->key() == Qt::Key_Escape && m_replyTo != 0) {
+        if (key->key() == Qt::Key_Escape && (m_replyTo != 0 || m_editing != 0)) {
+            if (m_editing != 0)
+                m_compose->clear(); // the old text was put there to change
             cancelReply();
             return true;
         }
