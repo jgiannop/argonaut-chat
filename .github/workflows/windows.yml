@@ -7,7 +7,7 @@ name: Windows
 # for a release.
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
   workflow_dispatch:
   workflow_call:
@@ -31,13 +31,27 @@ jobs:
           modules: qtwebsockets
           cache: true
 
+      # Visual Studio's own script (vcvars64.bat) sets up the compiler; what it
+      # sets is kept for the steps after.
       - name: The compiler's environment
-        uses: ilammy/msvc-dev-cmd@v1
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $vars = cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && set"
+          if ($LASTEXITCODE -ne 0) { Write-Output "::error title=build: compiler::vcvars64.bat failed"; exit 1 }
+          foreach ($line in $vars) {
+            if ($line -match '^([^=]+)=(.*)$') {
+              $name = $matches[1]; $value = $matches[2]
+              if ($name -match '^(GITHUB_|RUNNER_)') { continue }
+              if ([Environment]::GetEnvironmentVariable($name) -ne $value) { "$name=$value" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV }
+            }
+          }
 
       # libsodium and SQLCipher (with OpenSSL), built by vcpkg (which the
       # machine has) and kept between runs, since building them takes minutes.
       - name: Keep vcpkg's built libraries
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: vcpkg-cache
           key: vcpkg-sodium-sqlcipher-x64-windows-v1
@@ -54,7 +68,7 @@ jobs:
       # against the Qt above: vcpkg's would bring a Qt of its own.
       - name: Keep QtKeychain
         id: keychain-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: keychain
           key: qtkeychain-${{ env.QTKEYCHAIN_VERSION }}-qt6.8-msvc2022-v1
@@ -187,7 +201,7 @@ jobs:
           Copy-Item installer-out\*.exe out\
           Get-ChildItem out
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: argonaut-chat-windows
           path: out
