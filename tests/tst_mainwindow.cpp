@@ -287,6 +287,73 @@ private slots:
         QVERIFY(messenger.typingIndicators());
     }
 
+    void findInAConversation()
+    {
+        ChatStore store(TestSupport::home() + QStringLiteral("/finding.sqlite"));
+        MainWindow window(&store);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        const int highlightRole = Qt::UserRole + 21;
+        const qint64 anna = store.addConversation(QStringLiteral("direct"), QStringLiteral("anna"), QStringLiteral("anna"));
+        const QDateTime t = QDateTime::currentDateTimeUtc().addDays(-10);
+        // One long ago (more than the list shows at first), then 600 others.
+        const qint64 first = store.addMessage(anna, QStringLiteral("The wifi password is argo123"), QStringLiteral("anna"), t).id;
+        for (int i = 0; i < 600; ++i)
+            store.addMessage(anna, QStringLiteral("message %1").arg(i), i % 2 ? QString() : QStringLiteral("anna"), t.addSecs(60 + i));
+        const qint64 recent = store.addMessage(anna, QStringLiteral("what was the WiFi password again?"), QString(), t.addSecs(1000)).id;
+        window.openConversation(anna);
+        QCOMPARE(window.messages()->count(), 500);
+
+        QTest::keyClick(&window, Qt::Key_F, Qt::ControlModifier);
+        QVERIFY(window.findBar()->isVisible());
+        QVERIFY(window.findField()->hasFocus());
+        QTest::keyClicks(window.findField(), QStringLiteral("wifi"));
+        QCOMPARE(window.findCountLabel()->text(), QStringLiteral("2 of 2")); // the newest first
+        QCOMPARE(window.currentFindMatch(), recent);
+        auto highlighted = [&] {
+            for (int i = 0; i < window.messages()->count(); ++i)
+                if (window.messages()->item(i)->data(highlightRole).toBool())
+                    return window.messages()->item(i)->data(Qt::UserRole + 1).toLongLong();
+            return qint64(0);
+        };
+        QCOMPARE(highlighted(), recent);
+        if (qEnvironmentVariableIsSet("CHAT_TEST_GRAB")) {
+            window.resize(1000, 640);
+            QTest::qWait(200);
+            window.findStep(0); // again, at this size
+            QTest::qWait(100);
+            window.grab().save(qEnvironmentVariable("CHAT_TEST_GRAB"));
+        }
+        // Enter: older; the list grows to hold it.
+        QTest::keyClick(window.findField(), Qt::Key_Return);
+        QCOMPARE(window.findCountLabel()->text(), QStringLiteral("1 of 2"));
+        QCOMPARE(window.currentFindMatch(), first);
+        QCOMPARE(highlighted(), first);
+        QCOMPARE(window.messages()->count(), 602);
+        // Shift+Enter: newer, round again.
+        QTest::keyClick(window.findField(), Qt::Key_Return, Qt::ShiftModifier);
+        QCOMPARE(window.currentFindMatch(), recent);
+        QTest::keyClick(window.findField(), Qt::Key_Return, Qt::ShiftModifier);
+        QCOMPARE(window.currentFindMatch(), first);
+
+        window.findField()->setText(QStringLiteral("nothing like this"));
+        QCOMPARE(window.findCountLabel()->text(), QStringLiteral("No results"));
+        QCOMPARE(highlighted(), 0);
+        // Esc: closed, nothing marked.
+        window.findField()->setText(QStringLiteral("wifi"));
+        QTest::keyClick(window.findField(), Qt::Key_Escape);
+        QVERIFY(!window.findBar()->isVisible());
+        QCOMPARE(window.currentFindMatch(), 0);
+        QCOMPARE(highlighted(), 0);
+        // Another conversation closes it, and shows 500 again.
+        window.showFind();
+        window.findField()->setText(QStringLiteral("argo123"));
+        window.openConversation(store.noteToSelf());
+        QVERIFY(!window.findBar()->isVisible());
+        window.openConversation(anna);
+        QCOMPARE(window.messages()->count(), 500);
+    }
+
     void othersMessagesAreUnreadUntilOpened()
     {
         ChatStore store(TestSupport::home() + QStringLiteral("/unread.sqlite"));

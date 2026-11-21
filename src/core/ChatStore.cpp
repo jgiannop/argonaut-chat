@@ -437,6 +437,33 @@ QList<ChatStore::Message> ChatStore::messages(qint64 conversation, int limit) co
     return out;
 }
 
+QList<qint64> ChatStore::findMessages(qint64 conversation, const QString &text) const
+{
+    QList<qint64> out;
+    const QString wanted = text.simplified();
+    if (wanted.isEmpty())
+        return out;
+    // Compared here, not by SQL's LIKE (which knows the case of ASCII only).
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT id, body FROM messages WHERE conversation = ? AND system = 0 AND deleted = 0"
+                             " AND body <> '' ORDER BY sent_at, id"));
+    q.addBindValue(conversation);
+    q.exec();
+    while (q.next()) {
+        if (q.value(1).toString().simplified().contains(wanted, Qt::CaseInsensitive))
+            out << q.value(0).toLongLong();
+    }
+    return out;
+}
+
+int ChatStore::messageCount(qint64 conversation) const
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT COUNT(*) FROM messages WHERE conversation = ?"));
+    q.addBindValue(conversation);
+    return q.exec() && q.next() ? q.value(0).toInt() : 0;
+}
+
 ChatStore::Message ChatStore::message(qint64 id) const
 {
     QSqlQuery q(m_db);

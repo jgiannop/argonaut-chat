@@ -223,6 +223,26 @@ private slots:
         QCOMPARE(again.messages(again.noteToSelf()).size(), 2);
     }
 
+    void findMessages()
+    {
+        ChatStore store(TestSupport::home() + QStringLiteral("/find.sqlite"));
+        const qint64 anna = store.addConversation(QStringLiteral("direct"), QStringLiteral("anna"), QStringLiteral("anna"));
+        const QDateTime t = QDateTime::currentDateTimeUtc();
+        const qint64 a = store.addMessage(anna, QStringLiteral("Καλημέρα! Coffee at the Harbour?"), QStringLiteral("anna"), t).id;
+        const qint64 b = store.addMessage(anna, QStringLiteral("harbour it is"), QString(), t.addSecs(1)).id;
+        store.addMessage(anna, QStringLiteral("see you"), QStringLiteral("anna"), t.addSecs(2));
+        const qint64 gone = store.addMessage(anna, QStringLiteral("harbour (deleted)"), QString(), t.addSecs(3)).id;
+        store.markDeleted(gone);
+        store.addSystemNote(anna, QStringLiteral("harbour note"), t.addSecs(4));
+        QCOMPARE(store.findMessages(anna, QStringLiteral("HARBOUR")), (QList<qint64>{a, b})); // oldest first
+        QCOMPARE(store.findMessages(anna, QStringLiteral("καλημέρα")), QList<qint64>{a});     // Greek, any case
+        QCOMPARE(store.findMessages(anna, QStringLiteral("  coffee   at ")), QList<qint64>{a});
+        QVERIFY(store.findMessages(anna, QStringLiteral("tea")).isEmpty());
+        QVERIFY(store.findMessages(anna, QStringLiteral("  ")).isEmpty());
+        QVERIFY(store.findMessages(store.noteToSelf(), QStringLiteral("harbour")).isEmpty());
+        QCOMPARE(store.messageCount(anna), 5);
+    }
+
     void defaultPlace()
     {
         QVERIFY(ChatStore::defaultFile().endsWith(QStringLiteral("/argonaut-chat-tests/chat.sqlite")));

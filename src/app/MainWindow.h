@@ -11,6 +11,7 @@
 class Messenger;
 class TrayIcon;
 class QLabel;
+class QLineEdit;
 class QListWidget;
 class QMenu;
 class QToolButton;
@@ -75,6 +76,15 @@ public:
     void startEdit(qint64 message);
     qint64 editing() const { return m_editing; }
     QAction *typingIndicatorsAction() const { return m_typingAction; }
+    // Find in Conversation (Ctrl+F): its matches, newest first in turn; Enter
+    // goes to older ones, Shift+Enter newer, Esc closes.
+    void showFind();
+    void closeFind();
+    void findStep(int delta); // -1 older, +1 newer
+    qint64 currentFindMatch() const;
+    QLineEdit *findField() const { return m_findField; }
+    QLabel *findCountLabel() const { return m_findCount; }
+    QWidget *findBar() const { return m_findBar; }
     QWidget *replyBar() const { return m_replyBar; }
     QLabel *replyLabel() const { return m_replyLabel; }
     // Delete for Me / for Everyone (`ask`: confirm first).
@@ -143,6 +153,15 @@ private:
     qint64 m_editing = 0;
     QTimer m_typingIdle; // "stopped" 5 s after the last key
     QAction *m_typingAction = nullptr;
+    void runFind();
+    void showFindMatch();
+    static constexpr int DefaultMessageLimit = 500;
+    int m_messageLimit = DefaultMessageLimit; // grows to show an older match
+    QWidget *m_findBar = nullptr;
+    QLineEdit *m_findField = nullptr;
+    QLabel *m_findCount = nullptr;
+    QList<qint64> m_findResults;
+    int m_findIndex = -1;
     QWidget *m_requestBar = nullptr;
     QLabel *m_requestText = nullptr;
     QPushButton *m_acceptButton = nullptr;

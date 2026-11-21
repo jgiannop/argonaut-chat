@@ -91,6 +91,10 @@ public:
                        const QDateTime &sentAt = QDateTime::currentDateTimeUtc(), const QString &uid = QString(),
                        const QString &status = QString());
     Message message(qint64 id) const;
+    // Search: the messages of `conversation` whose text contains `text`,
+    // whatever its case (Greek too), oldest first; notes and deleted ones never.
+    QList<qint64> findMessages(qint64 conversation, const QString &text) const;
+    int messageCount(qint64 conversation) const;
     // A message already there with this wire id (to drop one delivered twice).
     bool hasMessage(qint64 conversation, const QString &uid) const;
     // Its local id, or 0.

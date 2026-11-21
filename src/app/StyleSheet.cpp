@@ -27,6 +27,9 @@ QWidget#requestBar QPushButton#acceptButton { background: @accent; color: #fffff
 QWidget#composer { background: @window; border-top: 1px solid @border; }
 QWidget#replyBar { background: @pathBg; border-left: 3px solid @accent; border-radius: 6px; }
 QLabel#replyLabel { color: @dimFg; }
+QWidget#findBar { background: @window; border-bottom: 1px solid @border; }
+QLineEdit#findField { background: @pathBg; border: none; border-radius: 8px; padding: 5px 8px; color: @fg; }
+QLabel#findCount { color: @dimFg; padding: 0 6px; }
 QPlainTextEdit#composeField { background: @pathBg; color: @fg; border: none; border-radius: 18px; padding: 6px 12px;
     selection-background-color: @accent; }
 QPushButton#sendButton { background: @accent; color: #ffffff; border: none; border-radius: 18px; padding: 8px 16px; font-weight: bold; }

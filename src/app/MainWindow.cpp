@@ -62,6 +62,7 @@ enum Role {
     ReactionsRole,   // its reactions as shown: "👍 2  ❤️"
     DeletedRole,     // deleted for everyone: only a mark is left
     EditedRole,      // edited after it was sent
+    HighlightRole,   // the search's current match
 };
 
 QString shortTime(const QDateTime &when)
@@ -318,6 +319,11 @@ public:
         QPainterPath path;
         path.addRoundedRect(bubble, 16, 16);
         p->fillPath(path, mine ? m_theme->accent : m_theme->pathBg);
+        if (index.data(HighlightRole).toBool()) {
+            // The search's match: a ring around it.
+            p->setPen(QPen(mine ? m_theme->fg : m_theme->accent, 2));
+            p->drawPath(path);
+        }
         const QPoint origin = bubble.topLeft();
         const QPixmap image = index.data(ImageRole).value<QPixmap>();
         if (!image.isNull()) {
@@ -582,7 +588,44 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
     connect(m_blockButton, &QPushButton::clicked, this, [this] { blockRequest(true); });
     m_composer = composer;
 
+    // Find in Conversation (Ctrl+F): a bar under the header.
+    m_findBar = new QWidget(chat);
+    m_findBar->setObjectName(QStringLiteral("findBar"));
+    m_findBar->setAttribute(Qt::WA_StyledBackground);
+    auto *findLayout = new QHBoxLayout(m_findBar);
+    findLayout->setContentsMargins(12, 6, 8, 6);
+    m_findField = new QLineEdit(m_findBar);
+    m_findField->setObjectName(QStringLiteral("findField"));
+    m_findField->setPlaceholderText(tr("Find in this conversation"));
+    m_findField->setClearButtonEnabled(true);
+    m_findField->installEventFilter(this);
+    m_findCount = new QLabel(m_findBar);
+    m_findCount->setObjectName(QStringLiteral("findCount"));
+    auto *older = new QToolButton(m_findBar);
+    older->setText(QStringLiteral("↑"));
+    older->setToolTip(tr("Older (Enter)"));
+    older->setAutoRaise(true);
+    auto *newer = new QToolButton(m_findBar);
+    newer->setText(QStringLiteral("↓"));
+    newer->setToolTip(tr("Newer (Shift+Enter)"));
+    newer->setAutoRaise(true);
+    auto *closeFindButton = new QToolButton(m_findBar);
+    closeFindButton->setText(QStringLiteral("✕"));
+    closeFindButton->setToolTip(tr("Close (Esc)"));
+    closeFindButton->setAutoRaise(true);
+    findLayout->addWidget(m_findField, 1);
+    findLayout->addWidget(m_findCount);
+    findLayout->addWidget(older);
+    findLayout->addWidget(newer);
+    findLayout->addWidget(closeFindButton);
+    m_findBar->hide();
+    connect(m_findField, &QLineEdit::textChanged, this, &MainWindow::runFind);
+    connect(older, &QToolButton::clicked, this, [this] { findStep(-1); });
+    connect(newer, &QToolButton::clicked, this, [this] { findStep(1); });
+    connect(closeFindButton, &QToolButton::clicked, this, &MainWindow::closeFind);
+
     chatLayout->addWidget(header);
+    chatLayout->addWidget(m_findBar);
     chatLayout->addWidget(m_messages, 1);
     chatLayout->addWidget(composer);
     chatLayout->addWidget(m_requestBar);
@@ -745,6 +788,9 @@ void MainWindow::buildMenus()
     quit->setShortcut(QKeySequence::Quit);
 
     QMenu *conversation = menuBar()->addMenu(tr("&Conversation"));
+    QAction *find = conversation->addAction(tr("Find in Conversation…"), this, &MainWindow::showFind);
+    find->setShortcut(QKeySequence::Find);
+    conversation->addSeparator();
     m_safetyAction = conversation->addAction(tr("Safety Number…"), this, &MainWindow::showSafetyNumber);
     conversation->addSeparator();
     m_membersAction = conversation->addAction(tr("Members…"), this, [this] {
@@ -850,6 +896,12 @@ void MainWindow::openConversation(qint64 id)
 {
     if (id != m_current) {
         cancelReply(); // a reply belongs to its conversation
+        m_messageLimit = DefaultMessageLimit;
+        if (m_findBar && m_findBar->isVisible()) {
+            m_findResults.clear();
+            m_findIndex = -1;
+            m_findBar->hide();
+        }
         if (m_messenger && m_current != 0)
             m_messenger->setTyping(m_current, false);
     }
@@ -1102,11 +1154,17 @@ void MainWindow::reloadMessages()
 {
     m_messages->clear();
     const bool group = m_store->conversation(m_current).kind == QLatin1String("group");
-    for (const ChatStore::Message &m : m_store->messages(m_current)) {
+    const qint64 match = currentFindMatch();
+    QListWidgetItem *matchItem = nullptr;
+    for (const ChatStore::Message &m : m_store->messages(m_current, m_messageLimit)) {
         auto *item = new QListWidgetItem(m.deleted ? tr("This message was deleted") : m.body, m_messages);
         item->setData(IdRole, m.id);
         item->setData(DeletedRole, m.deleted);
         item->setData(EditedRole, m.editedAt > 0 && !m.deleted);
+        if (m.id == match) {
+            item->setData(HighlightRole, true);
+            matchItem = item;
+        }
         item->setData(OutgoingRole, m.outgoing());
         item->setData(TimeRole, QLocale().toString(m.sentAt.toLocalTime().time(), QLocale::ShortFormat));
         item->setData(StatusRole, m.status);
@@ -1151,7 +1209,79 @@ void MainWindow::reloadMessages()
             item->setToolTip(item->toolTip().isEmpty() ? tip : item->toolTip() + QLatin1Char('\n') + tip);
         }
     }
-    m_messages->scrollToBottom();
+    // Searching: the match stays in view; otherwise the newest.
+    if (matchItem) {
+        m_messages->doItemsLayout(); // the heights first, or it scrolls to the wrong place
+        m_messages->scrollToItem(matchItem, QAbstractItemView::PositionAtCenter);
+    }
+    else
+        m_messages->scrollToBottom();
+}
+
+void MainWindow::showFind()
+{
+    if (m_current == 0)
+        return;
+    m_findBar->show();
+    m_findField->setFocus();
+    m_findField->selectAll();
+    runFind();
+}
+
+void MainWindow::closeFind()
+{
+    const bool had = currentFindMatch() != 0;
+    m_findResults.clear();
+    m_findIndex = -1;
+    m_findBar->hide();
+    if (m_findField->hasFocus())
+        m_compose->setFocus();
+    if (had)
+        reloadMessages();
+}
+
+qint64 MainWindow::currentFindMatch() const
+{
+    if (!m_findBar || m_findBar->isHidden() || m_findIndex < 0 || m_findIndex >= m_findResults.size())
+        return 0;
+    return m_findResults.at(m_findIndex);
+}
+
+void MainWindow::runFind()
+{
+    m_findResults = m_store->findMessages(m_current, m_findField->text());
+    m_findIndex = int(m_findResults.size()) - 1; // the newest first, as you read upwards
+    showFindMatch();
+}
+
+void MainWindow::findStep(int delta)
+{
+    if (m_findResults.isEmpty())
+        return;
+    const int n = int(m_findResults.size());
+    m_findIndex = ((m_findIndex + delta) % n + n) % n;
+    showFindMatch();
+}
+
+void MainWindow::showFindMatch()
+{
+    const int n = int(m_findResults.size());
+    if (m_findField->text().simplified().isEmpty())
+        m_findCount->clear();
+    else if (n == 0)
+        m_findCount->setText(tr("No results"));
+    else
+        m_findCount->setText(tr("%1 of %2").arg(m_findIndex + 1).arg(n));
+    // An older one than the list holds: the list grows to it.
+    const qint64 match = currentFindMatch();
+    if (match != 0 && m_store->message(match).sentAt.isValid()) {
+        bool shown = false;
+        for (int i = 0; i < m_messages->count() && !shown; ++i)
+            shown = m_messages->item(i)->data(IdRole).toLongLong() == match;
+        if (!shown)
+            m_messageLimit = qMax(m_messageLimit, m_store->messageCount(m_current));
+    }
+    reloadMessages();
 }
 
 QPixmap MainWindow::avatarFor(const QString &username)
@@ -1395,6 +1525,18 @@ void MainWindow::send()
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
+    // In the find field: Enter older, Shift+Enter newer, Esc closes.
+    if (watched == m_findField && event->type() == QEvent::KeyPress) {
+        auto *key = static_cast<QKeyEvent *>(event);
+        if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) {
+            findStep(key->modifiers() & Qt::ShiftModifier ? 1 : -1);
+            return true;
+        }
+        if (key->key() == Qt::Key_Escape) {
+            closeFind();
+            return true;
+        }
+    }
     // Enter sends; Shift+Enter is a new line.
     if (watched == m_compose && event->type() == QEvent::KeyPress) {
         auto *key = static_cast<QKeyEvent *>(event);
