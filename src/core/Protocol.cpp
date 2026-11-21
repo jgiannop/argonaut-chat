@@ -234,6 +234,17 @@ Content Content::reaction(const QString &targetId, const QString &targetAuthor, 
     return content;
 }
 
+Content Content::deletion(const QString &targetId, const QString &me, const QString &group)
+{
+    Content content;
+    content.type = Type::Delete;
+    content.id = newMessageId();
+    content.sentAt = QDateTime::currentMSecsSinceEpoch();
+    content.quote = Quote{targetId, me, QString()};
+    content.group = group;
+    return content;
+}
+
 bool isValidReaction(const QString &emoji)
 {
     const QByteArray utf8 = emoji.toUtf8();
@@ -402,6 +413,18 @@ QByteArray encodeContent(const Content &content)
             json.insert(QStringLiteral("group"), content.group);
         if (!content.sentTo.isEmpty())
             json.insert(QStringLiteral("sentTo"), content.sentTo);
+    } else if (content.type == Content::Type::Delete) {
+        if (!content.quote || !isValidMessageId(content.quote->id) || !isValidUsername(content.quote->author)
+            || (!content.group.isEmpty() && !isValidGroupId(content.group))
+            || (!content.sentTo.isEmpty() && !isValidUsername(content.sentTo)))
+            return {};
+        json.insert(QStringLiteral("t"), QStringLiteral("delete"));
+        json.insert(QStringLiteral("target"), QJsonObject{{QStringLiteral("id"), content.quote->id},
+                                                          {QStringLiteral("author"), content.quote->author}});
+        if (!content.group.isEmpty())
+            json.insert(QStringLiteral("group"), content.group);
+        if (!content.sentTo.isEmpty())
+            json.insert(QStringLiteral("sentTo"), content.sentTo);
     } else if (content.type == Content::Type::Reaction) {
         if (!content.quote || !isValidMessageId(content.quote->id) || !isValidUsername(content.quote->author)
             || (content.remove ? !content.emoji.isEmpty() : !isValidReaction(content.emoji))
@@ -530,6 +553,23 @@ std::optional<Content> decodeContent(const QByteArray &padded)
             || (!sentTo.isUndefined() && (!sentTo.isString() || !isValidUsername(sentTo.toString()))))
             return std::nullopt;
         content.expireSeconds = *seconds;
+        content.group = group.toString();
+        content.sentTo = sentTo.toString();
+        return content;
+    }
+    if (type == QLatin1String("delete")) {
+        content.type = Content::Type::Delete;
+        const QJsonValue target = json.value(QStringLiteral("target"));
+        const QJsonValue id = target.toObject().value(QStringLiteral("id"));
+        const QJsonValue author = target.toObject().value(QStringLiteral("author"));
+        const QJsonValue group = json.value(QStringLiteral("group"));
+        const QJsonValue sentTo = json.value(QStringLiteral("sentTo"));
+        if (!target.isObject() || !id.isString() || !isValidMessageId(id.toString()) || !author.isString()
+            || !isValidUsername(author.toString())
+            || (!group.isUndefined() && (!group.isString() || !isValidGroupId(group.toString())))
+            || (!sentTo.isUndefined() && (!sentTo.isString() || !isValidUsername(sentTo.toString()))))
+            return std::nullopt;
+        content.quote = Quote{id.toString(), author.toString(), QString()};
         content.group = group.toString();
         content.sentTo = sentTo.toString();
         return content;

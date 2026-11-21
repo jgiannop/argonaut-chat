@@ -137,6 +137,9 @@ void ChatStore::createTables()
     addColumn(QStringLiteral("messages"), QStringLiteral("expire_seconds"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
     addColumn(QStringLiteral("messages"), QStringLiteral("expires_at"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
     addColumn(QStringLiteral("messages"), QStringLiteral("system"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
+    // Added with deleting for everyone.
+    addColumn(QStringLiteral("messages"), QStringLiteral("deleted"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
+    addColumn(QStringLiteral("messages"), QStringLiteral("delete_pending"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
     // Added with replies.
     addColumn(QStringLiteral("messages"), QStringLiteral("quote_uid"), QStringLiteral("TEXT NOT NULL DEFAULT ''"));
     addColumn(QStringLiteral("messages"), QStringLiteral("quote_author"), QStringLiteral("TEXT NOT NULL DEFAULT ''"));
@@ -181,7 +184,7 @@ namespace {
 
 const QString kMessageColumns =
     QStringLiteral("id, conversation, author, body, sent_at, status, uid, expire_seconds, expires_at, system,"
-                   " quote_uid, quote_author, quote_text");
+                   " quote_uid, quote_author, quote_text, deleted");
 
 ChatStore::Message messageFrom(const QSqlQuery &q)
 {
@@ -199,6 +202,7 @@ ChatStore::Message messageFrom(const QSqlQuery &q)
     m.quoteUid = q.value(10).toString();
     m.quoteAuthor = q.value(11).toString();
     m.quoteText = q.value(12).toString();
+    m.deleted = q.value(13).toBool();
     return m;
 }
 
@@ -224,7 +228,8 @@ QList<ChatStore::Conversation> ChatStore::conversations() const
                           " (SELECT CASE WHEN m.body = '' THEN COALESCE('📎 ' || (SELECT a.name FROM attachments a"
                           "  WHERE a.message = m.id ORDER BY a.id LIMIT 1), '') ELSE m.body END"
                           "  FROM messages m WHERE m.conversation = c.id ORDER BY sent_at DESC, id DESC LIMIT 1),"
-                          " (SELECT COUNT(*) FROM messages m WHERE m.conversation = c.id AND m.seen = 0 AND m.author <> '')"
+                          " (SELECT COUNT(*) FROM messages m WHERE m.conversation = c.id AND m.seen = 0 AND m.author <> ''),"
+                          " (SELECT m.deleted FROM messages m WHERE m.conversation = c.id ORDER BY sent_at DESC, id DESC LIMIT 1)"
                           " FROM conversations c ORDER BY c.last_activity DESC, c.id DESC"));
     while (q.next()) {
         Conversation c;
@@ -238,6 +243,7 @@ QList<ChatStore::Conversation> ChatStore::conversations() const
         c.expireSeconds = q.value(6).toLongLong();
         c.lastText = q.value(7).toString();
         c.unread = q.value(8).toInt();
+        c.lastDeleted = q.value(9).toBool();
         out.append(c);
     }
     return out;
@@ -446,6 +452,91 @@ bool ChatStore::hasMessage(qint64 conversation, const QString &uid) const
     q.addBindValue(conversation);
     q.addBindValue(uid);
     return q.exec() && q.next();
+}
+
+namespace {
+
+// The files of a message's attachments, and their rows, gone (in a transaction of the caller's).
+QStringList dropAttachments(QSqlDatabase &db, qint64 message)
+{
+    QStringList names;
+    QSqlQuery q(db);
+    q.prepare(QStringLiteral("SELECT file FROM attachments WHERE message = ? AND file <> ''"));
+    q.addBindValue(message);
+    q.exec();
+    while (q.next())
+        names << q.value(0).toString();
+    q.prepare(QStringLiteral("DELETE FROM attachments WHERE message = ?"));
+    q.addBindValue(message);
+    q.exec();
+    return names;
+}
+
+} // namespace
+
+void ChatStore::deleteMessage(qint64 message)
+{
+    const qint64 conversation = this->message(message).conversation;
+    if (conversation == 0 || !m_db.transaction())
+        return;
+    const QStringList names = dropAttachments(m_db, message);
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("DELETE FROM messages WHERE id = ?"));
+    q.addBindValue(message);
+    q.exec();
+    m_db.commit();
+    for (const QString &name : names)
+        QFile::remove(m_attachments + QLatin1Char('/') + name);
+    emit messagesChanged(conversation);
+    emit conversationsChanged();
+}
+
+void ChatStore::markDeleted(qint64 message, bool pending)
+{
+    const Message m = this->message(message);
+    if (m.id == 0 || !m_db.transaction())
+        return;
+    const QStringList names = dropAttachments(m_db, message);
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("DELETE FROM reactions WHERE message = ?"));
+    q.addBindValue(message);
+    q.exec();
+    q.prepare(QStringLiteral("UPDATE messages SET body = '', deleted = 1, delete_pending = ?,"
+                             " quote_uid = '', quote_author = '', quote_text = '' WHERE id = ?"));
+    q.addBindValue(pending ? 1 : 0);
+    q.addBindValue(message);
+    q.exec();
+    // Replies keep only that they answered something deleted.
+    if (!m.uid.isEmpty()) {
+        q.prepare(QStringLiteral("UPDATE messages SET quote_text = '' WHERE conversation = ? AND quote_uid = ?"));
+        q.addBindValue(m.conversation);
+        q.addBindValue(m.uid);
+        q.exec();
+    }
+    m_db.commit();
+    for (const QString &name : names)
+        QFile::remove(m_attachments + QLatin1Char('/') + name);
+    emit messagesChanged(m.conversation);
+    emit conversationsChanged();
+}
+
+QList<qint64> ChatStore::pendingDeletes() const
+{
+    QList<qint64> out;
+    QSqlQuery q(m_db);
+    if (q.exec(QStringLiteral("SELECT id FROM messages WHERE delete_pending = 1 ORDER BY id"))) {
+        while (q.next())
+            out << q.value(0).toLongLong();
+    }
+    return out;
+}
+
+void ChatStore::setDeleteSent(qint64 message)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("UPDATE messages SET delete_pending = 0 WHERE id = ?"));
+    q.addBindValue(message);
+    q.exec();
 }
 
 void ChatStore::setReaction(qint64 message, const QString &author, const QString &emoji, qint64 at, bool pending)

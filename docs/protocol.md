@@ -90,6 +90,23 @@ of UTF-8 with no letters, digits, spaces, controls or direction marks.
 `sentTo` only to my own other devices (a group's has `group`). A reaction
 never starts a conversation. Versions before 0.2 drop it unread.
 
+### Deleting for everyone
+
+The author of a message may delete it for everyone, up to 24 hours after
+sending it, as Signal allows:
+
+```json
+{"v":1, "t":"delete", "id":"<uuid>", "sent":…, "target":{"id":"<its uuid>", "author":"<the sender>"},
+ "group":"<32 hex>"?, "sentTo":"<username>"?}
+```
+
+Kept only from the message's own author (`target.author` and the sender
+must be the same, and the message's), in the conversation it comes in, and
+no more than 48 hours after the message by the server's clock. What it
+said, its files and reactions are deleted, and the quotes of it in
+replies; a mark stays ("This message was deleted"). Versions before 0.2
+drop it unread, and keep the message.
+
 ### Profiles
 
 ```json

@@ -34,6 +34,7 @@ public:
         QString peer;  // who it is with (empty for Note to Self)
         QDateTime lastActivity;
         QString lastText; // the newest message, for the list
+        bool lastDeleted = false; // it was deleted for everyone
         int unread = 0;
         bool request = false; // a message request: someone I have not accepted yet
         bool left = false;    // a group I am no longer in (read only)
@@ -57,6 +58,7 @@ public:
         QString quoteAuthor;
         QString quoteText;
         bool isReply() const { return !quoteAuthor.isEmpty(); }
+        bool deleted = false; // deleted for everyone: no text, files or reactions left
         bool outgoing() const { return author.isEmpty(); }
     };
 
@@ -126,6 +128,15 @@ public:
     qint64 nextExpiry() const;
     // A note in the conversation, not a message from anyone.
     qint64 addSystemNote(qint64 conversation, const QString &text, const QDateTime &at);
+
+    // Deleting. For me: gone from here, with its files and reactions.
+    void deleteMessage(qint64 message);
+    // For everyone: what it said, its files and reactions go, and the quotes of
+    // it in replies; a mark stays ("This message was deleted"). `pending`:
+    // mine, to be sent to the others.
+    void markDeleted(qint64 message, bool pending = false);
+    QList<qint64> pendingDeletes() const;
+    void setDeleteSent(qint64 message);
 
     // Reactions: one emoji per person per message (author empty: mine).
     struct Reaction

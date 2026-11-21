@@ -1037,6 +1037,116 @@ private slots:
         QVERIFY(bob.store->reactions(theirs).isEmpty());
     }
 
+    void deleting()
+    {
+        qint64 clock = QDateTime::currentMSecsSinceEpoch();
+        Device alice(file("alice"));
+        Device bob(file("bob"));
+        Device dave(file("dave"));
+        for (Device *d : {&alice, &bob, &dave})
+            d->messenger->setClock([&clock] { return clock; });
+        QVERIFY(signUp(alice, "alice"));
+        QVERIFY(signUp(bob, "bob"));
+        QVERIFY(signUp(dave, "dave"));
+        const qint64 toBob = startConversation(alice, "bob");
+        alice.messenger->send(toBob, "hi");
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("alice") > 0, kWait);
+        const qint64 toAlice = bob.store->directConversation("alice");
+        bob.messenger->acceptRequest(toAlice);
+
+        // Alice's laptop, to see deletes reach it too.
+        Device laptop(file("laptop"));
+        laptop.messenger->setClock([&clock] { return clock; });
+        std::optional<QString> code;
+        std::optional<bool> linked;
+        laptop.messenger->linkThisDevice(m_url, [&](const QString &shown) { code = shown; },
+                                         [&](bool ok, const QString &) { linked = ok; });
+        QTRY_VERIFY_WITH_TIMEOUT(code.has_value(), kWait);
+        alice.messenger->linkDevice(*code, [](bool, const QString &) {});
+        QTRY_VERIFY_WITH_TIMEOUT(linked.has_value() && *linked, kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(alice.messenger->myDevices().size(), 2, kWait);
+
+        // A photo with a caption: Bob has it, reacts and replies to it.
+        const qint64 oops = alice.messenger->sendFile(toBob, writeFile("oops.png", QByteArray("\x89PNG\r\n\x1a\n", 8) + Crypto::randomBytes(500)), "wrong chat");
+        QTRY_COMPARE_WITH_TIMEOUT(alice.store->message(oops).status, QString("delivered"), kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(toAlice), QString("wrong chat"), kWait);
+        const qint64 theirs = bob.store->messages(toAlice).last().id;
+        QTRY_COMPARE_WITH_TIMEOUT(bob.store->attachments(theirs).value(0).state, QString("ready"), kWait);
+        const QString blob = bob.store->attachments(theirs).first().file;
+        QVERIFY(QFile::exists(bob.store->attachmentFolder() + "/" + blob));
+        QVERIFY(bob.messenger->react(theirs, "😂"));
+        const qint64 reply = bob.messenger->send(toAlice, "lol", theirs);
+        QTRY_COMPARE_WITH_TIMEOUT(alice.store->reactions(oops).size(), 1, kWait);
+        const qint64 laptopToBob = laptop.store->directConversation("bob");
+        const QString oopsUid = alice.store->message(oops).uid;
+        QTRY_VERIFY_WITH_TIMEOUT(laptop.store->messageByUid(laptopToBob, oopsUid) > 0, kWait);
+        const qint64 laptopCopy = laptop.store->messageByUid(laptopToBob, oopsUid);
+        QCOMPARE(laptop.store->message(laptopCopy).body, QString("wrong chat"));
+
+        // Only mine, only once sent.
+        QVERIFY(!bob.messenger->canDeleteForEveryone(theirs));
+        QVERIFY(alice.messenger->canDeleteForEveryone(oops));
+        QVERIFY(alice.messenger->deleteForEveryone(oops));
+        QVERIFY(alice.store->message(oops).deleted);
+        QVERIFY(alice.store->message(oops).body.isEmpty());
+        QVERIFY(alice.store->attachments(oops).isEmpty());
+        QVERIFY(alice.store->reactions(oops).isEmpty());
+        QVERIFY(!alice.messenger->canDeleteForEveryone(oops)); // once
+        // Bob: the mark only; no text, file, reaction, nor quote of it.
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->message(theirs).deleted, kWait);
+        QVERIFY(bob.store->message(theirs).body.isEmpty());
+        QVERIFY(bob.store->attachments(theirs).isEmpty());
+        QVERIFY(!QFile::exists(bob.store->attachmentFolder() + "/" + blob));
+        QVERIFY(bob.store->reactions(theirs).isEmpty());
+        QVERIFY(bob.store->message(reply).isReply());
+        QVERIFY(bob.store->message(reply).quoteText.isEmpty());
+        QVERIFY(!bob.messenger->react(theirs, "👍"));
+        QVERIFY(!bob.messenger->quoteOf(theirs));
+        // Her laptop too.
+        QTRY_VERIFY_WITH_TIMEOUT(laptop.store->message(laptopCopy).deleted, kWait);
+        QVERIFY(laptop.store->message(laptopCopy).body.isEmpty());
+        QVERIFY(alice.store->pendingDeletes().isEmpty());
+
+        // Made offline: it goes when she is back.
+        const qint64 second = alice.messenger->send(toBob, "typo");
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(toAlice), QString("typo"), kWait);
+        QTRY_VERIFY_WITH_TIMEOUT(alice.store->message(second).status != QLatin1String("sending"), kWait);
+        alice.messenger->stop();
+        QVERIFY(alice.messenger->deleteForEveryone(second));
+        QCOMPARE(alice.store->pendingDeletes().size(), 1);
+        alice.messenger->start();
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->messages(toAlice).last().deleted, kWait);
+        QTRY_VERIFY_WITH_TIMEOUT(alice.store->pendingDeletes().isEmpty(), kWait);
+
+        // A day later: too late.
+        const qint64 old = alice.messenger->send(toBob, "yesterday's");
+        QTRY_VERIFY_WITH_TIMEOUT(alice.store->message(old).status != QLatin1String("sending"), kWait);
+        clock += Messenger::DeleteForEveryoneMs + 60000;
+        QVERIFY(!alice.messenger->canDeleteForEveryone(old));
+        QVERIFY(!alice.messenger->deleteForEveryone(old));
+        clock -= Messenger::DeleteForEveryoneMs + 60000;
+
+        // For me: here only.
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(toAlice), QString("yesterday's"), kWait);
+        const qint64 bobsCopy = bob.store->messages(toAlice).last().id;
+        bob.messenger->deleteForMe(bobsCopy);
+        QCOMPARE(bob.store->message(bobsCopy).id, 0);
+        QVERIFY(!alice.store->message(old).deleted);
+
+        // Forgeries by Dave: deleting Alice's message, as himself and as her.
+        const qint64 kept = alice.messenger->send(toBob, "keep me");
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(toAlice), QString("keep me"), kWait);
+        const QString keptUid = alice.store->message(kept).uid;
+        const qint64 daveToBob = startConversation(dave, "bob");
+        dave.messenger->send(daveToBob, "hi");
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("dave") > 0, kWait);
+        sendByHand(dave, "bob", {Protocol::Content::deletion(keptUid, "alice"), Protocol::Content::deletion(keptUid, "dave")});
+        QTRY_COMPARE_WITH_TIMEOUT(m_serverStore->queuedCount("bob", 1), 0, kWait);
+        QTest::qWait(200);
+        QVERIFY(!bob.store->messages(toAlice).last().deleted);
+        QCOMPARE(bob.last(toAlice), QString("keep me"));
+    }
+
     void keyStoreTrust()
     {
         Device alice(file("alice"));

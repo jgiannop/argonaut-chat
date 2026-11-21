@@ -186,6 +186,43 @@ private slots:
         }
     }
 
+    void deleteAMessage()
+    {
+        ChatStore store(TestSupport::home() + QStringLiteral("/deleting.sqlite"));
+        KeyStore keys(&store);
+        Messenger messenger(&store, &keys);
+        MainWindow window(&store, &messenger);
+        window.show();
+        const int deletedRole = Qt::UserRole + 19;
+        const qint64 anna = store.addConversation(QStringLiteral("direct"), QStringLiteral("anna"), QStringLiteral("anna"));
+        const qint64 mine = store.addMessage(anna, QStringLiteral("See you at 5"), QString(), QDateTime::currentDateTimeUtc(),
+                                             QStringLiteral("11111111-1111-4111-8111-111111111111"), QStringLiteral("sent")).id;
+        const qint64 theirs = store.addMessage(anna, QStringLiteral("ok"), QStringLiteral("anna")).id;
+        window.openConversation(anna);
+        QCOMPARE(window.messages()->count(), 2);
+
+        // Mine: for me or for everyone; theirs: for me only.
+        std::unique_ptr<QMenu> menu(window.messageMenu(mine));
+        QVERIFY(menu->findChild<QAction *>(QStringLiteral("deleteForMeAction")));
+        QVERIFY(menu->findChild<QAction *>(QStringLiteral("deleteForEveryoneAction")));
+        menu.reset(window.messageMenu(theirs));
+        QVERIFY(menu->findChild<QAction *>(QStringLiteral("deleteForMeAction")));
+        QVERIFY(!menu->findChild<QAction *>(QStringLiteral("deleteForEveryoneAction")));
+
+        window.deleteMessage(theirs, false, false);
+        QCOMPARE(window.messages()->count(), 1);
+        window.deleteMessage(mine, true, false);
+        QVERIFY(store.message(mine).deleted);
+        QCOMPARE(window.messages()->count(), 1);
+        QCOMPARE(window.messages()->item(0)->text(), QStringLiteral("This message was deleted"));
+        QVERIFY(window.messages()->item(0)->data(deletedRole).toBool());
+        QCOMPARE(window.conversations()->item(0)->data(Qt::UserRole + 5).toString(), QStringLiteral("This message was deleted"));
+        // Its mark has Delete for Me only.
+        menu.reset(window.messageMenu(mine));
+        QCOMPARE(menu->actions().size(), 1);
+        QCOMPARE(menu->actions().first()->objectName(), QStringLiteral("deleteForMeAction"));
+    }
+
     void othersMessagesAreUnreadUntilOpened()
     {
         ChatStore store(TestSupport::home() + QStringLiteral("/unread.sqlite"));

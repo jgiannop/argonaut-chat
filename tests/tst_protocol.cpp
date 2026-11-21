@@ -283,6 +283,27 @@ private slots:
         QVERIFY(!decodeContent(pad(head + to + ",\"emoji\":\"👍\",\"group\":\"nope\"}")));
     }
 
+    void deletions()
+    {
+        const QString target = newMessageId();
+        const QString gid = newGroupId();
+        auto back = decodeContent(encodeContent(Content::deletion(target, "alice", gid)));
+        QVERIFY(back);
+        QCOMPARE(back->type, Content::Type::Delete);
+        QCOMPARE(back->quote->id, target);
+        QCOMPARE(back->quote->author, QString("alice"));
+        QCOMPARE(back->group, gid);
+        QVERIFY(encodeContent(Content::deletion("x", "alice")).isEmpty());
+        QVERIFY(encodeContent(Content::deletion(target, "A!")).isEmpty());
+        const QByteArray head = "{\"v\":1,\"t\":\"delete\",\"id\":\"" + newMessageId().toLatin1() + "\",\"sent\":1";
+        QVERIFY(decodeContent(pad(head + ",\"target\":{\"id\":\"" + target.toLatin1() + "\",\"author\":\"bob\"}}")));
+        QVERIFY(!decodeContent(pad(head + "}")));
+        QVERIFY(!decodeContent(pad(head + ",\"target\":{\"id\":\"" + target.toLatin1() + "\"}}")));
+        QVERIFY(!decodeContent(pad(head + ",\"target\":[]}")));
+        QVERIFY(!decodeContent(pad(head + ",\"target\":{\"id\":\"" + target.toLatin1()
+                                   + "\",\"author\":\"bob\"},\"sentTo\":7}")));
+    }
+
     void contentFromStrangers_data()
     {
         QTest::addColumn<QByteArray>("json");

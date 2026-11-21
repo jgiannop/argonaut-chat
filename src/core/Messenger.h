@@ -135,6 +135,14 @@ public:
     // Their picture (image bytes), once fetched; none for a request until accepted.
     QByteArray avatar(const QString &username) const { return m_store->profile(username).avatar; }
 
+    // Deleting (as Signal's). For me: from this computer only, any message.
+    // For everyone: mine, sent, at most DeleteForEveryoneMs ago; the others
+    // and my other devices keep only "This message was deleted".
+    static constexpr qint64 DeleteForEveryoneMs = 24LL * 3600 * 1000;
+    void deleteForMe(qint64 message);
+    bool canDeleteForEveryone(qint64 message) const;
+    bool deleteForEveryone(qint64 message);
+
     // Reactions (as Signal's): one emoji per person per message; mine to
     // everyone in the conversation and my other devices, kept until sent.
     // Empty `emoji`: take mine back. Not on notes, requests or left groups.
@@ -200,6 +208,8 @@ private:
     // `mine`: from another device of mine (`from` is me).
     void handleReaction(const QString &from, const Protocol::Content &content, bool mine);
     void sendPendingReactions();
+    void handleDelete(const QString &from, const Protocol::Envelope &envelope, const Protocol::Content &content, bool mine);
+    void sendPendingDeletes();
     QStringList othersIn(qint64 conversation) const;
     // Everyone I have accepted: direct peers, and members of my accepted groups.
     QStringList knownPeople() const;
@@ -209,7 +219,7 @@ private:
     bool haveOtherDevices() const;
     void refreshMyDevices();
     // From another device of mine.
-    void handleSync(const Protocol::Content &content);
+    void handleSync(const Protocol::Envelope &envelope, const Protocol::Content &content);
     void applyMyProfile(const QString &name, const std::optional<Attachment::Pointer> &avatar);
     void onProvision(const QByteArray &sealed);
     void scheduleExpiry();
@@ -252,6 +262,7 @@ private:
     std::function<qint64()> m_clock;
     QSet<qint64> m_inFlight; // outbox messages being sent
     QSet<qint64> m_reactionsInFlight; // messages whose reaction of mine is being sent
+    QSet<qint64> m_deletesInFlight;
     bool m_downloading = false;
     bool m_avatarUploading = false;
     bool m_avatarFetching = false;

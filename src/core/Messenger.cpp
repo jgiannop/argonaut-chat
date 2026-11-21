@@ -412,7 +412,7 @@ qint64 Messenger::send(qint64 conversation, const QString &text, qint64 replyTo)
 std::optional<Protocol::Quote> Messenger::quoteOf(qint64 message) const
 {
     const ChatStore::Message m = m_store->message(message);
-    if (m.id == 0 || m.system)
+    if (m.id == 0 || m.system || m.deleted)
         return std::nullopt;
     Protocol::Quote quote;
     quote.id = m.uid;
@@ -435,6 +435,90 @@ void Messenger::flushOutbox()
     for (const ChatStore::Message &message : m_store->outbox())
         deliver(message);
     sendPendingReactions();
+    sendPendingDeletes();
+}
+
+// --- Deleting ---
+
+void Messenger::deleteForMe(qint64 message)
+{
+    m_store->deleteMessage(message);
+}
+
+bool Messenger::canDeleteForEveryone(qint64 message) const
+{
+    const ChatStore::Message m = m_store->message(message);
+    const ChatStore::Conversation c = m_store->conversation(m.conversation);
+    const bool sent = m.status == QLatin1String("sent") || m.status == QLatin1String("delivered")
+                      || m.status == QLatin1String("read");
+    return m.id != 0 && m.outgoing() && !m.system && !m.deleted && sent && !m.uid.isEmpty()
+           && (c.kind == QLatin1String("direct") || c.kind == QLatin1String("group")) && !c.left
+           && now() - m.sentAt.toMSecsSinceEpoch() <= DeleteForEveryoneMs;
+}
+
+bool Messenger::deleteForEveryone(qint64 message)
+{
+    if (!canDeleteForEveryone(message))
+        return false;
+    m_store->markDeleted(message, true);
+    sendPendingDeletes();
+    return true;
+}
+
+void Messenger::sendPendingDeletes()
+{
+    if (m_state != State::Online)
+        return;
+    for (const qint64 id : m_store->pendingDeletes()) {
+        if (m_deletesInFlight.contains(id))
+            continue;
+        const ChatStore::Message m = m_store->message(id);
+        const ChatStore::Conversation c = m_store->conversation(m.conversation);
+        const bool group = c.kind == QLatin1String("group");
+        if ((c.kind != QLatin1String("direct") && !group) || c.left) {
+            m_store->setDeleteSent(id);
+            continue;
+        }
+        const Protocol::Content content = Protocol::Content::deletion(m.uid, username(), group ? c.peer : QString());
+        Protocol::Content copy = content;
+        if (!group)
+            copy.sentTo = c.peer;
+        m_deletesInFlight.insert(id);
+        const Done done = [this, id, copy](bool ok, const QString &error) {
+            m_deletesInFlight.remove(id);
+            if (!ok && (error == QLatin1String("disconnected") || error == QLatin1String("rate-limited")))
+                return; // again with the outbox
+            m_store->setDeleteSent(id);
+            if (ok)
+                syncToMyDevices(copy);
+        };
+        if (group)
+            fanOut(othersIn(c.id), content, done);
+        else
+            sendContent(c.peer, content, done);
+    }
+}
+
+void Messenger::handleDelete(const QString &from, const Protocol::Envelope &envelope, const Protocol::Content &content,
+                             bool mine)
+{
+    if (!content.quote || content.quote->author != from)
+        return; // only one's own messages
+    qint64 conversation = 0;
+    if (!content.group.isEmpty()) {
+        conversation = m_store->groupConversation(content.group);
+        if (conversation == 0 || !m_store->isMember(conversation, from))
+            return;
+    } else {
+        conversation = m_store->directConversation(mine ? content.sentTo : from);
+    }
+    const qint64 target = conversation ? m_store->messageByUid(conversation, content.quote->id) : 0;
+    const ChatStore::Message m = m_store->message(target);
+    // Theirs (mine, from another device of mine), and not long ago by the server's clock.
+    if (target == 0 || m.system || m.deleted || (mine ? !m.outgoing() : m.author != from)
+        || envelope.serverTime - m.sentAt.toMSecsSinceEpoch() > 2 * DeleteForEveryoneMs)
+        return;
+    m_store->markDeleted(target);
 }
 
 // --- Reactions ---
@@ -449,7 +533,7 @@ bool Messenger::react(qint64 message, const QString &emoji)
 {
     const ChatStore::Message m = m_store->message(message);
     const ChatStore::Conversation c = m_store->conversation(m.conversation);
-    if (m.id == 0 || m.system || (!emoji.isEmpty() && !Protocol::isValidReaction(emoji)))
+    if (m.id == 0 || m.system || m.deleted || (!emoji.isEmpty() && !Protocol::isValidReaction(emoji)))
         return false;
     if (c.kind == QLatin1String("self")) {
         m_store->setReaction(message, QString(), emoji, now()); // here only
@@ -518,7 +602,7 @@ void Messenger::handleReaction(const QString &from, const Protocol::Content &con
     const qint64 target = m_store->messageByUid(conversation, content.quote->id);
     const ChatStore::Message m = m_store->message(target);
     // The message must be the one named: its id and its author.
-    if (target == 0 || m.system
+    if (target == 0 || m.system || m.deleted
         || (m.outgoing() ? content.quote->author != username() : m.author != content.quote->author))
         return;
     m_store->setReaction(target, mine ? QString() : from, content.remove ? QString() : content.emoji, now());
@@ -940,7 +1024,7 @@ void Messenger::handleContent(const QString &from, const Protocol::Envelope &env
     if (from == username()) {
         if (!m_myDevices.contains(envelope.fromDevice))
             m_myDevices << envelope.fromDevice; // a device of mine I had not heard of
-        handleSync(content);
+        handleSync(envelope, content);
         return;
     }
     if (m_store->isBlocked(from))
@@ -969,6 +1053,10 @@ void Messenger::handleContent(const QString &from, const Protocol::Envelope &env
     }
     if (content.type == Protocol::Content::Type::Reaction) {
         handleReaction(from, content, false);
+        return;
+    }
+    if (content.type == Protocol::Content::Type::Delete) {
+        handleDelete(from, envelope, content, false);
         return;
     }
     if (content.type == Protocol::Content::Type::Receipt) {
@@ -1649,7 +1737,7 @@ void Messenger::syncToMyDevices(const Protocol::Content &content)
     sendContent(username(), content, [](bool, const QString &) {});
 }
 
-void Messenger::handleSync(const Protocol::Content &content)
+void Messenger::handleSync(const Protocol::Envelope &envelope, const Protocol::Content &content)
 {
     switch (content.type) {
     case Protocol::Content::Type::Text: {
@@ -1715,6 +1803,9 @@ void Messenger::handleSync(const Protocol::Content &content)
         return;
     case Protocol::Content::Type::Reaction:
         handleReaction(username(), content, true); // made on another device of mine
+        return;
+    case Protocol::Content::Type::Delete:
+        handleDelete(username(), envelope, content, true); // deleted on another device of mine
         return;
     }
 }

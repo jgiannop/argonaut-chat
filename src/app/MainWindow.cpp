@@ -60,6 +60,7 @@ enum Role {
     QuoteAuthorRole, // a reply: who wrote what it answers (as shown: "You", a name)
     QuoteTextRole,   // a reply: the start of what it answers
     ReactionsRole,   // its reactions as shown: "👍 2  ❤️"
+    DeletedRole,     // deleted for everyone: only a mark is left
 };
 
 QString shortTime(const QDateTime &when)
@@ -173,6 +174,13 @@ public:
     static constexpr int Pad = 10;
     static constexpr int Gap = 6;
     static constexpr int QuotePad = 6;
+    // A deleted message's mark in italics.
+    static QFont textFont(const QStyleOptionViewItem &option, const QModelIndex &index)
+    {
+        QFont font = option.font;
+        font.setItalic(index.data(DeletedRole).toBool());
+        return font;
+    }
     // The reactions' pill: overlapping the bubble's bottom edge by 6 px, as Signal's.
     static int reactionHeight(const QStyleOptionViewItem &option) { return QFontMetrics(option.font).height() + 8; }
     static constexpr int QuoteBar = 3;
@@ -236,7 +244,7 @@ public:
         }
         const QString text = index.data().toString();
         if (!text.isEmpty()) {
-            const QRect t = fm.boundingRect(QRect(0, 0, most, 100000), Qt::TextWordWrap, text);
+            const QRect t = QFontMetrics(textFont(option, index)).boundingRect(QRect(0, 0, most, 100000), Qt::TextWordWrap, text);
             l.text = QRect(Pad, y, t.width(), t.height());
             y += t.height();
             width = qMax(width, t.width());
@@ -362,8 +370,14 @@ public:
                         QFontMetrics(bold).elidedText(file, Qt::ElideMiddle, l.file.width()));
             p->setFont(option.font);
         }
-        if (!l.text.isNull())
+        if (!l.text.isNull()) {
+            const bool deleted = index.data(DeletedRole).toBool();
+            p->setFont(textFont(option, index));
+            if (deleted)
+                p->setPen(mine ? QColor(255, 255, 255, 200) : m_theme->dimFg);
             p->drawText(l.text.translated(origin), Qt::TextWordWrap, index.data().toString());
+            p->setFont(option.font);
+        }
         p->setFont(small);
         // Read: the ticks in full white, as Signal fills them in.
         p->setPen(mine ? QColor(255, 255, 255, read ? 255 : 190) : m_theme->dimFg);
@@ -778,7 +792,7 @@ void MainWindow::reloadConversations()
             if (!picture.isNull())
                 item->setData(AvatarRole, picture);
         }
-        item->setData(LastTextRole, c.lastText);
+        item->setData(LastTextRole, c.lastDeleted ? tr("This message was deleted") : c.lastText);
         item->setData(TimeRole, c.lastText.isEmpty() ? QString() : shortTime(c.lastActivity));
         item->setData(UnreadRole, c.id == m_current || c.request ? 0 : c.unread);
         item->setData(RequestRole, c.request);
@@ -1041,8 +1055,9 @@ void MainWindow::reloadMessages()
     m_messages->clear();
     const bool group = m_store->conversation(m_current).kind == QLatin1String("group");
     for (const ChatStore::Message &m : m_store->messages(m_current)) {
-        auto *item = new QListWidgetItem(m.body, m_messages);
+        auto *item = new QListWidgetItem(m.deleted ? tr("This message was deleted") : m.body, m_messages);
         item->setData(IdRole, m.id);
+        item->setData(DeletedRole, m.deleted);
         item->setData(OutgoingRole, m.outgoing());
         item->setData(TimeRole, QLocale().toString(m.sentAt.toLocalTime().time(), QLocale::ShortFormat));
         item->setData(StatusRole, m.status);
@@ -1052,7 +1067,8 @@ void MainWindow::reloadMessages()
             item->setData(AuthorRole, m_messenger ? m_messenger->displayName(m.author) : m.author);
         if (m.isReply()) {
             item->setData(QuoteAuthorRole, quoteAuthorName(m.quoteAuthor));
-            item->setData(QuoteTextRole, m.quoteText);
+            // Emptied when what it answered was deleted for everyone.
+            item->setData(QuoteTextRole, m.quoteText.isEmpty() ? tr("Deleted message") : m.quoteText);
         }
         const QList<ChatStore::StoredAttachment> attachments = m_store->attachments(m.id);
         if (!attachments.isEmpty()) {
@@ -1166,6 +1182,12 @@ QMenu *MainWindow::messageMenu(qint64 message)
     if (m.id == 0 || m.system)
         return nullptr;
     auto *menu = new QMenu(this);
+    if (m.deleted) {
+        // Only the mark is left: it can go from here.
+        menu->addAction(tr("Delete for Me…"), this, [this, message] { deleteMessage(message, false, true); })
+            ->setObjectName(QStringLiteral("deleteForMeAction"));
+        return menu;
+    }
     QAction *reply = menu->addAction(tr("Reply"), this, [this, message] { replyTo(message); });
     reply->setObjectName(QStringLiteral("replyAction"));
     // Not where nothing can be written: a request, a group I left.
@@ -1192,7 +1214,36 @@ QMenu *MainWindow::messageMenu(qint64 message)
     if (!m.body.isEmpty()) {
         menu->addAction(tr("Copy Text"), this, [body = m.body] { QGuiApplication::clipboard()->setText(body); });
     }
+    menu->addSeparator();
+    menu->addAction(tr("Delete for Me…"), this, [this, message] { deleteMessage(message, false, true); })
+        ->setObjectName(QStringLiteral("deleteForMeAction"));
+    if (m_messenger && m_messenger->canDeleteForEveryone(message)) {
+        menu->addAction(tr("Delete for Everyone…"), this, [this, message] { deleteMessage(message, true, true); })
+            ->setObjectName(QStringLiteral("deleteForEveryoneAction"));
+    }
     return menu;
+}
+
+void MainWindow::deleteMessage(qint64 message, bool forEveryone, bool ask)
+{
+    if (ask) {
+        const QString question = forEveryone
+            ? tr("Delete this message for everyone in the conversation? They will see that a message was deleted.")
+            : tr("Delete this message from this computer? The others keep their copy.");
+        if (QMessageBox::question(this, forEveryone ? tr("Delete for Everyone") : tr("Delete for Me"), question)
+            != QMessageBox::Yes)
+            return;
+    }
+    if (m_replyTo == message)
+        cancelReply();
+    if (forEveryone) {
+        if (!m_messenger || !m_messenger->deleteForEveryone(message))
+            showNotice(tr("This message can no longer be deleted for everyone."));
+    } else if (m_messenger) {
+        m_messenger->deleteForMe(message);
+    } else {
+        m_store->deleteMessage(message);
+    }
 }
 
 void MainWindow::replyTo(qint64 message)

@@ -71,6 +71,8 @@ public:
     qint64 replyingTo() const { return m_replyTo; }
     QWidget *replyBar() const { return m_replyBar; }
     QLabel *replyLabel() const { return m_replyLabel; }
+    // Delete for Me / for Everyone (`ask`: confirm first).
+    void deleteMessage(qint64 message, bool forEveryone, bool ask);
     // A message's right-click menu (the caller owns it); none for a note.
     QMenu *messageMenu(qint64 message);
 
