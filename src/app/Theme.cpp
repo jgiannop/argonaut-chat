@@ -878,7 +878,7 @@ QIcon glyphIcon(Glyph glyph, const QColor &color)
     return QIcon(new GlyphEngine(glyph, color));
 }
 
-// The app icon: a blue speech bubble with Argonaut's boat (128x128), drawn in code
+// The app icon: an orange speech bubble with Argonaut's boat (128x128), drawn in code
 // so no SVG plugin is needed.
 QIcon applicationIcon()
 {
@@ -890,20 +890,23 @@ QIcon applicationIcon()
         p.setRenderHint(QPainter::Antialiasing);
         p.scale(size / 128.0, size / 128.0);
         p.setPen(Qt::NoPen);
-        // A speech bubble, its tail at the bottom left: two shapes in the
-        // same fill, as data/argonaut-chat.svg draws them (one path made of
-        // both left a sliver where they meet).
-        QLinearGradient fill(0, 12, 0, 120);
-        fill.setColorAt(0, QColor("#62a0ea"));
-        fill.setColorAt(1, QColor("#1c71d8"));
-        p.setBrush(fill);
-        p.drawRoundedRect(QRectF(8, 12, 112, 88), 30, 30);
-        p.drawPolygon(QPolygonF({QPointF(26, 88), QPointF(14, 120), QPointF(54, 98)}));
+        // A speech bubble in Argonaut's orange, its tail at the bottom left:
+        // a darker back edge above (as the folder's and the envelope's), then
+        // the front, bubble and tail in one gradient, as two shapes (one path
+        // made of both left a sliver where they meet). As data/argonaut-chat.svg.
+        p.setBrush(QColor("#c64600"));
+        p.drawRoundedRect(QRectF(10, 18, 108, 82), 24, 24);
+        QLinearGradient front(0, 24, 0, 122);
+        front.setColorAt(0, QColor("#ffa348"));
+        front.setColorAt(1, QColor("#ff7800"));
+        p.setBrush(front);
+        p.drawRoundedRect(QRectF(10, 22, 108, 82), 24, 24);
+        p.drawPolygon(QPolygonF({QPointF(24, 94), QPointF(16, 122), QPointF(54, 102)}));
 
         // The Argo (Argonaut's mast, mainsail, jib and hull), in the bubble.
-        p.translate(64, 58);
-        p.scale(0.8, 0.8);
-        p.translate(-66, -76);
+        p.translate(64, 63);
+        p.scale(0.76, 0.76);
+        p.translate(-66, -79);
         p.setPen(QPen(Qt::white, 5, Qt::SolidLine, Qt::RoundCap));
         p.drawLine(QPointF(66, 54), QPointF(66, 90));
         p.setPen(Qt::NoPen);

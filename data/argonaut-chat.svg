@@ -1,18 +1,22 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
-  <!-- The same as applicationIcon() (src/app/Theme.cpp): a speech bubble,
-       its tail at the bottom left, with Argonaut's boat in it. -->
+  <!-- The same as applicationIcon() (src/app/Theme.cpp): a speech bubble in
+       Argonaut's orange, its tail at the bottom left, with Argonaut's boat
+       in it; the darker back edge as on Argonaut's folder and Argonaut
+       Emails' envelope. -->
   <defs>
-    <linearGradient id="bubble" x1="0" y1="12" x2="0" y2="120" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#62a0ea"/>
-      <stop offset="1" stop-color="#1c71d8"/>
+    <linearGradient id="front" x1="0" y1="24" x2="0" y2="122" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffa348"/>
+      <stop offset="1" stop-color="#ff7800"/>
     </linearGradient>
   </defs>
-  <rect x="8" y="12" width="112" height="88" rx="30" fill="url(#bubble) #3584e4"/>
-  <polygon points="26,88 14,120 54,98" fill="url(#bubble) #3584e4"/>
-  <g transform="translate(64 58) scale(0.8) translate(-66 -76)">
-    <line x1="66" y1="54" x2="66" y2="90" stroke="#ffffff" stroke-width="5" stroke-linecap="round"/>
-    <polygon points="70,55 92,86 70,86" fill="#ffffff"/>
-    <polygon points="34,92 98,92 89,104 43,104" fill="#ffffff"/>
-    <polygon points="62,61 62,86 44,86" fill="#ffffff" fill-opacity="0.85"/>
+  <rect x="10" y="18" width="108" height="82" rx="24" fill="#c64600"/>
+  <rect x="10" y="22" width="108" height="82" rx="24" fill="url(#front)"/>
+  <polygon points="24,94 16,122 54,102" fill="url(#front)"/>
+  <!-- The Argo: mast, mainsail, jib and hull -->
+  <g transform="translate(64 63) scale(.76) translate(-66 -79)">
+    <path d="M66 54v36" stroke="#fff" stroke-width="5" stroke-linecap="round"/>
+    <path d="M70 55l22 31H70z" fill="#fff"/>
+    <path d="M62 61v25H44z" fill="#fff" fill-opacity=".85"/>
+    <path d="M34 92h64l-9 12H43z" fill="#fff"/>
   </g>
 </svg>
