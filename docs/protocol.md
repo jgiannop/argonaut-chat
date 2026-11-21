@@ -57,6 +57,21 @@ blob, checks its size and digest, decrypts, and drops the padding. At most
 direction marks; types must look like `type/subtype`. On disk, both sides
 keep the blob as it was (the key in the encrypted database).
 
+### Replies
+
+A text that answers another quotes it, as Signal does:
+
+```json
+{"v":1, "t":"text", …, "body":"Yes!", "quote":{"id":"<its uuid>", "author":"alice", "text":"Pizza tonight?"}}
+```
+
+`id` is the answered message's id, `author` the username of whoever wrote
+it (the replier's own too), `text` the start of it, at most 200 characters
+(a file without a caption: "📎 " and its name), so the quote shows even
+where the original is gone. A quote that is not exactly that object drops
+the whole message. Versions before 0.2 ignore the field and show the text
+alone.
+
 ### Profiles
 
 ```json

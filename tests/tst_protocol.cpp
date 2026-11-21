@@ -215,6 +215,36 @@ private slots:
         QVERIFY(!decodeContent(pad(head + "\"expire\":5,\"group\":\"x\"}")));
     }
 
+    void replies()
+    {
+        const QString theirs = newMessageId();
+        Content text = Content::text("Yes!");
+        text.quote = Quote{theirs, "alice", "Pizza tonight?"};
+        const auto back = decodeContent(encodeContent(text));
+        QVERIFY(back && back->quote);
+        QCOMPARE(*back->quote, *text.quote);
+        QVERIFY(!decodeContent(encodeContent(Content::text("plain")))->quote);
+        // An empty excerpt is fine (a file's caption-less message).
+        text.quote->text.clear();
+        QCOMPARE(decodeContent(encodeContent(text))->quote->text, QString());
+        // Not sent: a bad id, author or a too long excerpt.
+        for (const Quote &bad : {Quote{"nope", "alice", "x"}, Quote{theirs, "Not A Name!", "x"},
+                                 Quote{theirs, "alice", QString(MaxQuoteChars + 1, QLatin1Char('x'))}}) {
+            text.quote = bad;
+            QVERIFY(encodeContent(text).isEmpty());
+        }
+        // Not taken from anyone either.
+        const QByteArray head = "{\"v\":1,\"t\":\"text\",\"id\":\"" + newMessageId().toLatin1() + "\",\"sent\":1,\"body\":\"x\",";
+        const QByteArray id = theirs.toLatin1();
+        QVERIFY(decodeContent(pad(head + "\"quote\":{\"id\":\"" + id + "\",\"author\":\"bob\",\"text\":\"hi\"}}")));
+        QVERIFY(!decodeContent(pad(head + "\"quote\":\"" + id + "\"}")));
+        QVERIFY(!decodeContent(pad(head + "\"quote\":{\"id\":\"x\",\"author\":\"bob\",\"text\":\"hi\"}}")));
+        QVERIFY(!decodeContent(pad(head + "\"quote\":{\"id\":\"" + id + "\",\"author\":5,\"text\":\"hi\"}}")));
+        QVERIFY(!decodeContent(pad(head + "\"quote\":{\"id\":\"" + id + "\",\"author\":\"bob\"}}")));
+        QVERIFY(!decodeContent(pad(head + "\"quote\":{\"id\":\"" + id + "\",\"author\":\"bob\",\"text\":\""
+                                   + QByteArray(MaxQuoteChars + 1, 'x') + "\"}}")));
+    }
+
     void contentFromStrangers_data()
     {
         QTest::addColumn<QByteArray>("json");

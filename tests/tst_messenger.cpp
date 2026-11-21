@@ -871,6 +871,75 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(alice.store->conversation(*group).expireSeconds, 300, kWait);
     }
 
+    void replies()
+    {
+        Device alice(file("alice"));
+        Device bob(file("bob"));
+        QVERIFY(signUp(alice, "alice"));
+        QVERIFY(signUp(bob, "bob"));
+        const qint64 toBob = startConversation(alice, "bob");
+        const qint64 question = alice.messenger->send(toBob, "Pizza tonight?");
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("alice") > 0, kWait);
+        const qint64 toAlice = bob.store->directConversation("alice");
+        bob.messenger->acceptRequest(toAlice);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(toAlice), QString("Pizza tonight?"), kWait);
+
+        // Alice's second computer, to see her replies arrive there too.
+        Device laptop(file("laptop"));
+        std::optional<QString> code;
+        std::optional<bool> linked;
+        laptop.messenger->linkThisDevice(m_url, [&](const QString &shown) { code = shown; },
+                                         [&](bool ok, const QString &) { linked = ok; });
+        QTRY_VERIFY_WITH_TIMEOUT(code.has_value(), kWait);
+        alice.messenger->linkDevice(*code, [](bool, const QString &) {});
+        QTRY_VERIFY_WITH_TIMEOUT(linked.has_value() && *linked, kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(alice.messenger->myDevices().size(), 2, kWait);
+
+        // Bob answers her question: the quote names it, and her.
+        const qint64 theirs = bob.store->messages(toAlice).last().id;
+        const qint64 answer = bob.messenger->send(toAlice, "Yes!", theirs);
+        const ChatStore::Message sent = bob.store->message(answer);
+        QVERIFY(sent.isReply());
+        QCOMPARE(sent.quoteUid, alice.store->message(question).uid);
+        QCOMPARE(sent.quoteAuthor, QString("alice"));
+        QCOMPARE(sent.quoteText, QString("Pizza tonight?"));
+        QTRY_COMPARE_WITH_TIMEOUT(alice.last(toBob), QString("Yes!"), kWait);
+        const ChatStore::Message got = alice.store->messages(toBob).last();
+        QCOMPARE(got.quoteUid, alice.store->message(question).uid);
+        QCOMPARE(got.quoteAuthor, QString("alice"));
+        QCOMPARE(got.quoteText, QString("Pizza tonight?"));
+        QCOMPARE(alice.store->messageByUid(toBob, got.quoteUid), question);
+
+        // She answers his answer: on her laptop too, with its quote.
+        alice.messenger->send(toBob, "Great", got.id);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(toAlice), QString("Great"), kWait);
+        QCOMPARE(bob.store->messages(toAlice).last().quoteAuthor, QString("bob"));
+        QCOMPARE(bob.store->messages(toAlice).last().quoteText, QString("Yes!"));
+        const qint64 laptopToBob = laptop.store->directConversation("bob");
+        QVERIFY(laptopToBob > 0);
+        QTRY_COMPARE_WITH_TIMEOUT(laptop.last(laptopToBob), QString("Great"), kWait);
+        QCOMPARE(laptop.store->messages(laptopToBob).last().quoteAuthor, QString("bob"));
+
+        // Long texts are quoted by their start; a file by its name.
+        const QString longText(500, QLatin1Char('x'));
+        const qint64 essay = alice.messenger->send(toBob, longText);
+        const auto quote = alice.messenger->quoteOf(essay);
+        QVERIFY(quote);
+        QCOMPARE(quote->text.size(), Protocol::MaxQuoteChars);
+        QVERIFY(quote->text.endsWith(QStringLiteral("…")));
+        const qint64 photo = alice.messenger->sendFile(
+            toBob, writeFile("photo.png", QByteArray("\x89PNG\r\n\x1a\n", 8) + Crypto::randomBytes(100)), QString());
+        QVERIFY(photo > 0);
+        QCOMPARE(alice.messenger->quoteOf(photo)->text, QStringLiteral("📎 photo.png"));
+
+        // Only a message of the same conversation; a note is not a reply to anything there.
+        const qint64 note = alice.messenger->send(alice.store->noteToSelf(), "unrelated", question);
+        QVERIFY(!alice.store->message(note).isReply());
+        // In Note to Self, a reply to a note.
+        const qint64 reply = alice.messenger->send(alice.store->noteToSelf(), "about that", note);
+        QCOMPARE(alice.store->message(reply).quoteText, QString("unrelated"));
+    }
+
     void keyStoreTrust()
     {
         Device alice(file("alice"));

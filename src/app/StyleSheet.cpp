@@ -25,6 +25,8 @@ QWidget#requestBar QPushButton { background: @pathBg; color: @fg; border: none; 
 QWidget#requestBar QPushButton:hover { background: @hover; }
 QWidget#requestBar QPushButton#acceptButton { background: @accent; color: #ffffff; font-weight: bold; }
 QWidget#composer { background: @window; border-top: 1px solid @border; }
+QWidget#replyBar { background: @pathBg; border-left: 3px solid @accent; border-radius: 6px; }
+QLabel#replyLabel { color: @dimFg; }
 QPlainTextEdit#composeField { background: @pathBg; color: @fg; border: none; border-radius: 18px; padding: 6px 12px;
     selection-background-color: @accent; }
 QPushButton#sendButton { background: @accent; color: #ffffff; border: none; border-radius: 18px; padding: 8px 16px; font-weight: bold; }

@@ -19,6 +19,8 @@
 #include <QSignalSpy>
 #include <QToolButton>
 #include <QListWidget>
+
+#include <memory>
 #include <QPlainTextEdit>
 #include <QTest>
 
@@ -49,6 +51,74 @@ private slots:
         if (qEnvironmentVariableIsSet("CHAT_TEST_GRAB")) {
             const qint64 anna = store.addConversation(QStringLiteral("direct"), QStringLiteral("Anna"), QStringLiteral("anna"));
             store.addMessage(anna, QStringLiteral("Are we still on for Sunday?"), QStringLiteral("anna"));
+            window.resize(1000, 640);
+            QTest::qWait(200);
+            window.grab().save(qEnvironmentVariable("CHAT_TEST_GRAB"));
+        }
+    }
+
+    // Reply from a message's menu: the bar says what it answers, the bubble quotes it.
+    void replyToAMessage()
+    {
+        ChatStore store(TestSupport::home() + QStringLiteral("/replies.sqlite"));
+        KeyStore keys(&store);
+        Messenger messenger(&store, &keys);
+        MainWindow window(&store, &messenger);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        const int quoteAuthorRole = Qt::UserRole + 16;
+        const int quoteTextRole = Qt::UserRole + 17;
+
+        QTest::keyClicks(window.composeField(), QStringLiteral("Call the plumber"));
+        QTest::keyClick(window.composeField(), Qt::Key_Return);
+        const qint64 note = store.messages(store.noteToSelf()).last().id;
+        std::unique_ptr<QMenu> menu(window.messageMenu(note));
+        QAction *reply = menu->findChild<QAction *>(QStringLiteral("replyAction"));
+        QVERIFY(reply && reply->isEnabled());
+        reply->trigger();
+        QCOMPARE(window.replyingTo(), note);
+        QVERIFY(window.replyBar()->isVisible());
+        QVERIFY(window.replyLabel()->text().contains(QStringLiteral("Call the plumber")));
+        QVERIFY(window.replyLabel()->text().contains(QStringLiteral("You")));
+
+        // Esc: not a reply after all.
+        QTest::keyClick(window.composeField(), Qt::Key_Escape);
+        QCOMPARE(window.replyingTo(), 0);
+        QVERIFY(!window.replyBar()->isVisible());
+
+        window.replyTo(note);
+        QTest::keyClicks(window.composeField(), QStringLiteral("Done, Tuesday at 10"));
+        QTest::keyClick(window.composeField(), Qt::Key_Return);
+        QCOMPARE(window.replyingTo(), 0); // one message only
+        QVERIFY(!window.replyBar()->isVisible());
+        QCOMPARE(window.messages()->count(), 2);
+        QListWidgetItem *bubble = window.messages()->item(1);
+        QCOMPARE(bubble->data(quoteAuthorRole).toString(), QStringLiteral("You"));
+        QCOMPARE(bubble->data(quoteTextRole).toString(), QStringLiteral("Call the plumber"));
+        QVERIFY(window.messages()->item(0)->data(quoteAuthorRole).isNull());
+        // The quote makes the bubble taller.
+        QVERIFY(window.messages()->visualItemRect(bubble).height() > window.messages()->visualItemRect(window.messages()->item(0)).height());
+
+        // A reply is to a message of the open conversation: another one ends it.
+        window.replyTo(note);
+        const qint64 anna = store.addConversation(QStringLiteral("direct"), QStringLiteral("Anna"), QStringLiteral("anna"));
+        window.openConversation(anna);
+        QCOMPARE(window.replyingTo(), 0);
+        // A note in the conversation has no menu.
+        const qint64 system = store.addSystemNote(anna, QStringLiteral("a note"), QDateTime::currentDateTimeUtc());
+        QVERIFY(!std::unique_ptr<QMenu>(window.messageMenu(system)));
+        if (qEnvironmentVariableIsSet("CHAT_TEST_GRAB")) {
+            store.addMessage(anna, QStringLiteral("Are we still on for Sunday?"), QStringLiteral("anna"));
+            const qint64 question = store.messages(anna).last().id;
+            store.setAccepted(anna);
+            window.openConversation(anna);
+            window.replyTo(question);
+            QTest::keyClicks(window.composeField(), QStringLiteral("Yes! 11 at the harbour?"));
+            QTest::keyClick(window.composeField(), Qt::Key_Return);
+            store.addMessage(anna, QStringLiteral("Perfect, see you there"), QStringLiteral("anna"));
+            store.setQuote(store.messages(anna).last().id, store.messages(anna).at(store.messages(anna).size() - 2).uid,
+                           QStringLiteral("me"), QStringLiteral("Yes! 11 at the harbour?"));
+            window.replyTo(store.messages(anna).last().id);
             window.resize(1000, 640);
             QTest::qWait(200);
             window.grab().save(qEnvironmentVariable("CHAT_TEST_GRAB"));

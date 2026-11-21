@@ -137,6 +137,10 @@ void ChatStore::createTables()
     addColumn(QStringLiteral("messages"), QStringLiteral("expire_seconds"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
     addColumn(QStringLiteral("messages"), QStringLiteral("expires_at"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
     addColumn(QStringLiteral("messages"), QStringLiteral("system"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
+    // Added with replies.
+    addColumn(QStringLiteral("messages"), QStringLiteral("quote_uid"), QStringLiteral("TEXT NOT NULL DEFAULT ''"));
+    addColumn(QStringLiteral("messages"), QStringLiteral("quote_author"), QStringLiteral("TEXT NOT NULL DEFAULT ''"));
+    addColumn(QStringLiteral("messages"), QStringLiteral("quote_text"), QStringLiteral("TEXT NOT NULL DEFAULT ''"));
     q.exec(QStringLiteral("CREATE INDEX IF NOT EXISTS messages_by_expiry ON messages(expires_at)"));
     q.exec(QStringLiteral("CREATE TABLE IF NOT EXISTS group_info ("
                           " conversation INTEGER PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,"
@@ -167,7 +171,8 @@ void ChatStore::createTables()
 namespace {
 
 const QString kMessageColumns =
-    QStringLiteral("id, conversation, author, body, sent_at, status, uid, expire_seconds, expires_at, system");
+    QStringLiteral("id, conversation, author, body, sent_at, status, uid, expire_seconds, expires_at, system,"
+                   " quote_uid, quote_author, quote_text");
 
 ChatStore::Message messageFrom(const QSqlQuery &q)
 {
@@ -182,6 +187,9 @@ ChatStore::Message messageFrom(const QSqlQuery &q)
     m.expireSeconds = q.value(7).toLongLong();
     m.expiresAt = q.value(8).toLongLong();
     m.system = q.value(9).toBool();
+    m.quoteUid = q.value(10).toString();
+    m.quoteAuthor = q.value(11).toString();
+    m.quoteText = q.value(12).toString();
     return m;
 }
 
@@ -429,6 +437,29 @@ bool ChatStore::hasMessage(qint64 conversation, const QString &uid) const
     q.addBindValue(conversation);
     q.addBindValue(uid);
     return q.exec() && q.next();
+}
+
+qint64 ChatStore::messageByUid(qint64 conversation, const QString &uid) const
+{
+    if (uid.isEmpty())
+        return 0;
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT id FROM messages WHERE conversation = ? AND uid = ? LIMIT 1"));
+    q.addBindValue(conversation);
+    q.addBindValue(uid);
+    return q.exec() && q.next() ? q.value(0).toLongLong() : 0;
+}
+
+void ChatStore::setQuote(qint64 message, const QString &uid, const QString &author, const QString &excerpt)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("UPDATE messages SET quote_uid = ?, quote_author = ?, quote_text = ? WHERE id = ?"));
+    q.addBindValue(text(uid));
+    q.addBindValue(text(author));
+    q.addBindValue(text(excerpt));
+    q.addBindValue(message);
+    if (q.exec())
+        emit messagesChanged(this->message(message).conversation);
 }
 
 QList<ChatStore::Message> ChatStore::outbox() const

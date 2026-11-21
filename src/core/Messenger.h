@@ -68,11 +68,15 @@ public:
     // Finds the person on the server and opens the conversation with them.
     void startConversation(const QString &username, const std::function<void(qint64 conversation, const QString &error)> &done);
     // Mine: kept at once, sent when it can be. Note to Self stays here.
-    qint64 send(qint64 conversation, const QString &text);
+    // `replyTo`: a message of this conversation it answers (quoted, as Signal does).
+    qint64 send(qint64 conversation, const QString &text, qint64 replyTo = 0);
     // A file (at most Attachment::MaxFileBytes), with an optional caption:
     // encrypted here, kept here as the encrypted blob, uploaded, then the
     // message with its key goes as any other. 0 and `error` if it cannot be.
-    qint64 sendFile(qint64 conversation, const QString &path, const QString &caption, QString *error = nullptr);
+    qint64 sendFile(qint64 conversation, const QString &path, const QString &caption, QString *error = nullptr,
+                    qint64 replyTo = 0);
+    // What a reply to `message` quotes: its id, author and the start of its text.
+    std::optional<Protocol::Quote> quoteOf(qint64 message) const;
     // An attachment here, decrypted in memory; nothing if it is not here (yet).
     std::optional<QByteArray> attachmentData(qint64 attachment) const;
     // Decrypted into `path` (the user's choice).

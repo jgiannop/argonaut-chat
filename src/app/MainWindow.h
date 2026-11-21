@@ -64,6 +64,15 @@ public:
     // Ends the program (File › Quit); closing the window only hides it while there is a tray.
     void quit();
     void showAndRaise();
+    // Replies (as Signal's): a message's menu has Reply; the bar above the
+    // field shows what the next message answers, until it goes or ✕ / Esc.
+    void replyTo(qint64 message);
+    void cancelReply();
+    qint64 replyingTo() const { return m_replyTo; }
+    QWidget *replyBar() const { return m_replyBar; }
+    QLabel *replyLabel() const { return m_replyLabel; }
+    // A message's right-click menu (the caller owns it); none for a note.
+    QMenu *messageMenu(qint64 message);
 
 signals:
     // A notification was shown (tests: the offscreen platform has no tray).
@@ -89,6 +98,8 @@ private:
     QPixmap previewFor(const ChatStore::StoredAttachment &attachment);
     QPixmap avatarFor(const QString &username);
     QString fileLine(const ChatStore::StoredAttachment &attachment, bool shownAsImage) const;
+    // "You", or their name: who wrote what a reply answers.
+    QString quoteAuthorName(const QString &author) const;
     void notify(qint64 conversation, const QString &from, const QString &text, bool request);
     void updateUnread();
 
@@ -116,6 +127,9 @@ private:
     qint64 m_lastNotified = 0;
     bool m_quitting = false;
     QWidget *m_composer = nullptr;
+    QWidget *m_replyBar = nullptr;
+    QLabel *m_replyLabel = nullptr;
+    qint64 m_replyTo = 0;
     QWidget *m_requestBar = nullptr;
     QLabel *m_requestText = nullptr;
     QPushButton *m_acceptButton = nullptr;

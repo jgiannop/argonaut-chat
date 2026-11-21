@@ -324,6 +324,14 @@ QByteArray encodeContent(const Content &content)
         if (content.expireSeconds > 0)
             json.insert(QStringLiteral("expire"), double(content.expireSeconds));
         json.insert(QStringLiteral("body"), content.body);
+        if (content.quote) {
+            if (!isValidMessageId(content.quote->id) || !isValidUsername(content.quote->author)
+                || content.quote->text.size() > MaxQuoteChars)
+                return {};
+            json.insert(QStringLiteral("quote"), QJsonObject{{QStringLiteral("id"), content.quote->id},
+                                                             {QStringLiteral("author"), content.quote->author},
+                                                             {QStringLiteral("text"), content.quote->text}});
+        }
         if (content.attachments.size() > MaxAttachments)
             return {};
         if (!content.attachments.isEmpty()) {
@@ -437,6 +445,17 @@ std::optional<Content> decodeContent(const QByteArray &padded)
             if (!seconds)
                 return std::nullopt;
             content.expireSeconds = *seconds;
+        }
+        const QJsonValue quote = json.value(QStringLiteral("quote"));
+        if (!quote.isUndefined()) {
+            const QJsonObject q = quote.toObject();
+            const QJsonValue id = q.value(QStringLiteral("id"));
+            const QJsonValue author = q.value(QStringLiteral("author"));
+            const QJsonValue text = q.value(QStringLiteral("text"));
+            if (!quote.isObject() || !id.isString() || !isValidMessageId(id.toString()) || !author.isString()
+                || !isValidUsername(author.toString()) || !text.isString() || text.toString().size() > MaxQuoteChars)
+                return std::nullopt;
+            content.quote = Quote{id.toString(), author.toString(), text.toString()};
         }
         const QJsonValue attachments = json.value(QStringLiteral("attachments"));
         if (!attachments.isUndefined()) {

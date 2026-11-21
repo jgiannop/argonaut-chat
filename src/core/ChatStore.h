@@ -52,6 +52,11 @@ public:
         qint64 expireSeconds = 0; // disappears this long after it is seen (mine: sent); 0 never
         qint64 expiresAt = 0;     // ms; 0: not counting yet
         bool system = false;      // a note in the conversation ("… set disappearing messages …")
+        // A reply: the message it answers (its wire id, its author's username, an excerpt).
+        QString quoteUid;
+        QString quoteAuthor;
+        QString quoteText;
+        bool isReply() const { return !quoteAuthor.isEmpty(); }
         bool outgoing() const { return author.isEmpty(); }
     };
 
@@ -85,6 +90,10 @@ public:
     Message message(qint64 id) const;
     // A message already there with this wire id (to drop one delivered twice).
     bool hasMessage(qint64 conversation, const QString &uid) const;
+    // Its local id, or 0.
+    qint64 messageByUid(qint64 conversation, const QString &uid) const;
+    // A reply: what it answers.
+    void setQuote(qint64 message, const QString &uid, const QString &author, const QString &text);
     // Mine in "sending", oldest first: the outbox.
     QList<Message> outbox() const;
     // Oldest first: the newest `limit` of them.

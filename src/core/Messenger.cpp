@@ -372,13 +372,18 @@ void Messenger::fetchSessions(const QString &to, const Done &done)
     });
 }
 
-qint64 Messenger::send(qint64 conversation, const QString &text)
+qint64 Messenger::send(qint64 conversation, const QString &text, qint64 replyTo)
 {
     const ChatStore::Conversation c = m_store->conversation(conversation);
     if (c.id == 0 || text.isEmpty())
         return 0;
+    // Only a message of this conversation can be answered.
+    const auto quote = replyTo != 0 && m_store->message(replyTo).conversation == conversation ? quoteOf(replyTo)
+                                                                                               : std::nullopt;
     if (c.kind == QLatin1String("self")) {
         const qint64 id = m_store->addMessage(conversation, text).id;
+        if (id != 0 && quote)
+            m_store->setQuote(id, quote->id, quote->author, quote->text);
         if (id != 0 && c.expireSeconds > 0) {
             m_store->setMessageExpiry(id, c.expireSeconds, now());
             scheduleExpiry();
@@ -393,6 +398,8 @@ qint64 Messenger::send(qint64 conversation, const QString &text)
     const ChatStore::Message message =
         m_store->addMessage(conversation, text, QString(), QDateTime::fromMSecsSinceEpoch(content.sentAt, QTimeZone::utc()),
                             content.id, QStringLiteral("sending"));
+    if (message.id != 0 && quote)
+        m_store->setQuote(message.id, quote->id, quote->author, quote->text);
     if (message.id != 0 && c.expireSeconds > 0) {
         m_store->setMessageExpiry(message.id, c.expireSeconds, now()); // mine: from now
         scheduleExpiry();
@@ -400,6 +407,27 @@ qint64 Messenger::send(qint64 conversation, const QString &text)
     if (message.id != 0 && m_state == State::Online)
         deliver(m_store->message(message.id));
     return message.id;
+}
+
+std::optional<Protocol::Quote> Messenger::quoteOf(qint64 message) const
+{
+    const ChatStore::Message m = m_store->message(message);
+    if (m.id == 0 || m.system)
+        return std::nullopt;
+    Protocol::Quote quote;
+    quote.id = m.uid;
+    // Mine by my username, as the others know me; a note to self's by mine too (or "me", with no account).
+    quote.author = m.outgoing() ? (hasAccount() ? username() : QStringLiteral("me")) : m.author;
+    QString text = m.body.simplified();
+    if (text.isEmpty()) {
+        const QList<ChatStore::StoredAttachment> files = m_store->attachments(m.id);
+        if (!files.isEmpty())
+            text = QStringLiteral("📎 ") + files.first().name;
+    }
+    if (text.size() > Protocol::MaxQuoteChars)
+        text = text.left(Protocol::MaxQuoteChars - 1) + QStringLiteral("…");
+    quote.text = text;
+    return quote;
 }
 
 void Messenger::flushOutbox()
@@ -457,6 +485,8 @@ void Messenger::deliver(const ChatStore::Message &message)
     content.sentAt = message.sentAt.toMSecsSinceEpoch();
     content.body = message.body;
     content.expireSeconds = message.expireSeconds;
+    if (message.isReply() && Protocol::isValidMessageId(message.quoteUid))
+        content.quote = Protocol::Quote{message.quoteUid, message.quoteAuthor, message.quoteText};
     for (const ChatStore::StoredAttachment &a : attachments)
         content.attachments.append({a.remoteId, a.key, a.digest, a.size, a.name, a.type});
     if (Protocol::encodeContent(content).isEmpty()) {
@@ -501,7 +531,8 @@ void Messenger::deliveryFailed(qint64 message, const QString &error, const QStri
     emit problem(why.isEmpty() ? error : why);
 }
 
-qint64 Messenger::sendFile(qint64 conversation, const QString &path, const QString &caption, QString *error)
+qint64 Messenger::sendFile(qint64 conversation, const QString &path, const QString &caption, QString *error,
+                           qint64 replyTo)
 {
     auto fail = [error](const QString &why) {
         if (error)
@@ -552,6 +583,10 @@ qint64 Messenger::sendFile(qint64 conversation, const QString &path, const QStri
     a.file = blobFile;
     a.state = direct ? QStringLiteral("upload") : QStringLiteral("ready"); // Note to Self: here only
     m_store->addAttachment(a);
+    if (replyTo != 0 && m_store->message(replyTo).conversation == conversation) {
+        if (const auto quote = quoteOf(replyTo))
+            m_store->setQuote(message.id, quote->id, quote->author, quote->text);
+    }
     if (direct && m_state == State::Online)
         deliver(m_store->message(message.id));
     return message.id;
@@ -860,6 +895,8 @@ void Messenger::handleContent(const QString &from, const Protocol::Envelope &env
     const qint64 sentAt = content.sentAt > envelope.serverTime + 5 * 60 * 1000 ? envelope.serverTime : content.sentAt;
     const ChatStore::Message message = m_store->addMessage(
         conversation, content.body, from, QDateTime::fromMSecsSinceEpoch(sentAt, QTimeZone::utc()), content.id);
+    if (content.quote)
+        m_store->setQuote(message.id, content.quote->id, content.quote->author, content.quote->text);
     if (content.expireSeconds > 0)
         m_store->setMessageExpiry(message.id, content.expireSeconds, 0); // counts once seen
     // Its attachments: fetched now, or once a request is accepted.
@@ -1533,6 +1570,8 @@ void Messenger::handleSync(const Protocol::Content &content)
         const ChatStore::Message message = m_store->addMessage(
             conversation, content.body, QString(), QDateTime::fromMSecsSinceEpoch(content.sentAt, QTimeZone::utc()),
             content.id, QStringLiteral("sent"));
+        if (content.quote)
+            m_store->setQuote(message.id, content.quote->id, content.quote->author, content.quote->text);
         if (content.expireSeconds > 0) {
             m_store->setMessageExpiry(message.id, content.expireSeconds, content.sentAt);
             scheduleExpiry();

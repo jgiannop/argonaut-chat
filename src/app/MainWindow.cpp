@@ -11,6 +11,8 @@
 #include <QSettings>
 #include <QActionGroup>
 #include <QApplication>
+#include <QClipboard>
+#include <QMenu>
 #include <QHBoxLayout>
 #include <QFileDialog>
 #include <QInputDialog>
@@ -35,6 +37,8 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 
+#include <memory>
+
 namespace {
 
 enum Role {
@@ -53,6 +57,8 @@ enum Role {
     AuthorRole,     // in a group, who wrote it (theirs only)
     SystemRole,     // a note in the conversation, not a message
     ExpireRole,     // a disappearing message
+    QuoteAuthorRole, // a reply: who wrote what it answers (as shown: "You", a name)
+    QuoteTextRole,   // a reply: the start of what it answers
 };
 
 QString shortTime(const QDateTime &when)
@@ -165,6 +171,8 @@ public:
 
     static constexpr int Pad = 10;
     static constexpr int Gap = 6;
+    static constexpr int QuotePad = 6;
+    static constexpr int QuoteBar = 3;
 
     struct Layout
     {
@@ -172,6 +180,7 @@ public:
         QRect file;
         QRect text;
         QRect author;
+        QRect quote; // a reply's: what it answers
         int width = 0;
         int height = 0;
     };
@@ -194,6 +203,18 @@ public:
             y += boldMetrics.height() + 2;
         }
         int width = smallMetrics.horizontalAdvance(footer);
+        const QString quoteAuthor = index.data(QuoteAuthorRole).toString();
+        if (!quoteAuthor.isEmpty()) {
+            // Its author on one line, the start of its text on the next.
+            QFont smallBold = small;
+            smallBold.setBold(true);
+            const int inner = qMax(QFontMetrics(smallBold).horizontalAdvance(quoteAuthor),
+                                   smallMetrics.horizontalAdvance(index.data(QuoteTextRole).toString()));
+            const int w = qMin(most, qMax(140, inner + 2 * QuotePad + QuoteBar));
+            l.quote = QRect(Pad, y, w, QFontMetrics(smallBold).height() + smallMetrics.height() + 2 * QuotePad);
+            y += l.quote.height() + Gap;
+            width = qMax(width, w);
+        }
         const QPixmap image = index.data(ImageRole).value<QPixmap>();
         if (!image.isNull()) {
             l.image = QRect(Pad, y, image.width(), image.height());
@@ -299,6 +320,32 @@ public:
             p->setFont(bold);
             p->setPen(m_theme->accent);
             p->drawText(l.author.translated(origin), Qt::AlignLeft | Qt::AlignVCenter, index.data(AuthorRole).toString());
+            p->setPen(mine ? QColor(Qt::white) : m_theme->fg);
+            p->setFont(option.font);
+        }
+        if (!l.quote.isNull()) {
+            // A reply: what it answers, in a box with a bar at its left, as Signal shows it.
+            const QRect box = l.quote.translated(origin);
+            QPainterPath boxPath;
+            boxPath.addRoundedRect(box, 8, 8);
+            p->fillPath(boxPath, mine ? QColor(255, 255, 255, 45) : m_theme->window);
+            p->save();
+            p->setClipPath(boxPath);
+            p->fillRect(QRect(box.left(), box.top(), QuoteBar, box.height()), mine ? QColor(Qt::white) : m_theme->accent);
+            p->restore();
+            QFont smallBold = small;
+            smallBold.setBold(true);
+            const QFontMetrics boldMetrics(smallBold);
+            const QRect inner = box.adjusted(QuoteBar + QuotePad, QuotePad, -QuotePad, -QuotePad);
+            p->setFont(smallBold);
+            p->setPen(mine ? QColor(Qt::white) : m_theme->accent);
+            p->drawText(QRect(inner.left(), inner.top(), inner.width(), boldMetrics.height()), Qt::AlignLeft | Qt::AlignVCenter,
+                        boldMetrics.elidedText(index.data(QuoteAuthorRole).toString(), Qt::ElideRight, inner.width()));
+            p->setFont(small);
+            p->setPen(mine ? QColor(255, 255, 255, 215) : m_theme->dimFg);
+            p->drawText(QRect(inner.left(), inner.top() + boldMetrics.height(), inner.width(), smallMetrics.height()),
+                        Qt::AlignLeft | Qt::AlignVCenter,
+                        smallMetrics.elidedText(index.data(QuoteTextRole).toString(), Qt::ElideRight, inner.width()));
             p->setPen(mine ? QColor(Qt::white) : m_theme->fg);
             p->setFont(option.font);
         }
@@ -409,10 +456,42 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
     m_messages->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_messages->setResizeMode(QListView::Adjust);
     m_messages->setWordWrap(true);
+    m_messages->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_messages, &QWidget::customContextMenuRequested, this, [this](const QPoint &pos) {
+        QListWidgetItem *item = m_messages->itemAt(pos);
+        if (!item)
+            return;
+        std::unique_ptr<QMenu> menu(messageMenu(item->data(IdRole).toLongLong()));
+        if (menu && !menu->isEmpty())
+            menu->exec(m_messages->viewport()->mapToGlobal(pos));
+    });
     auto *composer = new QWidget(chat);
     composer->setObjectName(QStringLiteral("composer"));
-    auto *composerLayout = new QHBoxLayout(composer);
-    composerLayout->setContentsMargins(12, 10, 12, 10);
+    auto *composerOuter = new QVBoxLayout(composer);
+    composerOuter->setContentsMargins(12, 8, 12, 10);
+    composerOuter->setSpacing(6);
+    // Above the field while replying: what the reply answers, and ✕ to stop.
+    m_replyBar = new QWidget(composer);
+    m_replyBar->setObjectName(QStringLiteral("replyBar"));
+    m_replyBar->setAttribute(Qt::WA_StyledBackground);
+    auto *replyLayout = new QHBoxLayout(m_replyBar);
+    replyLayout->setContentsMargins(10, 6, 6, 6);
+    m_replyLabel = new QLabel(m_replyBar);
+    m_replyLabel->setObjectName(QStringLiteral("replyLabel"));
+    m_replyLabel->setTextFormat(Qt::PlainText);
+    auto *cancelReply = new QToolButton(m_replyBar);
+    cancelReply->setObjectName(QStringLiteral("cancelReplyButton"));
+    cancelReply->setText(QStringLiteral("✕"));
+    cancelReply->setToolTip(tr("Don't reply (Esc)"));
+    cancelReply->setAutoRaise(true);
+    connect(cancelReply, &QToolButton::clicked, this, &MainWindow::cancelReply);
+    replyLayout->addWidget(m_replyLabel, 1);
+    replyLayout->addWidget(cancelReply);
+    m_replyBar->hide();
+    composerOuter->addWidget(m_replyBar);
+    auto *composerLayout = new QHBoxLayout;
+    composerLayout->setContentsMargins(0, 0, 0, 0);
+    composerOuter->addLayout(composerLayout);
     m_compose = new QPlainTextEdit(composer);
     m_compose->setObjectName(QStringLiteral("composeField"));
     m_compose->setPlaceholderText(tr("Message"));
@@ -689,6 +768,8 @@ void MainWindow::reloadConversations()
 
 void MainWindow::openConversation(qint64 id)
 {
+    if (id != m_current)
+        cancelReply(); // a reply belongs to its conversation
     m_current = id;
     // The list shows which one is open, however it was opened.
     {
@@ -946,6 +1027,10 @@ void MainWindow::reloadMessages()
         item->setData(ExpireRole, m.expireSeconds > 0);
         if (group && !m.outgoing())
             item->setData(AuthorRole, m_messenger ? m_messenger->displayName(m.author) : m.author);
+        if (m.isReply()) {
+            item->setData(QuoteAuthorRole, quoteAuthorName(m.quoteAuthor));
+            item->setData(QuoteTextRole, m.quoteText);
+        }
         const QList<ChatStore::StoredAttachment> attachments = m_store->attachments(m.id);
         if (!attachments.isEmpty()) {
             const ChatStore::StoredAttachment &a = attachments.first();
@@ -1014,11 +1099,59 @@ void MainWindow::attachFile(const QString &path)
     if (!m_messenger || m_current == 0)
         return;
     QString error;
-    if (m_messenger->sendFile(m_current, path, m_compose->toPlainText().trimmed(), &error) == 0) {
+    if (m_messenger->sendFile(m_current, path, m_compose->toPlainText().trimmed(), &error, m_replyTo) == 0) {
         showNotice(error);
         return;
     }
     m_compose->clear();
+    cancelReply();
+}
+
+QString MainWindow::quoteAuthorName(const QString &author) const
+{
+    const bool self = m_store->conversation(m_current).kind == QLatin1String("self");
+    if (self || (m_messenger && author == m_messenger->username()) || author == QLatin1String("me"))
+        return tr("You");
+    return m_messenger ? m_messenger->displayName(author) : author;
+}
+
+QMenu *MainWindow::messageMenu(qint64 message)
+{
+    const ChatStore::Message m = m_store->message(message);
+    const ChatStore::Conversation c = m_store->conversation(m.conversation);
+    if (m.id == 0 || m.system)
+        return nullptr;
+    auto *menu = new QMenu(this);
+    QAction *reply = menu->addAction(tr("Reply"), this, [this, message] { replyTo(message); });
+    reply->setObjectName(QStringLiteral("replyAction"));
+    // Not where nothing can be written: a request, a group I left.
+    reply->setEnabled(m_messenger && !c.request && !c.left);
+    if (!m.body.isEmpty()) {
+        menu->addAction(tr("Copy Text"), this, [body = m.body] { QGuiApplication::clipboard()->setText(body); });
+    }
+    return menu;
+}
+
+void MainWindow::replyTo(qint64 message)
+{
+    if (!m_messenger)
+        return;
+    const ChatStore::Message m = m_store->message(message);
+    const auto quote = m.conversation == m_current ? m_messenger->quoteOf(message) : std::nullopt;
+    if (!quote)
+        return;
+    m_replyTo = message;
+    const QString text = quote->text.isEmpty() ? tr("a message") : quote->text;
+    m_replyLabel->setText(tr("Replying to %1: %2").arg(quoteAuthorName(quote->author), text));
+    m_replyBar->show();
+    m_compose->setFocus();
+}
+
+void MainWindow::cancelReply()
+{
+    m_replyTo = 0;
+    if (m_replyBar)
+        m_replyBar->hide();
 }
 
 bool MainWindow::saveAttachment(qint64 attachment, const QString &path)
@@ -1037,10 +1170,11 @@ void MainWindow::send()
     if (text.isEmpty() || m_current == 0)
         return;
     if (m_messenger)
-        m_messenger->send(m_current, text);
+        m_messenger->send(m_current, text, m_replyTo);
     else
         m_store->addMessage(m_current, text);
     m_compose->clear();
+    cancelReply();
 }
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
@@ -1050,6 +1184,10 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
         auto *key = static_cast<QKeyEvent *>(event);
         if ((key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) && !(key->modifiers() & Qt::ShiftModifier)) {
             send();
+            return true;
+        }
+        if (key->key() == Qt::Key_Escape && m_replyTo != 0) {
+            cancelReply();
             return true;
         }
     }

@@ -33,6 +33,7 @@ constexpr int MaxContentBytes = 128 * 1024;    // a padded Content
 constexpr int MaxCipherMessageBytes = 192 * 1024;
 constexpr int MaxReceiptIds = 1000;
 constexpr int MaxAttachments = 10; // per message
+constexpr int MaxQuoteChars = 200;  // a reply's excerpt of the message it answers
 constexpr int MaxGroupMembers = 50; // me included
 // Disappearing messages: at most four weeks (seconds).
 constexpr qint64 MaxExpireSeconds = 4LL * 7 * 24 * 3600;
@@ -49,6 +50,16 @@ QString newMessageId();
 bool isValidMessageId(const QString &id);
 
 // Layer 1.
+// A reply's quote of the message it answers, as Signal's: its id, its author
+// (a username, mine too) and the start of its text, for showing it.
+struct Quote
+{
+    QString id;
+    QString author;
+    QString text; // at most MaxQuoteChars, maybe empty (a file's)
+    bool operator==(const Quote &other) const { return id == other.id && author == other.author && text == other.text; }
+};
+
 struct Content
 {
     enum class Type { Text, Receipt, Profile, Group, Leave, Timer };
@@ -69,6 +80,8 @@ struct Content
     // Text, to my own other devices only: whom I sent it to (a username), so
     // they show it as mine (a group's has `group` instead). Timer too.
     QString sentTo;
+    // Text: the message it answers (a reply).
+    std::optional<Quote> quote;
     // Text: disappears this many seconds after it is seen (0: never).
     // Timer: the conversation's new setting (with `group` for a group's).
     qint64 expireSeconds = 0;
