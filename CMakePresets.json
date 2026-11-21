@@ -43,6 +43,16 @@
         "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer",
         "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined"
       }
+    },
+    {
+      "name": "windows",
+      "displayName": "Windows (MSVC, with vcpkg's libsodium and SQLCipher)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/windows",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_TESTING": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -61,6 +71,10 @@
     {
       "name": "package",
       "configurePreset": "package"
+    },
+    {
+      "name": "windows",
+      "configurePreset": "windows"
     }
   ],
   "testPresets": [
@@ -87,6 +101,13 @@
       "environment": {
         "ASAN_OPTIONS": "detect_leaks=0:abort_on_error=1",
         "UBSAN_OPTIONS": "print_stacktrace=1"
+      }
+    },
+    {
+      "name": "windows",
+      "configurePreset": "windows",
+      "output": {
+        "outputOnFailure": true
       }
     }
   ]

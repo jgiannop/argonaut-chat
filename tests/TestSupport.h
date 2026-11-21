@@ -1,18 +1,29 @@
 #pragma once
 
+#include <QSettings>
+#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QtGlobal>
 
 // The first line of a test's main(), before the application object: a
 // private HOME and XDG folders (settings and the chat store never touch the
-// real ones), and no display.
+// real ones), and no display. Tests keep their files under home(): on
+// Windows QDir::homePath() is the real profile, whatever HOME says.
 namespace TestSupport {
+
+inline QString &homeFolder()
+{
+    static QString folder;
+    return folder;
+}
+inline QString home() { return homeFolder(); }
 
 class Sandbox
 {
 public:
     Sandbox()
     {
+        homeFolder() = m_dir.path();
         const QByteArray root = m_dir.path().toUtf8();
         qputenv("HOME", root);
         qputenv("XDG_CONFIG_HOME", root + "/config");
@@ -21,6 +32,13 @@ public:
         qputenv("XDG_RUNTIME_DIR", root + "/runtime");
         qputenv("QT_QPA_PLATFORM", "offscreen");
         qputenv("ARGONAUT_THEMES_PATH", "");
+#ifdef Q_OS_WIN
+        // Windows takes its folders from the system, not from the variables
+        // above: Qt's test folders, and settings in a file here, not the registry.
+        QStandardPaths::setTestMode(true);
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_dir.path() + QStringLiteral("/config"));
+#endif
     }
     QString path() const { return m_dir.path(); }
 

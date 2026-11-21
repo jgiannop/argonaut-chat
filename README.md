@@ -61,16 +61,41 @@ to a linked computer.
 
 ## Installing
 
-A package for Ubuntu 24.04 and one for 26.04, built by
-`packaging/build-debs.sh` (each in a clean container of its release, then
-installed on a fresh one to check it) into `dist/`:
+From [Releases](https://github.com/jgiannop/argonaut-chat/releases):
+
+- **Ubuntu 24.04 or 26.04:** the `.deb` for your release. It brings in what
+  it needs (Qt 6, libsodium, SQLCipher, QtKeychain) and puts Argonaut Chat
+  in the applications menu:
+
+  ```bash
+  sudo apt install ./argonaut-chat_<version>_ubuntu24.04_amd64.deb
+  ```
+
+- **Windows 10 or 11 (64-bit):** `argonaut-chat-<version>-windows-setup.exe`
+  installs it with a Start menu entry (for you alone, or for everyone with
+  administrator rights); `argonaut-chat-<version>-windows-x64.zip` is the
+  same program as a folder to run from anywhere. The history is kept in
+  `%APPDATA%\Argonaut\argonaut-chat`, encrypted, its key in Windows
+  Credential Manager. The program isn't signed yet, so SmartScreen warns
+  the first time: "More info", then "Run anyway".
+
+`SHA256SUMS` beside them has the checksums. To make the Linux packages on
+your own computer: `packaging/build-debs.sh` (in Docker, into `dist/`).
+
+## Making a release
+
+Set the version in `CMakeLists.txt` (`project(argonaut-chat VERSION 0.1.0 …)`),
+commit, then tag and push:
 
 ```bash
-sudo apt install ./dist/argonaut-chat_0.0.1_ubuntu24.04_amd64.deb   # or ubuntu26.04
+git tag v0.1.0
+git push origin main v0.1.0
 ```
 
-It brings in what it needs (Qt 6, libsodium, SQLCipher, QtKeychain), and
-puts Argonaut Chat in the applications menu.
+The Release workflow builds the two `.deb` packages and the Windows
+installer and zip, checks that each installs and starts, and publishes them
+as the release `v0.1.0`. Every push to `main` builds and tests on Linux
+(also under ASan/UBSan) and on Windows.
 
 ## Building
 
@@ -83,6 +108,11 @@ cmake --build build/debug
 ./build/debug/argonaut-chat
 ctest --preset debug
 ```
+
+On Windows: Visual Studio 2022, Qt 6.8 with Qt WebSockets, libsodium and
+SQLCipher from vcpkg, QtKeychain built against that Qt, then `cmake --preset
+windows` with vcpkg's toolchain file; `.github/workflows/windows.yml` has
+every step.
 
 ## Trying it on one computer
 

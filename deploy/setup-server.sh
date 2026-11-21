@@ -72,7 +72,7 @@ case "$holders" in
     "") WEB=caddy-new ;;
     caddy) WEB=caddy ;;
     nginx) WEB=nginx ;;
-    *apache2* | *httpd*) die "ports 80/443 are Apache's ($holders). This script does Caddy and nginx only; nothing has been changed. Tell Claude, and it can add Apache." ;;
+    *apache2* | *httpd*) die "ports 80/443 are Apache's ($holders). This script does Caddy and nginx only; nothing has been changed. Apache support can be added to this script." ;;
     *) die "ports 80/443 are held by: $holders. This script knows Caddy and nginx only; nothing has been changed." ;;
 esac
 case $WEB in

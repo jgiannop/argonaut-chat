@@ -24,13 +24,38 @@ else()
     endif()
 endif()
 # The cryptography: libsodium (1.0.18 on Ubuntu 24.04).
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium>=1.0.18)
 # The local database: SQLCipher (4.5 on Ubuntu 24.04, 4.13 on 26.04), and its key in the
 # system keyring through QtKeychain.
-# No version check: newer packages report the version of the SQLite inside
-# (3.51 for SQLCipher 4.13 on Ubuntu 26.04), older ones SQLCipher's own.
-pkg_check_modules(SQLCIPHER REQUIRED IMPORTED_TARGET sqlcipher)
+if(WIN32)
+    # On Windows both come from vcpkg (`vcpkg install libsodium sqlcipher`,
+    # with its toolchain file), found by name: there is no pkg-config.
+    find_path(SODIUM_INCLUDE_DIR sodium.h REQUIRED)
+    find_library(SODIUM_LIBRARY NAMES libsodium sodium REQUIRED)
+    add_library(chat_sodium INTERFACE)
+    target_include_directories(chat_sodium INTERFACE ${SODIUM_INCLUDE_DIR})
+    target_link_libraries(chat_sodium INTERFACE ${SODIUM_LIBRARY})
+    find_path(SQLCIPHER_INCLUDE_DIR sqlite3.h PATH_SUFFIXES sqlcipher REQUIRED)
+    find_library(SQLCIPHER_LIBRARY NAMES sqlcipher REQUIRED)
+    add_library(chat_sqlcipher INTERFACE)
+    target_include_directories(chat_sqlcipher INTERFACE ${SQLCIPHER_INCLUDE_DIR})
+    target_link_libraries(chat_sqlcipher INTERFACE ${SQLCIPHER_LIBRARY})
+    target_compile_definitions(chat_sqlcipher INTERFACE SQLITE_HAS_CODEC)
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium>=1.0.18)
+    # No version check: newer packages report the version of the SQLite inside
+    # (3.51 for SQLCipher 4.13 on Ubuntu 26.04), older ones SQLCipher's own.
+    pkg_check_modules(SQLCIPHER REQUIRED IMPORTED_TARGET sqlcipher)
+    add_library(chat_sodium INTERFACE)
+    target_link_libraries(chat_sodium INTERFACE PkgConfig::SODIUM)
+    add_library(chat_sqlcipher INTERFACE)
+    target_link_libraries(chat_sqlcipher INTERFACE PkgConfig::SQLCIPHER)
+endif()
+if(MSVC)
+    # The sources are UTF-8 (✓, ⏱, …); no min/max macros from windows.h.
+    add_compile_options(/utf-8 /permissive- /Zc:__cplusplus)
+    add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
 if(NOT CHAT_SERVER_ONLY)
     find_package(Qt6Keychain REQUIRED)
 endif()
@@ -54,7 +79,7 @@ qt_add_library(chat_core STATIC
     src/core/X3dh.cpp src/core/X3dh.h
 )
 target_include_directories(chat_core PUBLIC src/core)
-target_link_libraries(chat_core PUBLIC Qt6::Core Qt6::Network Qt6::Sql Qt6::WebSockets PRIVATE PkgConfig::SODIUM PkgConfig::SQLCIPHER)
+target_link_libraries(chat_core PUBLIC Qt6::Core Qt6::Network Qt6::Sql Qt6::WebSockets PRIVATE chat_sodium chat_sqlcipher)
 target_compile_definitions(chat_core PUBLIC CHAT_VERSION="${PROJECT_VERSION}")
 
 if(NOT CHAT_SERVER_ONLY)
@@ -77,6 +102,11 @@ endif()
 
 qt_add_executable(argonaut-chat src/app/main.cpp)
 target_link_libraries(argonaut-chat PRIVATE chat_app)
+if(WIN32)
+    # A window, not a console; and the program's icon, as Explorer and the taskbar show it.
+    set_target_properties(argonaut-chat PROPERTIES WIN32_EXECUTABLE ON)
+    target_sources(argonaut-chat PRIVATE data/argonaut-chat.rc)
+endif()
 install(TARGETS argonaut-chat RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 if(UNIX AND NOT APPLE)
     # The absolute path: the desktop doesn't use the user's PATH.

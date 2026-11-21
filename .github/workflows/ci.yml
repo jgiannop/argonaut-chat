@@ -1,0 +1,44 @@
+name: CI
+
+# On Linux, every push and pull request: the debug build must be free of
+# warnings and every test must pass, also with the memory-error checks
+# (ASan + UBSan). Windows has its own workflow (windows.yml).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: Linux (${{ matrix.preset }})
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash # -e and pipefail: a failed build isn't hidden by tee
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [debug, sanitize]
+    steps:
+      - name: Install dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends build-essential cmake ninja-build pkg-config \
+            qt6-base-dev qt6-websockets-dev libsodium-dev libsqlcipher-dev qtkeychain-qt6-dev
+
+      - uses: actions/checkout@v5
+
+      - name: Build
+        run: |
+          cmake --preset ${{ matrix.preset }}
+          cmake --build build/${{ matrix.preset }} 2>&1 | tee build.log
+          if grep -E 'warning:' build.log; then
+            echo "::error title=build::the build has warnings"
+            exit 1
+          fi
+
+      - name: Tests
+        run: ctest --preset ${{ matrix.preset }} --timeout 300

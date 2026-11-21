@@ -18,3 +18,4 @@ CMakeLists.txt.user*
 
 # Packages (packaging/build-debs.sh)
 /dist/
+/installer-out/

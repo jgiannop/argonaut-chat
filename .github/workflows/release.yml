@@ -1,0 +1,83 @@
+name: Release
+
+# Push a tag like v0.1.0 (matching project(argonaut-chat VERSION ...) in
+# CMakeLists.txt) to build the packages and publish them as a GitHub Release:
+#
+#   argonaut-chat_0.1.0_ubuntu24.04_amd64.deb     Ubuntu 24.04
+#   argonaut-chat_0.1.0_ubuntu26.04_amd64.deb     Ubuntu 26.04
+#   argonaut-chat-0.1.0-windows-setup.exe         Windows 10/11, the installer
+#   argonaut-chat-0.1.0-windows-x64.zip           Windows, the same as a folder
+#   SHA256SUMS
+#
+# A .deb is tied to its release's Qt, so each is built (and installed, to
+# check it) in that release's own image by packaging/build-debs.sh, as on a
+# computer of our own. The server isn't in any of them: deploy/setup-server.sh
+# builds it on the server.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check the tag matches the project version
+        run: |
+          version=$(sed -n 's/^project(argonaut-chat VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error title=version::tag $GITHUB_REF_NAME does not match CMakeLists.txt's version $version"
+            exit 1
+          fi
+
+  deb:
+    name: .deb for Ubuntu ${{ matrix.release }}
+    needs: version
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        release: ['24.04', '26.04']
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build it, install it on a fresh system, start it
+        run: packaging/build-debs.sh ${{ matrix.release }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.release }}
+          path: dist/*.deb
+          if-no-files-found: error
+
+  windows:
+    needs: version
+    uses: ./.github/workflows/windows.yml
+
+  publish:
+    needs: [deb, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: out
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        # A tag pushed again (moved to a fixed commit) replaces the files of
+        # its existing release instead of failing.
+        run: |
+          cd out
+          sha256sum *.deb *.exe *.zip > SHA256SUMS
+          ls -l
+          cat SHA256SUMS
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" *.deb *.exe *.zip SHA256SUMS --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" *.deb *.exe *.zip SHA256SUMS \
+              --title "Argonaut Chat ${GITHUB_REF_NAME#v}" --generate-notes
+          fi

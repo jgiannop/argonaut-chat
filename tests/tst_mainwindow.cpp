@@ -29,7 +29,7 @@ class TestMainWindow : public QObject
 private slots:
     void writeANoteToSelf()
     {
-        ChatStore store(QDir::homePath() + QStringLiteral("/window.sqlite"));
+        ChatStore store(TestSupport::home() + QStringLiteral("/window.sqlite"));
         MainWindow window(&store);
         window.show();
         QVERIFY(QTest::qWaitForWindowExposed(&window));
@@ -57,7 +57,7 @@ private slots:
 
     void othersMessagesAreUnreadUntilOpened()
     {
-        ChatStore store(QDir::homePath() + QStringLiteral("/unread.sqlite"));
+        ChatStore store(TestSupport::home() + QStringLiteral("/unread.sqlite"));
         MainWindow window(&store);
         window.show();
         const qint64 anna = store.addConversation(QStringLiteral("direct"), QStringLiteral("Anna"), QStringLiteral("anna"));
@@ -71,12 +71,12 @@ private slots:
     // Alice in the window, Bob without one, through the real server.
     void chatThroughTheServer()
     {
-        ServerStore serverStore(QDir::homePath() + QStringLiteral("/server.sqlite"));
+        ServerStore serverStore(TestSupport::home() + QStringLiteral("/server.sqlite"));
         ChatServer server(&serverStore);
         QVERIFY(server.listen());
         const QString url = QStringLiteral("ws://127.0.0.1:%1").arg(server.port());
 
-        ChatStore store(QDir::homePath() + QStringLiteral("/alice.sqlite"));
+        ChatStore store(TestSupport::home() + QStringLiteral("/alice.sqlite"));
         KeyStore keys(&store);
         Messenger messenger(&store, &keys);
         MainWindow window(&store, &messenger);
@@ -95,7 +95,7 @@ private slots:
         QTRY_VERIFY(window.connectionLabel()->text().contains("@alice"));
         QVERIFY(window.connectionLabel()->text().contains("connected"));
 
-        ChatStore bobStore(QDir::homePath() + QStringLiteral("/bob.sqlite"));
+        ChatStore bobStore(TestSupport::home() + QStringLiteral("/bob.sqlite"));
         KeyStore bobKeys(&bobStore);
         Messenger bob(&bobStore, &bobKeys);
         std::optional<bool> signedUp;
@@ -143,7 +143,7 @@ private slots:
     // Strangers write first: requests, accepted or blocked from the window.
     void messageRequests()
     {
-        ServerStore serverStore(QDir::homePath() + QStringLiteral("/server2.sqlite"));
+        ServerStore serverStore(TestSupport::home() + QStringLiteral("/server2.sqlite"));
         ChatServer server(&serverStore);
         QVERIFY(server.listen());
         const QUrl url(QStringLiteral("ws://127.0.0.1:%1").arg(server.port()));
@@ -153,7 +153,7 @@ private slots:
             return QTest::qWaitFor([&] { return ok.has_value(); }, 5000) && *ok;
         };
 
-        ChatStore store(QDir::homePath() + QStringLiteral("/me.sqlite"));
+        ChatStore store(TestSupport::home() + QStringLiteral("/me.sqlite"));
         KeyStore keys(&store);
         Messenger me(&store, &keys);
         QVERIFY(signUp(me, QStringLiteral("myself")));
@@ -161,11 +161,11 @@ private slots:
         window.show();
         QVERIFY(QTest::qWaitForWindowExposed(&window));
 
-        ChatStore annaStore(QDir::homePath() + QStringLiteral("/anna.sqlite"));
+        ChatStore annaStore(TestSupport::home() + QStringLiteral("/anna.sqlite"));
         KeyStore annaKeys(&annaStore);
         Messenger anna(&annaStore, &annaKeys);
         QVERIFY(signUp(anna, QStringLiteral("anna")));
-        ChatStore spamStore(QDir::homePath() + QStringLiteral("/spam.sqlite"));
+        ChatStore spamStore(TestSupport::home() + QStringLiteral("/spam.sqlite"));
         KeyStore spamKeys(&spamStore);
         Messenger spam(&spamStore, &spamKeys);
         QVERIFY(signUp(spam, QStringLiteral("spammer")));
@@ -224,7 +224,7 @@ private slots:
 
     void filesInTheWindow()
     {
-        ServerStore serverStore(QDir::homePath() + QStringLiteral("/server4/server.sqlite"));
+        ServerStore serverStore(TestSupport::home() + QStringLiteral("/server4/server.sqlite"));
         ChatServer server(&serverStore);
         QVERIFY(server.listen());
         const QUrl url(QStringLiteral("ws://127.0.0.1:%1").arg(server.port()));
@@ -233,11 +233,11 @@ private slots:
             m.signUp(url, name, [&](bool done, const QString &) { ok = done; });
             return QTest::qWaitFor([&] { return ok.has_value(); }, 5000) && *ok;
         };
-        ChatStore store(QDir::homePath() + QStringLiteral("/me4/chat.sqlite"));
+        ChatStore store(TestSupport::home() + QStringLiteral("/me4/chat.sqlite"));
         KeyStore keys(&store);
         Messenger me(&store, &keys);
         QVERIFY(signUp(me, QStringLiteral("myself")));
-        ChatStore annaStore(QDir::homePath() + QStringLiteral("/anna4/chat.sqlite"));
+        ChatStore annaStore(TestSupport::home() + QStringLiteral("/anna4/chat.sqlite"));
         KeyStore annaKeys(&annaStore);
         Messenger anna(&annaStore, &annaKeys);
         QVERIFY(signUp(anna, QStringLiteral("anna")));
@@ -250,7 +250,7 @@ private slots:
         QTRY_VERIFY(store.directConversation(QStringLiteral("anna")) > 0);
         const qint64 toAnna = store.directConversation(QStringLiteral("anna"));
         QTRY_COMPARE(window.currentConversation(), toAnna);
-        const QString notes = QDir::homePath() + QStringLiteral("/notes.txt");
+        const QString notes = TestSupport::home() + QStringLiteral("/notes.txt");
         {
             QFile f(notes);
             QVERIFY(f.open(QIODevice::WriteOnly));
@@ -269,7 +269,7 @@ private slots:
         // Anna sends a picture: it shows in the bubble once it is here.
         QImage picture(400, 300, QImage::Format_RGB32);
         picture.fill(QColor(30, 120, 200));
-        const QString photo = QDir::homePath() + QStringLiteral("/photo.png");
+        const QString photo = TestSupport::home() + QStringLiteral("/photo.png");
         QVERIFY(picture.save(photo));
         QVERIFY(anna.sendFile(fromMe, photo, QString()) > 0);
         QTRY_COMPARE_WITH_TIMEOUT(window.messages()->count(), 2, 5000);
@@ -279,7 +279,7 @@ private slots:
         QCOMPARE(preview.height(), 195);
         // Saved: the very file.
         const qint64 attachment = window.messages()->item(1)->data(Qt::UserRole + 10).toLongLong();
-        const QString saved = QDir::homePath() + QStringLiteral("/saved.png");
+        const QString saved = TestSupport::home() + QStringLiteral("/saved.png");
         QVERIFY(window.saveAttachment(attachment, saved));
         QFile original(photo), copy(saved);
         QVERIFY(original.open(QIODevice::ReadOnly) && copy.open(QIODevice::ReadOnly));
@@ -311,7 +311,7 @@ private slots:
         QCOMPARE(back.size(), QSize(256, 256));
         QVERIFY(ProfileDialog::preparePicture(QImage()).isEmpty());
 
-        ServerStore serverStore(QDir::homePath() + QStringLiteral("/server5/server.sqlite"));
+        ServerStore serverStore(TestSupport::home() + QStringLiteral("/server5/server.sqlite"));
         ChatServer server(&serverStore);
         QVERIFY(server.listen());
         const QUrl url(QStringLiteral("ws://127.0.0.1:%1").arg(server.port()));
@@ -320,11 +320,11 @@ private slots:
             m.signUp(url, name, [&](bool done, const QString &) { ok = done; });
             return QTest::qWaitFor([&] { return ok.has_value(); }, 5000) && *ok;
         };
-        ChatStore store(QDir::homePath() + QStringLiteral("/me5/chat.sqlite"));
+        ChatStore store(TestSupport::home() + QStringLiteral("/me5/chat.sqlite"));
         KeyStore keys(&store);
         Messenger me(&store, &keys);
         QVERIFY(signUp(me, QStringLiteral("myself")));
-        ChatStore annaStore(QDir::homePath() + QStringLiteral("/anna5/chat.sqlite"));
+        ChatStore annaStore(TestSupport::home() + QStringLiteral("/anna5/chat.sqlite"));
         KeyStore annaKeys(&annaStore);
         Messenger anna(&annaStore, &annaKeys);
         QVERIFY(signUp(anna, QStringLiteral("anna")));
@@ -333,7 +333,7 @@ private slots:
         QVERIFY(QTest::qWaitForWindowExposed(&window));
 
         // My profile, through the dialog.
-        const QString picturePath = QDir::homePath() + QStringLiteral("/me.png");
+        const QString picturePath = TestSupport::home() + QStringLiteral("/me.png");
         QVERIFY(wide.save(picturePath));
         ProfileDialog dialog(&me, &window);
         dialog.nameField()->setText(QStringLiteral("Me Myself"));
@@ -381,7 +381,7 @@ private slots:
 
     void groupsInTheWindow()
     {
-        ServerStore serverStore(QDir::homePath() + QStringLiteral("/server6/server.sqlite"));
+        ServerStore serverStore(TestSupport::home() + QStringLiteral("/server6/server.sqlite"));
         ChatServer server(&serverStore);
         QVERIFY(server.listen());
         const QUrl url(QStringLiteral("ws://127.0.0.1:%1").arg(server.port()));
@@ -390,15 +390,15 @@ private slots:
             m.signUp(url, name, [&](bool done, const QString &) { ok = done; });
             return QTest::qWaitFor([&] { return ok.has_value(); }, 5000) && *ok;
         };
-        ChatStore store(QDir::homePath() + QStringLiteral("/me6/chat.sqlite"));
+        ChatStore store(TestSupport::home() + QStringLiteral("/me6/chat.sqlite"));
         KeyStore keys(&store);
         Messenger me(&store, &keys);
         QVERIFY(signUp(me, QStringLiteral("myself")));
-        ChatStore annaStore(QDir::homePath() + QStringLiteral("/anna6/chat.sqlite"));
+        ChatStore annaStore(TestSupport::home() + QStringLiteral("/anna6/chat.sqlite"));
         KeyStore annaKeys(&annaStore);
         Messenger anna(&annaStore, &annaKeys);
         QVERIFY(signUp(anna, QStringLiteral("anna")));
-        ChatStore benStore(QDir::homePath() + QStringLiteral("/ben6/chat.sqlite"));
+        ChatStore benStore(TestSupport::home() + QStringLiteral("/ben6/chat.sqlite"));
         KeyStore benKeys(&benStore);
         Messenger ben(&benStore, &benKeys);
         QVERIFY(signUp(ben, QStringLiteral("ben")));
@@ -467,11 +467,11 @@ private slots:
 
     void linkingInTheWindow()
     {
-        ServerStore serverStore(QDir::homePath() + QStringLiteral("/server7/server.sqlite"));
+        ServerStore serverStore(TestSupport::home() + QStringLiteral("/server7/server.sqlite"));
         ChatServer server(&serverStore);
         QVERIFY(server.listen());
         const QUrl url(QStringLiteral("ws://127.0.0.1:%1").arg(server.port()));
-        ChatStore aliceStore(QDir::homePath() + QStringLiteral("/alice7/chat.sqlite"));
+        ChatStore aliceStore(TestSupport::home() + QStringLiteral("/alice7/chat.sqlite"));
         KeyStore aliceKeys(&aliceStore);
         Messenger alice(&aliceStore, &aliceKeys);
         std::optional<bool> signedUp;
@@ -479,7 +479,7 @@ private slots:
         QTRY_VERIFY(signedUp.has_value() && *signedUp);
 
         // The laptop: Link to My Account… shows a code.
-        ChatStore laptopStore(QDir::homePath() + QStringLiteral("/laptop7/chat.sqlite"));
+        ChatStore laptopStore(TestSupport::home() + QStringLiteral("/laptop7/chat.sqlite"));
         KeyStore laptopKeys(&laptopStore);
         Messenger laptop(&laptopStore, &laptopKeys);
         SignUpDialog dialog(&laptop);
@@ -515,7 +515,7 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(laptop.state() != Messenger::State::Online, 5000);
 
         // A cancelled link leaves nothing behind.
-        ChatStore thirdStore(QDir::homePath() + QStringLiteral("/third7/chat.sqlite"));
+        ChatStore thirdStore(TestSupport::home() + QStringLiteral("/third7/chat.sqlite"));
         KeyStore thirdKeys(&thirdStore);
         Messenger third(&thirdStore, &thirdKeys);
         SignUpDialog cancelled(&third);
@@ -529,7 +529,7 @@ private slots:
 
     void disappearingInTheWindow()
     {
-        ServerStore serverStore(QDir::homePath() + QStringLiteral("/server8/server.sqlite"));
+        ServerStore serverStore(TestSupport::home() + QStringLiteral("/server8/server.sqlite"));
         ChatServer server(&serverStore);
         QVERIFY(server.listen());
         const QUrl url(QStringLiteral("ws://127.0.0.1:%1").arg(server.port()));
@@ -538,11 +538,11 @@ private slots:
             m.signUp(url, name, [&](bool done, const QString &) { ok = done; });
             return QTest::qWaitFor([&] { return ok.has_value(); }, 5000) && *ok;
         };
-        ChatStore store(QDir::homePath() + QStringLiteral("/me8/chat.sqlite"));
+        ChatStore store(TestSupport::home() + QStringLiteral("/me8/chat.sqlite"));
         KeyStore keys(&store);
         Messenger me(&store, &keys);
         QVERIFY(signUp(me, QStringLiteral("myself")));
-        ChatStore annaStore(QDir::homePath() + QStringLiteral("/anna8/chat.sqlite"));
+        ChatStore annaStore(TestSupport::home() + QStringLiteral("/anna8/chat.sqlite"));
         KeyStore annaKeys(&annaStore);
         Messenger anna(&annaStore, &annaKeys);
         QVERIFY(signUp(anna, QStringLiteral("anna")));
@@ -612,7 +612,7 @@ private slots:
 
     void notificationsAndUnread()
     {
-        ServerStore serverStore(QDir::homePath() + QStringLiteral("/server3.sqlite"));
+        ServerStore serverStore(TestSupport::home() + QStringLiteral("/server3.sqlite"));
         ChatServer server(&serverStore);
         QVERIFY(server.listen());
         const QUrl url(QStringLiteral("ws://127.0.0.1:%1").arg(server.port()));
@@ -621,7 +621,7 @@ private slots:
             m.signUp(url, name, [&](bool done, const QString &) { ok = done; });
             return QTest::qWaitFor([&] { return ok.has_value(); }, 5000) && *ok;
         };
-        ChatStore store(QDir::homePath() + QStringLiteral("/me3.sqlite"));
+        ChatStore store(TestSupport::home() + QStringLiteral("/me3.sqlite"));
         KeyStore keys(&store);
         Messenger me(&store, &keys);
         QVERIFY(signUp(me, QStringLiteral("myself")));
@@ -630,7 +630,7 @@ private slots:
         QVERIFY(QTest::qWaitForWindowExposed(&window));
         QSignalSpy notified(&window, &MainWindow::notified);
 
-        ChatStore annaStore(QDir::homePath() + QStringLiteral("/anna3.sqlite"));
+        ChatStore annaStore(TestSupport::home() + QStringLiteral("/anna3.sqlite"));
         KeyStore annaKeys(&annaStore);
         Messenger anna(&annaStore, &annaKeys);
         QVERIFY(signUp(anna, QStringLiteral("anna")));

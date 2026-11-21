@@ -1,0 +1,167 @@
+name: Windows
+
+# The Windows version: built with MSVC, its tests run, then put together as a
+# folder (argonaut-chat.exe with Qt, libsodium, SQLCipher, QtKeychain and the
+# C++ runtime beside it), zipped, and as an installer. On every push to main,
+# so that work done on Linux can't break Windows unnoticed, and by release.yml
+# for a release.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+env:
+  QTKEYCHAIN_VERSION: '0.14.3'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: 1
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.*'
+          arch: win64_msvc2022_64
+          modules: qtwebsockets
+          cache: true
+
+      - name: The compiler's environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # libsodium and SQLCipher (with OpenSSL), built by vcpkg (which the
+      # machine has) and kept between runs, since building them takes minutes.
+      - name: Keep vcpkg's built libraries
+        uses: actions/cache@v4
+        with:
+          path: vcpkg-cache
+          key: vcpkg-sodium-sqlcipher-x64-windows-v1
+
+      - name: Install libsodium and SQLCipher
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force vcpkg-cache | Out-Null
+          $env:VCPKG_DEFAULT_BINARY_CACHE = "$PWD\vcpkg-cache"
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install libsodium:x64-windows sqlcipher:x64-windows
+          if ($LASTEXITCODE -ne 0) { Write-Output "::error title=build: vcpkg::vcpkg could not install libsodium and sqlcipher"; exit 1 }
+
+      # QtKeychain (the database key in Windows Credential Manager), built
+      # against the Qt above: vcpkg's would bring a Qt of its own.
+      - name: Keep QtKeychain
+        id: keychain-cache
+        uses: actions/cache@v4
+        with:
+          path: keychain
+          key: qtkeychain-${{ env.QTKEYCHAIN_VERSION }}-qt6.8-msvc2022-v1
+
+      - name: Build QtKeychain
+        if: steps.keychain-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch $env:QTKEYCHAIN_VERSION https://github.com/frankosterfeld/qtkeychain.git qtkeychain-src
+          cmake -S qtkeychain-src -B qtkeychain-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_WITH_QT6=ON `
+            -DBUILD_TRANSLATIONS=OFF -DBUILD_TEST_APPLICATION=OFF "-DCMAKE_INSTALL_PREFIX=$PWD\keychain"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          cmake --build qtkeychain-build
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          cmake --install qtkeychain-build
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake --preset windows "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows "-DCMAKE_PREFIX_PATH=$PWD/keychain" 2>&1 | Tee-Object -FilePath configure.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { python .github/scripts/errors_as_notes.py configure.log "build: configuring" "CMake Error|not found|NOTFOUND" }
+          exit $code
+
+      # Everything is built even after an error, so one run shows all there is to fix.
+      - name: Build
+        shell: pwsh
+        run: |
+          cmake --build build/windows -- -k 0 2>&1 | Tee-Object -FilePath build.log
+          exit $LASTEXITCODE
+
+      # The log can't be read without signing in; notes on the run can.
+      - name: The errors, as notes
+        if: failure()
+        shell: pwsh
+        run: |
+          if (Test-Path build.log) { python .github/scripts/errors_as_notes.py build.log }
+
+      - name: Tests
+        shell: pwsh
+        run: |
+          $env:PATH = "$PWD\keychain\bin;$env:PATH"
+          ctest --preset windows --timeout 300 2>&1 | Tee-Object -FilePath tests.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { python .github/scripts/errors_as_notes.py tests.log "tests" "FAIL!|Loc: |QFATAL|QWARN|Failed|Timeout|Not Run|Exception|tests passed|0xc0" }
+          exit $code
+
+      - name: Put the program and its libraries together
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path CMakeLists.txt -Pattern 'project\(argonaut-chat VERSION ([0-9.]+)').Matches[0].Groups[1].Value
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item build\windows\argonaut-chat.exe dist\
+          # vcpkg's libraries, which its toolchain copied beside the program.
+          Copy-Item build\windows\*.dll dist\
+          Copy-Item keychain\bin\*.dll dist\
+          Copy-Item LICENSE dist\LICENSE.txt
+          windeployqt --release --no-translations --no-compiler-runtime --no-opengl-sw dist\argonaut-chat.exe
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          # Microsoft's C++ runtime (VCRUNTIME140.dll and the others): a fresh
+          # Windows doesn't have it, and the program won't start.
+          $crt = Get-ChildItem "$env:VCToolsRedistDir\x64" -Directory -Filter "Microsoft.VC*.CRT" | Select-Object -First 1
+          Copy-Item "$($crt.FullName)\*.dll" dist\
+          Get-ChildItem dist -Recurse | Select-Object -ExpandProperty FullName
+
+      # It must start with only what is in the folder: no Qt, vcpkg or
+      # QtKeychain on the PATH. --version loads every library it needs.
+      - name: Check that it starts on its own
+        shell: pwsh
+        run: |
+          $missing = @("libsodium.dll", "sqlcipher.dll", "qt6keychain.dll", "Qt6WebSockets.dll", "vcruntime140.dll",
+                       "platforms\qwindows.dll", "tls\qschannelbackend.dll") | Where-Object { -not (Test-Path "dist\$_") }
+          if ($missing) { Write-Output "::error title=build: folder::missing: $($missing -join ', ')"; exit 1 }
+          $env:PATH = "C:\Windows\system32;C:\Windows"
+          cmd /c "dist\argonaut-chat.exe --version > version.txt 2>&1"
+          $code = $LASTEXITCODE
+          $printed = Get-Content version.txt -Raw
+          Write-Output "exit $code, printed: $printed"
+          if ($code -ne 0 -or $printed -notmatch "argonaut-chat $env:VERSION") {
+            $hex = '{0:x}' -f $code
+            Write-Output "::error title=build: start::argonaut-chat.exe --version ended with $code (0x$hex) and printed: $printed"
+            exit 1
+          }
+
+      - name: Zip it
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory out | Out-Null
+          Rename-Item dist "argonaut-chat-$env:VERSION"
+          Compress-Archive -Path "argonaut-chat-$env:VERSION" -DestinationPath "out\argonaut-chat-$env:VERSION-windows-x64.zip"
+          Rename-Item "argonaut-chat-$env:VERSION" dist
+
+      # The installer: the same folder, with a Start menu entry and an uninstaller.
+      - name: Make the installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+          & $iscc "/DAppVersion=$env:VERSION" "/DSource=..\dist" installer\argonaut-chat.iss 2>&1 | Tee-Object -FilePath installer.log
+          if ($LASTEXITCODE -ne 0) { python .github/scripts/errors_as_notes.py installer.log "build: installer" "Error|error|line"; exit 1 }
+          Copy-Item installer-out\*.exe out\
+          Get-ChildItem out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: argonaut-chat-windows
+          path: out
+          if-no-files-found: error

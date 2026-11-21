@@ -18,7 +18,7 @@ class TestStore : public QObject
 private slots:
     void noteToSelfAndMessages()
     {
-        const QString file = QDir::homePath() + QStringLiteral("/chat.sqlite");
+        const QString file = TestSupport::home() + QStringLiteral("/chat.sqlite");
         qint64 self = 0;
         {
             ChatStore store(file);
@@ -56,7 +56,7 @@ private slots:
 
     void wireIdsOutboxAndReceipts()
     {
-        ChatStore store(QDir::homePath() + QStringLiteral("/wire.sqlite"));
+        ChatStore store(TestSupport::home() + QStringLiteral("/wire.sqlite"));
         const qint64 bob = store.addConversation(QStringLiteral("direct"), QStringLiteral("bob"), QStringLiteral("bob"));
         QCOMPARE(store.directConversation(QStringLiteral("bob")), bob);
         QCOMPARE(store.directConversation(QStringLiteral("carol")), 0);
@@ -97,7 +97,7 @@ private slots:
     void oldDatabasesGetTheWireId()
     {
         // A database from before the network, without the uid column.
-        const QString file = QDir::homePath() + QStringLiteral("/old.sqlite");
+        const QString file = TestSupport::home() + QStringLiteral("/old.sqlite");
         {
             CipherSql::registerDriver();
             QSqlDatabase db = QSqlDatabase::addDatabase(CipherSql::DriverName, QStringLiteral("old"));
@@ -128,7 +128,7 @@ private slots:
 
     void requestsAndBlocked()
     {
-        ChatStore store(QDir::homePath() + QStringLiteral("/requests.sqlite"));
+        ChatStore store(TestSupport::home() + QStringLiteral("/requests.sqlite"));
         const qint64 anna = store.addConversation(QStringLiteral("direct"), QStringLiteral("anna"),
                                                   QStringLiteral("anna"), true);
         store.addMessage(anna, QStringLiteral("hi"), QStringLiteral("anna"));
@@ -157,7 +157,7 @@ private slots:
 
     void encrypted()
     {
-        const QString file = QDir::homePath() + QStringLiteral("/secret.sqlite");
+        const QString file = TestSupport::home() + QStringLiteral("/secret.sqlite");
         const QByteArray key = Crypto::randomBytes(32);
         QByteArray identitySecret;
         {
@@ -199,7 +199,7 @@ private slots:
 
     void plainHistoryIsEncryptedInPlace()
     {
-        const QString file = QDir::homePath() + QStringLiteral("/before.sqlite");
+        const QString file = TestSupport::home() + QStringLiteral("/before.sqlite");
         {
             ChatStore plain(file); // as before the encryption
             QVERIFY(!plain.isEncrypted());
@@ -226,7 +226,9 @@ private slots:
     void defaultPlace()
     {
         QVERIFY(ChatStore::defaultFile().endsWith(QStringLiteral("/argonaut-chat-tests/chat.sqlite")));
-        QVERIFY(ChatStore::defaultFile().startsWith(QDir::homePath()));
+#ifndef Q_OS_WIN // there, it is the system's AppData folder (Qt's test one)
+        QVERIFY(ChatStore::defaultFile().startsWith(TestSupport::home()));
+#endif
     }
 };
 
