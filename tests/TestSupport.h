@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QFileInfo>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QTemporaryDir>
@@ -17,6 +18,18 @@ inline QString &homeFolder()
     return folder;
 }
 inline QString home() { return homeFolder(); }
+
+// Nobody else may read it: its mode on Linux. On Windows a file's mode is
+// what Qt makes up (everyone may read), the real protection being the
+// folder's ACL (the user's own AppData), so there it is not checked.
+inline bool onlyMine(const QString &path)
+{
+#ifdef Q_OS_WIN
+    return QFileInfo::exists(path);
+#else
+    return (QFileInfo(path).permissions() & (QFile::ReadGroup | QFile::ReadOther)) == QFile::Permissions();
+#endif
+}
 
 class Sandbox
 {

@@ -577,8 +577,7 @@ private slots:
         QFile stored(m_store->attachmentFolder() + "/" + *id);
         QVERIFY(stored.open(QIODevice::ReadOnly));
         QCOMPARE(stored.readAll(), sealed->blob);
-        QCOMPARE(QFileInfo(m_store->attachmentFolder()).permissions() & (QFile::ReadGroup | QFile::ReadOther),
-                 QFile::Permissions());
+        QVERIFY(TestSupport::onlyMine(m_store->attachmentFolder()));
 
         // Down, by someone else, and decrypted.
         std::optional<QByteArray> blob;

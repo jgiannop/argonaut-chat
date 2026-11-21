@@ -51,7 +51,7 @@ private slots:
         QCOMPARE(notes.size(), 2);
         QCOMPARE(notes.first().body, QStringLiteral("first")); // oldest first
         QVERIFY(notes.first().outgoing());
-        QCOMPARE(QFileInfo(file).permissions() & (QFile::ReadGroup | QFile::ReadOther), QFile::Permissions());
+        QVERIFY(TestSupport::onlyMine(file));
     }
 
     void wireIdsOutboxAndReceipts()
@@ -194,7 +194,7 @@ private slots:
         QVERIFY(!ChatStore(file, QByteArray("short")).isOpen());
         // A failed opening leaves the file as it was.
         QVERIFY(ChatStore(file, key).isOpen());
-        QCOMPARE(QFileInfo(file).permissions() & (QFile::ReadGroup | QFile::ReadOther), QFile::Permissions());
+        QVERIFY(TestSupport::onlyMine(file));
     }
 
     void plainHistoryIsEncryptedInPlace()
