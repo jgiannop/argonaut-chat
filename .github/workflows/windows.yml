@@ -130,6 +130,10 @@ jobs:
             Get-ChildItem build\windows\*.dll, keychain -Recurse | Select-Object -ExpandProperty FullName
             exit 1
           }
+          # windeployqt takes qt6keychain.dll, by its name, for one of Qt's own
+          # and looks for it in Qt's folder: so it is put there too (on this
+          # build machine only). It needs only Qt Core.
+          Copy-Item keychain\bin\*.dll "$env:QT_ROOT_DIR\bin\"
           "folder before windeployqt:" | Out-File deploy.log
           Get-ChildItem dist | Select-Object -ExpandProperty Name | Out-File -Append deploy.log
           windeployqt --release --no-translations --no-compiler-runtime --no-opengl-sw dist\argonaut-chat.exe 2>&1 | Tee-Object -Append -FilePath deploy.log
@@ -138,8 +142,6 @@ jobs:
             python .github/scripts/errors_as_notes.py deploy.log "build: windeployqt" "."
             exit 1
           }
-          # QtKeychain after windeployqt: by its "qt6" name it takes it for one of
-          # Qt's own and looks for it in Qt's folder. It needs only Qt Core.
           Copy-Item keychain\bin\*.dll dist\
           # Microsoft's C++ runtime (VCRUNTIME140.dll and the others): a fresh
           # Windows doesn't have it, and the program won't start.
