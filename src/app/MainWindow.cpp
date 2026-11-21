@@ -4,6 +4,7 @@
 #include "Messenger.h"
 #include "Notifications.h"
 #include "TrayIcon.h"
+#include "Voice.h"
 #include "StyleSheet.h"
 
 #include <QAction>
@@ -63,6 +64,7 @@ enum Role {
     DeletedRole,     // deleted for everyone: only a mark is left
     EditedRole,      // edited after it was sent
     HighlightRole,   // the search's current match
+    VoiceRole,       // a voice message's attachment (plays on a click)
 };
 
 QString shortTime(const QDateTime &when)
@@ -555,7 +557,39 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
         if (!path.isEmpty())
             attachFile(path);
     });
+    m_voiceButton = new QToolButton(composer);
+    m_voiceButton->setObjectName(QStringLiteral("voiceButton"));
+    m_voiceButton->setText(QStringLiteral("🎤"));
+    m_voiceButton->setToolTip(tr("Record a voice message (up to %1 minutes), encrypted").arg(Voice::MaxSeconds / 60));
+    m_voiceButton->setCursor(Qt::PointingHandCursor);
+    m_voiceButton->setEnabled(m_messenger != nullptr);
+    connect(m_voiceButton, &QToolButton::clicked, this, &MainWindow::startRecording);
+    // While recording: in place of the reply bar, the time, Cancel and Send.
+    m_recordBar = new QWidget(composer);
+    m_recordBar->setObjectName(QStringLiteral("recordBar"));
+    m_recordBar->setAttribute(Qt::WA_StyledBackground);
+    auto *recordLayout = new QHBoxLayout(m_recordBar);
+    recordLayout->setContentsMargins(10, 4, 6, 4);
+    m_recordLabel = new QLabel(m_recordBar);
+    m_recordLabel->setObjectName(QStringLiteral("recordLabel"));
+    auto *cancelRecording = new QPushButton(tr("Cancel"), m_recordBar);
+    cancelRecording->setObjectName(QStringLiteral("cancelRecordingButton"));
+    auto *sendRecording = new QPushButton(tr("Send"), m_recordBar);
+    sendRecording->setObjectName(QStringLiteral("sendRecordingButton"));
+    recordLayout->addWidget(m_recordLabel, 1);
+    recordLayout->addWidget(cancelRecording);
+    recordLayout->addWidget(sendRecording);
+    m_recordBar->hide();
+    composerOuter->insertWidget(0, m_recordBar);
+    connect(cancelRecording, &QPushButton::clicked, this, [this] { stopRecording(false); });
+    connect(sendRecording, &QPushButton::clicked, this, [this] { stopRecording(true); });
+    connect(&m_recorder, &VoiceRecorder::tick, this, [this](qint64 ms) {
+        m_recordLabel->setText(tr("● Recording %1").arg(Voice::formatDuration(ms)));
+    });
+    connect(&m_recorder, &VoiceRecorder::limitReached, this, [this] { stopRecording(true); });
+    connect(&m_player, &VoicePlayer::progress, this, [this](qint64, qint64, qint64) { refreshVoiceLines(); });
     composerLayout->addWidget(m_attach);
+    composerLayout->addWidget(m_voiceButton);
     composerLayout->addWidget(m_compose, 1);
     composerLayout->addWidget(m_send);
     // In place of the composer for a message request.
@@ -690,6 +724,10 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
         const ChatStore::StoredAttachment a = m_store->attachment(id);
         if (id == 0 || a.file.isEmpty())
             return;
+        if (a.voice) {
+            toggleVoice(id); // saved from its menu
+            return;
+        }
         const QString folder = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
         const QString path = QFileDialog::getSaveFileName(this, tr("Save"), folder + QLatin1Char('/') + a.name);
         if (!path.isEmpty())
@@ -701,7 +739,9 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
             for (int i = 0; i < m_messages->count(); ++i) {
                 QListWidgetItem *item = m_messages->item(i);
                 if (item->data(AttachmentRole).toLongLong() == id)
-                    item->setData(FileRole, fileLine(m_store->attachment(id), !item->data(ImageRole).isNull()));
+                    item->setData(FileRole, item->data(VoiceRole).toBool()
+                                                ? voiceLine(m_store->attachment(id))
+                                                : fileLine(m_store->attachment(id), !item->data(ImageRole).isNull()));
             }
         });
         connect(m_messenger, &Messenger::stateChanged, this, &MainWindow::updateConnection);
@@ -897,6 +937,8 @@ void MainWindow::openConversation(qint64 id)
     if (id != m_current) {
         cancelReply(); // a reply belongs to its conversation
         m_messageLimit = DefaultMessageLimit;
+        stopRecording(false); // a recording belongs to its conversation
+        m_player.stop();
         if (m_findBar && m_findBar->isVisible()) {
             m_findResults.clear();
             m_findIndex = -1;
@@ -1181,11 +1223,17 @@ void MainWindow::reloadMessages()
         if (!attachments.isEmpty()) {
             const ChatStore::StoredAttachment &a = attachments.first();
             item->setData(AttachmentRole, a.id);
-            const QPixmap preview = previewFor(a);
-            if (!preview.isNull())
-                item->setData(ImageRole, preview);
-            item->setData(FileRole, fileLine(a, !preview.isNull()));
-            item->setToolTip(a.file.isEmpty() ? QString() : tr("Click to save %1").arg(a.name));
+            if (a.voice) {
+                item->setData(VoiceRole, true);
+                item->setData(FileRole, voiceLine(a));
+                item->setToolTip(a.file.isEmpty() ? QString() : tr("Click to play"));
+            } else {
+                const QPixmap preview = previewFor(a);
+                if (!preview.isNull())
+                    item->setData(ImageRole, preview);
+                item->setData(FileRole, fileLine(a, !preview.isNull()));
+                item->setToolTip(a.file.isEmpty() ? QString() : tr("Click to save %1").arg(a.name));
+            }
         }
         const QList<ChatStore::Reaction> reactions = m_store->reactions(m.id);
         if (!reactions.isEmpty()) {
@@ -1317,6 +1365,96 @@ QPixmap MainWindow::previewFor(const ChatStore::StoredAttachment &a)
     return preview;
 }
 
+QString MainWindow::voiceLine(const ChatStore::StoredAttachment &a)
+{
+    if (a.state == QLatin1String("upload") || a.state == QLatin1String("download") || a.state == QLatin1String("failed")) {
+        QString line = fileLine(a, false);
+        line.replace(QStringLiteral("📄 ") + a.name, tr("🎤 Voice message"));
+        return line;
+    }
+    if (!m_voiceDurations.contains(a.id)) {
+        // Its length, once: decrypted in memory and checked.
+        qint64 ms = -1;
+        if (m_messenger) {
+            if (const auto data = m_messenger->attachmentData(a.id)) {
+                if (const auto audio = Voice::fromWav(*data))
+                    ms = audio->durationMs();
+            }
+        }
+        m_voiceDurations.insert(a.id, ms);
+    }
+    const qint64 ms = m_voiceDurations.value(a.id);
+    if (ms < 0)
+        return tr("🎤 Voice message · cannot be played");
+    if (m_player.playing() == a.id)
+        return QStringLiteral("⏸  %1 / %2").arg(Voice::formatDuration(m_player.positionMs()), Voice::formatDuration(ms));
+    return tr("▶  Voice message · %1").arg(Voice::formatDuration(ms));
+}
+
+void MainWindow::refreshVoiceLines()
+{
+    for (int i = 0; i < m_messages->count(); ++i) {
+        QListWidgetItem *item = m_messages->item(i);
+        if (item->data(VoiceRole).toBool())
+            item->setData(FileRole, voiceLine(m_store->attachment(item->data(AttachmentRole).toLongLong())));
+    }
+}
+
+void MainWindow::toggleVoice(qint64 attachment)
+{
+    if (m_player.playing() == attachment) {
+        m_player.stop();
+        return;
+    }
+    const auto data = m_messenger ? m_messenger->attachmentData(attachment) : std::nullopt;
+    QString error;
+    if (!data || !m_player.play(attachment, *data, &error))
+        showNotice(error.isEmpty() ? tr("This voice message is not here yet.") : error);
+    refreshVoiceLines();
+}
+
+void MainWindow::startRecording()
+{
+    if (!m_messenger || m_current == 0 || m_recorder.isRecording())
+        return;
+    QString error;
+    if (!m_recorder.start(&error)) {
+        showNotice(error);
+        return;
+    }
+    m_player.stop();
+    m_recordLabel->setText(tr("● Recording %1").arg(Voice::formatDuration(0)));
+    m_recordBar->show();
+    m_compose->setEnabled(false);
+    m_voiceButton->setEnabled(false);
+}
+
+void MainWindow::stopRecording(bool send)
+{
+    if (!m_recorder.isRecording())
+        return;
+    const QByteArray samples = send ? m_recorder.stop() : QByteArray();
+    m_recorder.cancel();
+    m_recordBar->hide();
+    m_compose->setEnabled(true);
+    m_voiceButton->setEnabled(m_messenger != nullptr);
+    m_compose->setFocus();
+    if (send)
+        sendVoice(samples);
+}
+
+void MainWindow::sendVoice(const QByteArray &samples)
+{
+    if (!m_messenger || m_current == 0)
+        return;
+    QString error;
+    if (m_messenger->sendVoice(m_current, samples, &error, m_replyTo) == 0) {
+        showNotice(error);
+        return;
+    }
+    cancelReply();
+}
+
 QString MainWindow::fileLine(const ChatStore::StoredAttachment &a, bool shownAsImage) const
 {
     const QString name = QStringLiteral("📄 %1 · %2").arg(a.name, QLocale().formattedDataSize(a.size));
@@ -1416,6 +1554,16 @@ QMenu *MainWindow::messageMenu(qint64 message)
     }
     if (!m.body.isEmpty()) {
         menu->addAction(tr("Copy Text"), this, [body = m.body] { QGuiApplication::clipboard()->setText(body); });
+    }
+    const QList<ChatStore::StoredAttachment> files = m_store->attachments(message);
+    if (!files.isEmpty() && !files.first().file.isEmpty()) {
+        const ChatStore::StoredAttachment a = files.first();
+        menu->addAction(a.voice ? tr("Save Voice Message…") : tr("Save As…"), this, [this, a] {
+            const QString folder = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+            const QString path = QFileDialog::getSaveFileName(this, tr("Save"), folder + QLatin1Char('/') + a.name);
+            if (!path.isEmpty())
+                saveAttachment(a.id, path);
+        })->setObjectName(QStringLiteral("saveAttachmentAction"));
     }
     menu->addSeparator();
     menu->addAction(tr("Delete for Me…"), this, [this, message] { deleteMessage(message, false, true); })

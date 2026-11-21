@@ -137,6 +137,8 @@ void ChatStore::createTables()
     addColumn(QStringLiteral("messages"), QStringLiteral("expire_seconds"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
     addColumn(QStringLiteral("messages"), QStringLiteral("expires_at"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
     addColumn(QStringLiteral("messages"), QStringLiteral("system"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
+    // Added with voice messages.
+    addColumn(QStringLiteral("attachments"), QStringLiteral("voice"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
     // Added with editing.
     addColumn(QStringLiteral("messages"), QStringLiteral("edited_at"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
     addColumn(QStringLiteral("messages"), QStringLiteral("edit_pending"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
@@ -229,8 +231,9 @@ QList<ChatStore::Conversation> ChatStore::conversations() const
     QSqlQuery q(m_db);
     q.exec(QStringLiteral("SELECT c.id, c.kind, c.title, c.peer, c.last_activity, c.state, c.expire_seconds,"
                           // The newest message: its text, or else its first attachment's name.
-                          " (SELECT CASE WHEN m.body = '' THEN COALESCE('📎 ' || (SELECT a.name FROM attachments a"
-                          "  WHERE a.message = m.id ORDER BY a.id LIMIT 1), '') ELSE m.body END"
+                          " (SELECT CASE WHEN m.body = '' THEN COALESCE((SELECT CASE WHEN a.voice = 1 THEN '🎤 Voice message'"
+                          "  ELSE '📎 ' || a.name END FROM attachments a WHERE a.message = m.id ORDER BY a.id LIMIT 1), '')"
+                          "  ELSE m.body END"
                           "  FROM messages m WHERE m.conversation = c.id ORDER BY sent_at DESC, id DESC LIMIT 1),"
                           " (SELECT COUNT(*) FROM messages m WHERE m.conversation = c.id AND m.seen = 0 AND m.author <> ''),"
                           " (SELECT m.deleted FROM messages m WHERE m.conversation = c.id ORDER BY sent_at DESC, id DESC LIMIT 1)"
@@ -772,7 +775,7 @@ void ChatStore::markRead(qint64 conversation)
 namespace {
 
 const QString kAttachmentColumns =
-    QStringLiteral("id, message, name, type, size, key, digest, remote_id, file, state");
+    QStringLiteral("id, message, name, type, size, key, digest, remote_id, file, state, voice");
 
 ChatStore::StoredAttachment attachmentFrom(const QSqlQuery &q)
 {
@@ -787,6 +790,7 @@ ChatStore::StoredAttachment attachmentFrom(const QSqlQuery &q)
     a.remoteId = q.value(7).toString();
     a.file = q.value(8).toString();
     a.state = q.value(9).toString();
+    a.voice = q.value(10).toBool();
     return a;
 }
 
@@ -804,8 +808,8 @@ void updateAttachment(const QSqlDatabase &db, qint64 id, const QString &column, 
 qint64 ChatStore::addAttachment(const StoredAttachment &a)
 {
     QSqlQuery q(m_db);
-    q.prepare(QStringLiteral("INSERT INTO attachments (message, name, type, size, key, digest, remote_id, file, state)"
-                             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+    q.prepare(QStringLiteral("INSERT INTO attachments (message, name, type, size, key, digest, remote_id, file, state, voice)"
+                             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"));
     q.addBindValue(a.message);
     q.addBindValue(text(a.name));
     q.addBindValue(text(a.type));
@@ -815,6 +819,7 @@ qint64 ChatStore::addAttachment(const StoredAttachment &a)
     q.addBindValue(text(a.remoteId));
     q.addBindValue(text(a.file));
     q.addBindValue(text(a.state));
+    q.addBindValue(a.voice ? 1 : 0);
     if (!q.exec()) {
         m_error = q.lastError().text();
         return 0;

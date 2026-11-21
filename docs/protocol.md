@@ -57,6 +57,16 @@ blob, checks its size and digest, decrypts, and drops the padding. At most
 direction marks; types must look like `type/subtype`. On disk, both sides
 keep the blob as it was (the key in the encrypted database).
 
+### Voice messages
+
+A voice message is an attachment like any other (above), marked `"voice":
+true`, with `"type": "audio/wav"` (anything else marked so drops the
+message): a WAV of 16-bit PCM, recorded mono at 16 kHz, at most 5 minutes.
+No codec is needed anywhere. The recipient plays it only once it reads
+as a plain, consistent WAV of 16-bit PCM, 1 or 2 channels, 8 to 48 kHz, at
+most 5 minutes and a little (`Voice::fromWav`); decrypted in memory only.
+Versions before 0.2 ignore the mark and show a `.wav` file.
+
 ### Replies
 
 A text that answers another quotes it, as Signal does:

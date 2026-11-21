@@ -36,6 +36,7 @@ struct Pointer
     qint64 size = 0;   // the file's own size (before padding)
     QString name;      // the file's name, without folders
     QString type;      // a MIME type, e.g. "image/jpeg"
+    bool voice = false; // a voice message (Voice.h), shown with a play button
 };
 
 struct Encrypted

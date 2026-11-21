@@ -16,7 +16,8 @@ option(CHAT_PACKAGE "Build the app's package (cpack)" OFF)
 if(CHAT_SERVER_ONLY)
     find_package(Qt6 6.4 REQUIRED COMPONENTS Core Network Sql WebSockets)
 else()
-    find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets Network Sql WebSockets)
+    # Multimedia: voice messages (the microphone, the speaker).
+    find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets Network Sql WebSockets Multimedia)
     # The unread count on the dock's icon (the Unity launcher API).
     find_package(Qt6 6.4 QUIET COMPONENTS DBus)
     if(CHAT_PACKAGE AND NOT Qt6DBus_FOUND)
@@ -76,6 +77,7 @@ qt_add_library(chat_core STATIC
     src/core/RatchetSession.cpp src/core/RatchetSession.h
     src/core/SafetyNumber.cpp src/core/SafetyNumber.h
     src/core/Session.cpp src/core/Session.h
+    src/core/Voice.cpp src/core/Voice.h
     src/core/X3dh.cpp src/core/X3dh.h
 )
 target_include_directories(chat_core PUBLIC src/core)
@@ -93,9 +95,10 @@ qt_add_library(chat_app STATIC
     src/app/StyleSheet.cpp src/app/StyleSheet.h
     src/app/Theme.cpp src/app/Theme.h
     src/app/TrayIcon.cpp src/app/TrayIcon.h
+    src/app/VoiceAudio.cpp src/app/VoiceAudio.h
 )
 target_include_directories(chat_app PUBLIC src/app)
-target_link_libraries(chat_app PUBLIC chat_core Qt6::Widgets PRIVATE Qt6Keychain::Qt6Keychain)
+target_link_libraries(chat_app PUBLIC chat_core Qt6::Widgets Qt6::Multimedia PRIVATE Qt6Keychain::Qt6Keychain)
 if(Qt6DBus_FOUND AND UNIX AND NOT APPLE)
     target_link_libraries(chat_app PRIVATE Qt6::DBus)
     target_compile_definitions(chat_app PRIVATE CHAT_DBUS)

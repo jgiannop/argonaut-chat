@@ -188,6 +188,7 @@ public:
         QString remoteId; // the server's
         QString file;     // the blob's file name in attachmentFolder(); empty until here
         QString state;    // "upload", "sent", "download", "ready", "failed"
+        bool voice = false; // a voice message
     };
     qint64 addAttachment(const StoredAttachment &attachment);
     StoredAttachment attachment(qint64 id) const;

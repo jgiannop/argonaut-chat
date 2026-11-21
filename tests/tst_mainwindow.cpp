@@ -354,6 +354,33 @@ private slots:
         QCOMPARE(window.messages()->count(), 500);
     }
 
+    void voiceMessageBubble()
+    {
+        ChatStore store(TestSupport::home() + QStringLiteral("/voice.sqlite"));
+        KeyStore keys(&store);
+        Messenger messenger(&store, &keys);
+        MainWindow window(&store, &messenger);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        const int fileRole = Qt::UserRole + 9;
+        const int voiceRole = Qt::UserRole + 22;
+        QVERIFY(window.findChild<QToolButton *>(QStringLiteral("voiceButton")));
+        // What a 3 s recording gives, into Note to Self.
+        window.sendVoice(QByteArray(3 * 16000 * 2, '\0'));
+        QCOMPARE(window.messages()->count(), 1);
+        QListWidgetItem *bubble = window.messages()->item(0);
+        QVERIFY(bubble->data(voiceRole).toBool());
+        QCOMPARE(bubble->data(fileRole).toString(), QStringLiteral("▶  Voice message · 0:03"));
+        const qint64 message = store.messages(store.noteToSelf()).last().id;
+        std::unique_ptr<QMenu> menu(window.messageMenu(message));
+        QAction *save = menu->findChild<QAction *>(QStringLiteral("saveAttachmentAction"));
+        QVERIFY(save);
+        QCOMPARE(save->text(), QStringLiteral("Save Voice Message…"));
+        // Too short: not sent.
+        window.sendVoice(QByteArray(10, '\0'));
+        QCOMPARE(window.messages()->count(), 1);
+    }
+
     void othersMessagesAreUnreadUntilOpened()
     {
         ChatStore store(TestSupport::home() + QStringLiteral("/unread.sqlite"));

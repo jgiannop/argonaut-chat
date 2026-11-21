@@ -28,7 +28,7 @@ jobs:
         with:
           version: '6.8.*'
           arch: win64_msvc2022_64
-          modules: qtwebsockets
+          modules: qtwebsockets qtmultimedia
           cache: true
 
       # Visual Studio's own script (vcvars64.bat) sets up the compiler; what it
@@ -168,8 +168,10 @@ jobs:
       - name: Check that it starts on its own
         shell: pwsh
         run: |
-          $missing = @("libsodium.dll", "sqlcipher.dll", "qt6keychain.dll", "Qt6WebSockets.dll", "vcruntime140.dll",
-                       "platforms\qwindows.dll", "tls\qschannelbackend.dll") | Where-Object { -not (Test-Path "dist\$_") }
+          $missing = @("libsodium.dll", "sqlcipher.dll", "qt6keychain.dll", "Qt6WebSockets.dll", "Qt6Multimedia.dll",
+                       "vcruntime140.dll", "platforms\qwindows.dll", "tls\qschannelbackend.dll") | Where-Object { -not (Test-Path "dist\$_") }
+          # Voice messages: a media backend (FFmpeg's or Windows').
+          if (-not (Get-ChildItem dist\multimedia\*.dll -ErrorAction SilentlyContinue)) { $missing += "multimedia\*.dll" }
           if ($missing) { Write-Output "::error title=build: folder::missing: $($missing -join ', ')"; exit 1 }
           $env:PATH = "C:\Windows\system32;C:\Windows"
           cmd /c "dist\argonaut-chat.exe --version > version.txt 2>&1"

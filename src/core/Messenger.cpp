@@ -1,5 +1,7 @@
 #include "Messenger.h"
 
+#include "Voice.h"
+
 #include "Attachment.h"
 #include "SafetyNumber.h"
 
@@ -431,7 +433,7 @@ std::optional<Protocol::Quote> Messenger::quoteOf(qint64 message) const
     if (text.isEmpty()) {
         const QList<ChatStore::StoredAttachment> files = m_store->attachments(m.id);
         if (!files.isEmpty())
-            text = QStringLiteral("📎 ") + files.first().name;
+            text = files.first().voice ? tr("🎤 Voice message") : QStringLiteral("📎 ") + files.first().name;
     }
     if (text.size() > Protocol::MaxQuoteChars)
         text = text.left(Protocol::MaxQuoteChars - 1) + QStringLiteral("…");
@@ -877,7 +879,7 @@ void Messenger::deliver(const ChatStore::Message &message)
     if (message.isReply() && Protocol::isValidMessageId(message.quoteUid))
         content.quote = Protocol::Quote{message.quoteUid, message.quoteAuthor, message.quoteText};
     for (const ChatStore::StoredAttachment &a : attachments)
-        content.attachments.append({a.remoteId, a.key, a.digest, a.size, a.name, a.type});
+        content.attachments.append({a.remoteId, a.key, a.digest, a.size, a.name, a.type, a.voice});
     if (Protocol::encodeContent(content).isEmpty()) {
         m_store->setStatus(id, QStringLiteral("failed"));
         return;
@@ -937,15 +939,44 @@ qint64 Messenger::sendFile(qint64 conversation, const QString &path, const QStri
     if (file.size() > Attachment::MaxFileBytes)
         return fail(tr("The file is larger than %1 MB.").arg(Attachment::MaxFileBytes / (1024 * 1024)));
     const QByteArray data = file.readAll();
+    QString type = QMimeDatabase().mimeTypeForFileNameAndData(path, data.left(4096)).name();
+    if (!Attachment::isValidType(type))
+        type = QStringLiteral("application/octet-stream");
+    return sendData(conversation, QFileInfo(path).fileName(), type, data, caption, error, replyTo, false);
+}
+
+qint64 Messenger::sendVoice(qint64 conversation, const QByteArray &samples, QString *error, qint64 replyTo)
+{
+    if (samples.size() < Voice::SampleRate / 5) { // under 0.1 s: a slip of the finger
+        if (error)
+            *error = tr("The recording is too short.");
+        return 0;
+    }
+    const QString name = QStringLiteral("Voice message %1.wav")
+                             .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH.mm.ss")));
+    return sendData(conversation, name, QString::fromLatin1(Voice::Type), Voice::toWav(samples), QString(), error,
+                    replyTo, true);
+}
+
+qint64 Messenger::sendData(qint64 conversation, const QString &fileName, const QString &type, const QByteArray &data,
+                           const QString &caption, QString *error, qint64 replyTo, bool voice)
+{
+    auto fail = [error](const QString &why) {
+        if (error)
+            *error = why;
+        return qint64(0);
+    };
+    const ChatStore::Conversation c = m_store->conversation(conversation);
+    if (c.id == 0)
+        return fail(tr("No such conversation."));
+    if (data.size() > Attachment::MaxFileBytes)
+        return fail(tr("The file is larger than %1 MB.").arg(Attachment::MaxFileBytes / (1024 * 1024)));
     const auto sealed = Attachment::encrypt(data);
     if (!sealed)
         return fail(tr("The file could not be encrypted."));
     const QString blobFile = m_store->writeBlob(sealed->blob);
     if (blobFile.isEmpty())
         return fail(tr("The file could not be kept here."));
-    QString type = QMimeDatabase().mimeTypeForFileNameAndData(path, data.left(4096)).name();
-    if (!Attachment::isValidType(type))
-        type = QStringLiteral("application/octet-stream");
 
     const bool direct = c.kind != QLatin1String("self"); // a person or a group: it goes out
     if (c.left)
@@ -964,8 +995,9 @@ qint64 Messenger::sendFile(qint64 conversation, const QString &path, const QStri
     }
     ChatStore::StoredAttachment a;
     a.message = message.id;
-    a.name = Attachment::safeName(QFileInfo(path).fileName());
+    a.name = Attachment::safeName(fileName);
     a.type = type;
+    a.voice = voice;
     a.size = data.size();
     a.key = sealed->key;
     a.digest = sealed->digest;
@@ -1315,6 +1347,7 @@ void Messenger::handleContent(const QString &from, const Protocol::Envelope &env
         a.digest = pointer.digest;
         a.remoteId = pointer.id;
         a.state = QStringLiteral("download");
+        a.voice = pointer.voice;
         m_store->addAttachment(a);
     }
     stopShowingTyping(conversation, from); // it came
@@ -1323,9 +1356,9 @@ void Messenger::handleContent(const QString &from, const Protocol::Envelope &env
         sendReceipt(from, Protocol::Content::Receipt::Delivered, {content.id});
         downloadPending();
     }
-    const QString shown = content.body.isEmpty() && !content.attachments.isEmpty()
-                              ? QStringLiteral("📎 ") + content.attachments.first().name
-                              : content.body;
+    const QString shown = !content.body.isEmpty() || content.attachments.isEmpty() ? content.body
+                          : content.attachments.first().voice ? tr("🎤 Voice message")
+                                                              : QStringLiteral("📎 ") + content.attachments.first().name;
     emit messageReceived(conversation, from, shown, request);
 }
 
@@ -1992,6 +2025,7 @@ void Messenger::handleSync(const Protocol::Envelope &envelope, const Protocol::C
             a.digest = pointer.digest;
             a.remoteId = pointer.id;
             a.state = QStringLiteral("download");
+            a.voice = pointer.voice;
             m_store->addAttachment(a);
         }
         downloadPending();

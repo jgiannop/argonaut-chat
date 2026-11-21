@@ -3,6 +3,7 @@
 #include "Messenger.h"
 #include "ServerStore.h"
 #include "TestSupport.h"
+#include "Voice.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -1323,6 +1324,46 @@ private slots:
         carol.messenger->setTyping(carol.store->groupConversation(gid), true);
         QTRY_COMPARE_WITH_TIMEOUT(alice.messenger->typingIn(*group), QStringList{"carol"}, kWait);
         QTRY_COMPARE_WITH_TIMEOUT(bob.messenger->typingIn(bob.store->groupConversation(gid)), QStringList{"carol"}, kWait);
+    }
+
+    void voiceMessages()
+    {
+        Device alice(file("alice"));
+        Device bob(file("bob"));
+        QVERIFY(signUp(alice, "alice"));
+        QVERIFY(signUp(bob, "bob"));
+        const qint64 toBob = startConversation(alice, "bob");
+        alice.messenger->send(toBob, "listen to this");
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("alice") > 0, kWait);
+        const qint64 toAlice = bob.store->directConversation("alice");
+        bob.messenger->acceptRequest(toAlice);
+
+        // Two seconds of sound.
+        const QByteArray samples = Crypto::randomBytes(2 * Voice::SampleRate * 2);
+        QString error;
+        QCOMPARE(alice.messenger->sendVoice(toBob, QByteArray(100, '\0'), &error), 0); // too short
+        QVERIFY(!error.isEmpty());
+        const qint64 voice = alice.messenger->sendVoice(toBob, samples, &error);
+        QVERIFY2(voice > 0, qPrintable(error));
+        const ChatStore::StoredAttachment mine = alice.store->attachments(voice).value(0);
+        QVERIFY(mine.voice);
+        QCOMPARE(mine.type, QString("audio/wav"));
+        QTRY_COMPARE_WITH_TIMEOUT(alice.store->message(voice).status, QString("delivered"), kWait);
+
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->messages(toAlice).size() == 2, kWait);
+        const qint64 theirs = bob.store->messages(toAlice).last().id;
+        QTRY_COMPARE_WITH_TIMEOUT(bob.store->attachments(theirs).value(0).state, QString("ready"), kWait);
+        const ChatStore::StoredAttachment got = bob.store->attachments(theirs).first();
+        QVERIFY(got.voice);
+        const auto data = bob.messenger->attachmentData(got.id);
+        QVERIFY(data);
+        const auto audio = Voice::fromWav(*data);
+        QVERIFY(audio);
+        QCOMPARE(audio->samples, samples);
+        QCOMPARE(audio->durationMs(), 2000);
+        // In the list: a voice message.
+        QCOMPARE(bob.store->conversation(toAlice).lastText, QStringLiteral("🎤 Voice message"));
+        QCOMPARE(bob.messenger->quoteOf(theirs)->text, QStringLiteral("🎤 Voice message")); // a reply's quote
     }
 
     void keyStoreTrust()

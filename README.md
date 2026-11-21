@@ -100,7 +100,8 @@ as the release `v0.1.0`. Every push to `main` builds and tests on Linux
 ## Building
 
 Dependencies (Ubuntu 24.04): `cmake ninja-build pkg-config qt6-base-dev
-qt6-websockets-dev libsodium-dev libsqlcipher-dev qtkeychain-qt6-dev`.
+qt6-websockets-dev qt6-multimedia-dev libsodium-dev libsqlcipher-dev
+qtkeychain-qt6-dev`.
 
 ```bash
 cmake --preset debug
@@ -109,7 +110,7 @@ cmake --build build/debug
 ctest --preset debug
 ```
 
-On Windows: Visual Studio 2022, Qt 6.8 with Qt WebSockets, libsodium and
+On Windows: Visual Studio 2022, Qt 6.8 with Qt WebSockets and Qt Multimedia, libsodium and
 SQLCipher from vcpkg, QtKeychain built against that Qt, then `cmake --preset
 windows` with vcpkg's toolchain file; `.github/workflows/windows.yml` has
 every step.

@@ -2,6 +2,7 @@
 
 #include "ChatStore.h"
 #include "Theme.h"
+#include "VoiceAudio.h"
 
 #include <QHash>
 #include <QMainWindow>
@@ -85,6 +86,13 @@ public:
     QLineEdit *findField() const { return m_findField; }
     QLabel *findCountLabel() const { return m_findCount; }
     QWidget *findBar() const { return m_findBar; }
+    // Voice messages: 🎤 records (the bar shows the time; Cancel, Send), a
+    // click on one plays it (again: stops).
+    void startRecording();
+    void stopRecording(bool send);
+    void sendVoice(const QByteArray &samples); // what a recording gives (tests too)
+    void toggleVoice(qint64 attachment);
+    VoicePlayer *voicePlayer() { return &m_player; }
     QWidget *replyBar() const { return m_replyBar; }
     QLabel *replyLabel() const { return m_replyLabel; }
     // Delete for Me / for Everyone (`ask`: confirm first).
@@ -116,6 +124,8 @@ private:
     QPixmap previewFor(const ChatStore::StoredAttachment &attachment);
     QPixmap avatarFor(const QString &username);
     QString fileLine(const ChatStore::StoredAttachment &attachment, bool shownAsImage) const;
+    QString voiceLine(const ChatStore::StoredAttachment &attachment);
+    void refreshVoiceLines();
     // "typing…", "Anna is typing…": empty when nobody is.
     QString typingText(qint64 conversation) const;
     // "You", or their name: who wrote what a reply answers.
@@ -162,6 +172,12 @@ private:
     QLabel *m_findCount = nullptr;
     QList<qint64> m_findResults;
     int m_findIndex = -1;
+    VoiceRecorder m_recorder;
+    VoicePlayer m_player;
+    QToolButton *m_voiceButton = nullptr;
+    QWidget *m_recordBar = nullptr;
+    QLabel *m_recordLabel = nullptr;
+    QHash<qint64, qint64> m_voiceDurations; // attachment → ms (−1: not playable)
     QWidget *m_requestBar = nullptr;
     QLabel *m_requestText = nullptr;
     QPushButton *m_acceptButton = nullptr;

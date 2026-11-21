@@ -75,6 +75,9 @@ public:
     // message with its key goes as any other. 0 and `error` if it cannot be.
     qint64 sendFile(qint64 conversation, const QString &path, const QString &caption, QString *error = nullptr,
                     qint64 replyTo = 0);
+    // A voice message: 16-bit mono samples at Voice::SampleRate, sent as a
+    // WAV attachment marked "voice".
+    qint64 sendVoice(qint64 conversation, const QByteArray &samples, QString *error = nullptr, qint64 replyTo = 0);
     // What a reply to `message` quotes: its id, author and the start of its text.
     std::optional<Protocol::Quote> quoteOf(qint64 message) const;
     // An attachment here, decrypted in memory; nothing if it is not here (yet).
@@ -214,6 +217,8 @@ private:
     void handleContent(const QString &from, const Protocol::Envelope &envelope, const Protocol::Content &content);
 
     void flushOutbox();
+    qint64 sendData(qint64 conversation, const QString &fileName, const QString &type, const QByteArray &data,
+                    const QString &caption, QString *error, qint64 replyTo, bool voice);
     void deliver(const ChatStore::Message &message);
     // A message of mine did not go: again later, or failed for good.
     void deliveryFailed(qint64 message, const QString &error, const QString &why);

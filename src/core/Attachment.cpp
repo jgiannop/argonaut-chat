@@ -89,12 +89,15 @@ bool isValidType(const QString &type)
 
 QJsonObject toJson(const Pointer &pointer)
 {
-    return {{QStringLiteral("id"), pointer.id},
-            {QStringLiteral("key"), Protocol::Json::base64(pointer.key)},
-            {QStringLiteral("digest"), Protocol::Json::base64(pointer.digest)},
-            {QStringLiteral("size"), double(pointer.size)},
-            {QStringLiteral("name"), pointer.name},
-            {QStringLiteral("type"), pointer.type}};
+    QJsonObject json{{QStringLiteral("id"), pointer.id},
+                     {QStringLiteral("key"), Protocol::Json::base64(pointer.key)},
+                     {QStringLiteral("digest"), Protocol::Json::base64(pointer.digest)},
+                     {QStringLiteral("size"), double(pointer.size)},
+                     {QStringLiteral("name"), pointer.name},
+                     {QStringLiteral("type"), pointer.type}};
+    if (pointer.voice)
+        json.insert(QStringLiteral("voice"), true); // older versions ignore it: a .wav file to them
+    return json;
 }
 
 std::optional<Pointer> fromJson(const QJsonValue &json)
@@ -117,6 +120,11 @@ std::optional<Pointer> fromJson(const QJsonValue &json)
     pointer.size = *size;
     pointer.name = safeName(name.toString());
     pointer.type = type.toString();
+    // A voice message: only audio/wav (the rest of what "voice" claims is checked when played).
+    const QJsonValue voice = object.value(QStringLiteral("voice"));
+    if (!voice.isUndefined() && (!voice.isBool() || (voice.toBool() && pointer.type != QLatin1String("audio/wav"))))
+        return std::nullopt;
+    pointer.voice = voice.toBool();
     return pointer;
 }
 
