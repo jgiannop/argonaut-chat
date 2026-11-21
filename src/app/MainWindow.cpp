@@ -59,6 +59,7 @@ enum Role {
     ExpireRole,     // a disappearing message
     QuoteAuthorRole, // a reply: who wrote what it answers (as shown: "You", a name)
     QuoteTextRole,   // a reply: the start of what it answers
+    ReactionsRole,   // its reactions as shown: "👍 2  ❤️"
 };
 
 QString shortTime(const QDateTime &when)
@@ -172,6 +173,8 @@ public:
     static constexpr int Pad = 10;
     static constexpr int Gap = 6;
     static constexpr int QuotePad = 6;
+    // The reactions' pill: overlapping the bubble's bottom edge by 6 px, as Signal's.
+    static int reactionHeight(const QStyleOptionViewItem &option) { return QFontMetrics(option.font).height() + 8; }
     static constexpr int QuoteBar = 3;
 
     struct Layout
@@ -270,7 +273,8 @@ public:
         if (index.data(SystemRole).toBool())
             return {option.rect.width(), QFontMetrics(option.font).height() + 22};
         bool read = false;
-        return {option.rect.width(), layout(option, index, footerFor(index, &read)).height + 8};
+        const int reactions = index.data(ReactionsRole).toString().isEmpty() ? 0 : reactionHeight(option) - 6;
+        return {option.rect.width(), layout(option, index, footerFor(index, &read)).height + 8 + reactions};
     }
 
     void paint(QPainter *p, const QStyleOptionViewItem &option, const QModelIndex &index) const override
@@ -366,6 +370,21 @@ public:
         p->drawText(QRect(bubble.left() + Pad, bubble.bottom() - Pad - smallMetrics.height(), bubble.width() - 2 * Pad,
                           smallMetrics.height()),
                     Qt::AlignRight | Qt::AlignVCenter, footer);
+        const QString reactions = index.data(ReactionsRole).toString();
+        if (!reactions.isEmpty()) {
+            const QFontMetrics fm(option.font);
+            const int h = reactionHeight(option);
+            const int w = fm.horizontalAdvance(reactions) + 16;
+            const QRect pill(mine ? bubble.right() - 12 - w : bubble.left() + 12, bubble.bottom() - 6, w, h);
+            QPainterPath pillPath;
+            pillPath.addRoundedRect(pill, h / 2.0, h / 2.0);
+            p->fillPath(pillPath, m_theme->window);
+            p->setPen(QPen(m_theme->border, 1));
+            p->drawPath(pillPath);
+            p->setPen(m_theme->fg);
+            p->setFont(option.font);
+            p->drawText(pill, Qt::AlignCenter, reactions);
+        }
         p->restore();
     }
 
@@ -619,6 +638,10 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
         });
         connect(m_messenger, &Messenger::problem, this, &MainWindow::showNotice);
         connect(m_messenger, &Messenger::messageReceived, this, &MainWindow::notify);
+        connect(m_messenger, &Messenger::reactionReceived, this,
+                [this](qint64 conversation, const QString &from, const QString &emoji, const QString &onText) {
+                    notify(conversation, from, tr("Reacted %1 to “%2”").arg(emoji, onText), false);
+                });
     }
 
     buildMenus();
@@ -1041,6 +1064,27 @@ void MainWindow::reloadMessages()
             item->setData(FileRole, fileLine(a, !preview.isNull()));
             item->setToolTip(a.file.isEmpty() ? QString() : tr("Click to save %1").arg(a.name));
         }
+        const QList<ChatStore::Reaction> reactions = m_store->reactions(m.id);
+        if (!reactions.isEmpty()) {
+            // Each emoji once, in the order they came, with how many; who, in the tooltip.
+            QStringList order;
+            QHash<QString, QStringList> who;
+            for (const ChatStore::Reaction &r : reactions) {
+                if (!who.contains(r.emoji))
+                    order << r.emoji;
+                who[r.emoji] << (r.author.isEmpty() ? tr("You") : m_messenger ? m_messenger->displayName(r.author) : r.author);
+            }
+            QStringList shown;
+            QStringList lines;
+            for (const QString &emoji : order) {
+                const int n = who.value(emoji).size();
+                shown << (n > 1 ? QStringLiteral("%1 %2").arg(emoji).arg(n) : emoji);
+                lines << QStringLiteral("%1 %2").arg(emoji, who.value(emoji).join(QStringLiteral(", ")));
+            }
+            item->setData(ReactionsRole, shown.join(QStringLiteral("  ")));
+            const QString tip = lines.join(QLatin1Char('\n'));
+            item->setToolTip(item->toolTip().isEmpty() ? tip : item->toolTip() + QLatin1Char('\n') + tip);
+        }
     }
     m_messages->scrollToBottom();
 }
@@ -1126,6 +1170,25 @@ QMenu *MainWindow::messageMenu(qint64 message)
     reply->setObjectName(QStringLiteral("replyAction"));
     // Not where nothing can be written: a request, a group I left.
     reply->setEnabled(m_messenger && !c.request && !c.left);
+    // React: the quick ones, mine ticked (again: taken back).
+    QMenu *react = menu->addMenu(tr("React"));
+    react->setObjectName(QStringLiteral("reactMenu"));
+    const bool canReact = m_messenger && !c.request && !c.left && (c.kind == QLatin1String("self") || !m.uid.isEmpty());
+    react->setEnabled(canReact);
+    const QString mine = m_store->myReaction(message);
+    for (const QString &emoji : Messenger::quickReactions()) {
+        QAction *a = react->addAction(emoji, this, [this, message, emoji, mine] {
+            m_messenger->react(message, emoji == mine ? QString() : emoji);
+        });
+        a->setCheckable(true);
+        a->setChecked(emoji == mine);
+        a->setData(emoji);
+    }
+    if (!mine.isEmpty()) {
+        QAction *remove = menu->addAction(tr("Remove Reaction"), this, [this, message] { m_messenger->react(message, QString()); });
+        remove->setObjectName(QStringLiteral("removeReactionAction"));
+        remove->setEnabled(canReact);
+    }
     if (!m.body.isEmpty()) {
         menu->addAction(tr("Copy Text"), this, [body = m.body] { QGuiApplication::clipboard()->setText(body); });
     }

@@ -142,6 +142,15 @@ void ChatStore::createTables()
     addColumn(QStringLiteral("messages"), QStringLiteral("quote_author"), QStringLiteral("TEXT NOT NULL DEFAULT ''"));
     addColumn(QStringLiteral("messages"), QStringLiteral("quote_text"), QStringLiteral("TEXT NOT NULL DEFAULT ''"));
     q.exec(QStringLiteral("CREATE INDEX IF NOT EXISTS messages_by_expiry ON messages(expires_at)"));
+    // Reactions: one per person per message; mine with author ''. A removal
+    // of mine stays (emoji '') until it has been sent.
+    q.exec(QStringLiteral("CREATE TABLE IF NOT EXISTS reactions ("
+                          " message INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,"
+                          " author TEXT NOT NULL,"
+                          " emoji TEXT NOT NULL,"
+                          " at INTEGER NOT NULL,"
+                          " pending INTEGER NOT NULL DEFAULT 0,"
+                          " PRIMARY KEY (message, author))"));
     q.exec(QStringLiteral("CREATE TABLE IF NOT EXISTS group_info ("
                           " conversation INTEGER PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,"
                           " admin TEXT NOT NULL,"
@@ -437,6 +446,72 @@ bool ChatStore::hasMessage(qint64 conversation, const QString &uid) const
     q.addBindValue(conversation);
     q.addBindValue(uid);
     return q.exec() && q.next();
+}
+
+void ChatStore::setReaction(qint64 message, const QString &author, const QString &emoji, qint64 at, bool pending)
+{
+    QSqlQuery q(m_db);
+    if (emoji.isEmpty() && !pending) {
+        q.prepare(QStringLiteral("DELETE FROM reactions WHERE message = ? AND author = ?"));
+        q.addBindValue(message);
+        q.addBindValue(text(author));
+    } else {
+        q.prepare(QStringLiteral("INSERT OR REPLACE INTO reactions (message, author, emoji, at, pending) VALUES (?, ?, ?, ?, ?)"));
+        q.addBindValue(message);
+        q.addBindValue(text(author));
+        q.addBindValue(text(emoji));
+        q.addBindValue(at);
+        q.addBindValue(pending ? 1 : 0);
+    }
+    if (q.exec())
+        emit messagesChanged(this->message(message).conversation);
+}
+
+QList<ChatStore::Reaction> ChatStore::reactions(qint64 message) const
+{
+    QList<Reaction> out;
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT message, author, emoji, at FROM reactions WHERE message = ? AND emoji != ''"
+                             " ORDER BY at, author"));
+    q.addBindValue(message);
+    if (q.exec()) {
+        while (q.next())
+            out.append({q.value(0).toLongLong(), q.value(1).toString(), q.value(2).toString(), q.value(3).toLongLong()});
+    }
+    return out;
+}
+
+QString ChatStore::myReaction(qint64 message) const
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT emoji FROM reactions WHERE message = ? AND author = ''"));
+    q.addBindValue(message);
+    return q.exec() && q.next() ? q.value(0).toString() : QString();
+}
+
+QList<ChatStore::Reaction> ChatStore::pendingReactions() const
+{
+    QList<Reaction> out;
+    QSqlQuery q(m_db);
+    if (q.exec(QStringLiteral("SELECT message, author, emoji, at FROM reactions WHERE pending = 1 ORDER BY at"))) {
+        while (q.next())
+            out.append({q.value(0).toLongLong(), q.value(1).toString(), q.value(2).toString(), q.value(3).toLongLong()});
+    }
+    return out;
+}
+
+void ChatStore::setReactionSent(qint64 message, qint64 at)
+{
+    // A removal, once sent, is gone; an emoji stays, no longer pending.
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("DELETE FROM reactions WHERE message = ? AND author = '' AND emoji = '' AND at = ?"));
+    q.addBindValue(message);
+    q.addBindValue(at);
+    q.exec();
+    q.prepare(QStringLiteral("UPDATE reactions SET pending = 0 WHERE message = ? AND author = '' AND at = ?"));
+    q.addBindValue(message);
+    q.addBindValue(at);
+    q.exec();
 }
 
 qint64 ChatStore::messageByUid(qint64 conversation, const QString &uid) const

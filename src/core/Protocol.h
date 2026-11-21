@@ -62,7 +62,7 @@ struct Quote
 
 struct Content
 {
-    enum class Type { Text, Receipt, Profile, Group, Leave, Timer };
+    enum class Type { Text, Receipt, Profile, Group, Leave, Timer, Reaction };
     enum class Receipt { Delivered, Read };
 
     Type type = Type::Text;
@@ -75,13 +75,17 @@ struct Content
     // Profile: the sender's display name (maybe empty) and picture (maybe none).
     QString name;
     std::optional<Attachment::Pointer> avatar;
-    // Text, Group, Leave: the group (32 hex digits; empty: a direct message).
+    // Text, Group, Leave, Timer, Reaction: the group (32 hex digits; empty: a direct message).
     QString group;
     // Text, to my own other devices only: whom I sent it to (a username), so
-    // they show it as mine (a group's has `group` instead). Timer too.
+    // they show it as mine (a group's has `group` instead). Timer, Reaction too.
     QString sentTo;
-    // Text: the message it answers (a reply).
+    // Text: the message it answers (a reply). Reaction: the message it is on
+    // (its id and author; `text` unused).
     std::optional<Quote> quote;
+    // Reaction: one emoji (`isValidReaction`); `remove`: taken back.
+    QString emoji;
+    bool remove = false;
     // Text: disappears this many seconds after it is seen (0: never).
     // Timer: the conversation's new setting (with `group` for a group's).
     qint64 expireSeconds = 0;
@@ -99,7 +103,16 @@ struct Content
                                const QStringList &members, int revision);
     static Content leave(const QString &group);
     static Content timer(qint64 seconds, const QString &group = QString());
+    // On the message `targetId` by `targetAuthor`; empty `emoji` with `remove`.
+    static Content reaction(const QString &targetId, const QString &targetAuthor, const QString &emoji, bool remove,
+                            const QString &group = QString());
 };
+
+// A reaction: one emoji as people type it (with its variation selectors,
+// skin tones, joiners): 1 to MaxReactionBytes of UTF-8, no letters, digits,
+// spaces, controls or direction marks.
+constexpr int MaxReactionBytes = 32;
+bool isValidReaction(const QString &emoji);
 
 // A group's id: 32 lower-case hex digits, random.
 bool isValidGroupId(const QString &id);

@@ -72,6 +72,24 @@ where the original is gone. A quote that is not exactly that object drops
 the whole message. Versions before 0.2 ignore the field and show the text
 alone.
 
+### Reactions
+
+One emoji per person per message, as Signal's; a new one replaces the
+last, and `remove` takes it back:
+
+```json
+{"v":1, "t":"reaction", "id":"<uuid>", "sent":…, "target":{"id":"<its uuid>", "author":"alice"},
+ "emoji":"👍", "group":"<32 hex>"?, "sentTo":"<username>"?}
+{"v":1, "t":"reaction", "id":"<uuid>", "sent":…, "target":{…}, "remove":true}
+```
+
+`target` names the message by its id and author's username; a reaction is
+kept only on a message of the conversation it comes in (the sender's direct
+one, or a group they are in) whose author matches. `emoji` is 1 to 32 bytes
+of UTF-8 with no letters, digits, spaces, controls or direction marks.
+`sentTo` only to my own other devices (a group's has `group`). A reaction
+never starts a conversation. Versions before 0.2 drop it unread.
+
 ### Profiles
 
 ```json

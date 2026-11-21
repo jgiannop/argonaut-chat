@@ -434,6 +434,103 @@ void Messenger::flushOutbox()
 {
     for (const ChatStore::Message &message : m_store->outbox())
         deliver(message);
+    sendPendingReactions();
+}
+
+// --- Reactions ---
+
+QStringList Messenger::quickReactions()
+{
+    return {QStringLiteral("👍"), QStringLiteral("❤️"), QStringLiteral("😂"), QStringLiteral("😮"),
+            QStringLiteral("😢"), QStringLiteral("🙏")};
+}
+
+bool Messenger::react(qint64 message, const QString &emoji)
+{
+    const ChatStore::Message m = m_store->message(message);
+    const ChatStore::Conversation c = m_store->conversation(m.conversation);
+    if (m.id == 0 || m.system || (!emoji.isEmpty() && !Protocol::isValidReaction(emoji)))
+        return false;
+    if (c.kind == QLatin1String("self")) {
+        m_store->setReaction(message, QString(), emoji, now()); // here only
+        return true;
+    }
+    if (c.request || c.left || m.uid.isEmpty())
+        return false;
+    if (emoji.isEmpty() && m_store->myReaction(message).isEmpty())
+        return true; // nothing to take back
+    m_store->setReaction(message, QString(), emoji, now(), true);
+    sendPendingReactions();
+    return true;
+}
+
+void Messenger::sendPendingReactions()
+{
+    if (m_state != State::Online)
+        return;
+    for (const ChatStore::Reaction &r : m_store->pendingReactions()) {
+        if (m_reactionsInFlight.contains(r.message))
+            continue; // the newest goes once this one is done
+        const ChatStore::Message m = m_store->message(r.message);
+        const ChatStore::Conversation c = m_store->conversation(m.conversation);
+        const bool group = c.kind == QLatin1String("group");
+        if (m.id == 0 || (c.kind != QLatin1String("direct") && !group) || c.left) {
+            m_store->setReactionSent(r.message, r.at);
+            continue;
+        }
+        Protocol::Content content = Protocol::Content::reaction(m.uid, m.outgoing() ? username() : m.author, r.emoji,
+                                                                r.emoji.isEmpty(), group ? c.peer : QString());
+        Protocol::Content copy = content; // to my other devices: which conversation
+        if (!group)
+            copy.sentTo = c.peer;
+        const qint64 id = r.message;
+        const qint64 at = r.at;
+        m_reactionsInFlight.insert(id);
+        const Done done = [this, id, at, copy](bool ok, const QString &error) {
+            m_reactionsInFlight.remove(id);
+            if (!ok && (error == QLatin1String("disconnected") || error == QLatin1String("rate-limited")))
+                return; // again with the outbox
+            m_store->setReactionSent(id, at); // sent, or never can be
+            if (ok)
+                syncToMyDevices(copy);
+            sendPendingReactions(); // a newer one made meanwhile
+        };
+        if (group)
+            fanOut(othersIn(c.id), content, done);
+        else
+            sendContent(c.peer, content, done);
+    }
+}
+
+void Messenger::handleReaction(const QString &from, const Protocol::Content &content, bool mine)
+{
+    qint64 conversation = 0;
+    if (!content.group.isEmpty()) {
+        conversation = m_store->groupConversation(content.group);
+        if (conversation == 0 || m_store->conversation(conversation).left || !m_store->isMember(conversation, from))
+            return;
+    } else {
+        // Only on a conversation there already is: a reaction starts nothing.
+        conversation = m_store->directConversation(mine ? content.sentTo : from);
+    }
+    if (conversation == 0 || !content.quote)
+        return;
+    const qint64 target = m_store->messageByUid(conversation, content.quote->id);
+    const ChatStore::Message m = m_store->message(target);
+    // The message must be the one named: its id and its author.
+    if (target == 0 || m.system
+        || (m.outgoing() ? content.quote->author != username() : m.author != content.quote->author))
+        return;
+    m_store->setReaction(target, mine ? QString() : from, content.remove ? QString() : content.emoji, now());
+    const ChatStore::Conversation c = m_store->conversation(conversation);
+    if (!mine && !content.remove && m.outgoing() && !c.request) {
+        QString text = m.body.simplified();
+        if (text.isEmpty()) {
+            const auto quote = quoteOf(m.id);
+            text = quote ? quote->text : QString();
+        }
+        emit reactionReceived(conversation, from, content.emoji, text);
+    }
 }
 
 void Messenger::deliver(const ChatStore::Message &message)
@@ -868,6 +965,10 @@ void Messenger::handleContent(const QString &from, const Protocol::Envelope &env
     }
     if (content.type == Protocol::Content::Type::Timer) {
         handleTimer(from, content);
+        return;
+    }
+    if (content.type == Protocol::Content::Type::Reaction) {
+        handleReaction(from, content, false);
         return;
     }
     if (content.type == Protocol::Content::Type::Receipt) {
@@ -1611,6 +1712,9 @@ void Messenger::handleSync(const Protocol::Content &content)
         return;
     case Protocol::Content::Type::Timer:
         handleTimer(username(), content); // set on another device of mine
+        return;
+    case Protocol::Content::Type::Reaction:
+        handleReaction(username(), content, true); // made on another device of mine
         return;
     }
 }

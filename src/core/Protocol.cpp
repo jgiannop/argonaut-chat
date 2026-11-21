@@ -220,6 +220,39 @@ Content Content::timer(qint64 seconds, const QString &group)
     return content;
 }
 
+Content Content::reaction(const QString &targetId, const QString &targetAuthor, const QString &emoji, bool remove,
+                          const QString &group)
+{
+    Content content;
+    content.type = Type::Reaction;
+    content.id = newMessageId();
+    content.sentAt = QDateTime::currentMSecsSinceEpoch();
+    content.quote = Quote{targetId, targetAuthor, QString()};
+    content.emoji = remove ? QString() : emoji;
+    content.remove = remove;
+    content.group = group;
+    return content;
+}
+
+bool isValidReaction(const QString &emoji)
+{
+    const QByteArray utf8 = emoji.toUtf8();
+    if (utf8.isEmpty() || utf8.size() > MaxReactionBytes)
+        return false;
+    bool symbol = false;
+    for (const char32_t c : emoji.toUcs4()) {
+        const QChar::Category category = QChar::category(c);
+        if (QChar::isLetterOrNumber(c) || QChar::isSpace(c) || category == QChar::Other_Control
+            || category == QChar::Other_NotAssigned || category == QChar::Other_PrivateUse
+            || (c >= 0x200E && c <= 0x200F) || (c >= 0x202A && c <= 0x202E) || (c >= 0x2066 && c <= 0x2069))
+            return false;
+        if (category == QChar::Symbol_Other || category == QChar::Symbol_Math || category == QChar::Symbol_Modifier
+            || category == QChar::Punctuation_Other)
+            symbol = true;
+    }
+    return symbol;
+}
+
 Content Content::leave(const QString &group)
 {
     Content content;
@@ -369,6 +402,23 @@ QByteArray encodeContent(const Content &content)
             json.insert(QStringLiteral("group"), content.group);
         if (!content.sentTo.isEmpty())
             json.insert(QStringLiteral("sentTo"), content.sentTo);
+    } else if (content.type == Content::Type::Reaction) {
+        if (!content.quote || !isValidMessageId(content.quote->id) || !isValidUsername(content.quote->author)
+            || (content.remove ? !content.emoji.isEmpty() : !isValidReaction(content.emoji))
+            || (!content.group.isEmpty() && !isValidGroupId(content.group))
+            || (!content.sentTo.isEmpty() && !isValidUsername(content.sentTo)))
+            return {};
+        json.insert(QStringLiteral("t"), QStringLiteral("reaction"));
+        json.insert(QStringLiteral("target"), QJsonObject{{QStringLiteral("id"), content.quote->id},
+                                                          {QStringLiteral("author"), content.quote->author}});
+        if (content.remove)
+            json.insert(QStringLiteral("remove"), true);
+        else
+            json.insert(QStringLiteral("emoji"), content.emoji);
+        if (!content.group.isEmpty())
+            json.insert(QStringLiteral("group"), content.group);
+        if (!content.sentTo.isEmpty())
+            json.insert(QStringLiteral("sentTo"), content.sentTo);
     } else if (content.type == Content::Type::Leave) {
         if (!isValidGroupId(content.group))
             return {};
@@ -480,6 +530,36 @@ std::optional<Content> decodeContent(const QByteArray &padded)
             || (!sentTo.isUndefined() && (!sentTo.isString() || !isValidUsername(sentTo.toString()))))
             return std::nullopt;
         content.expireSeconds = *seconds;
+        content.group = group.toString();
+        content.sentTo = sentTo.toString();
+        return content;
+    }
+    if (type == QLatin1String("reaction")) {
+        content.type = Content::Type::Reaction;
+        const QJsonValue target = json.value(QStringLiteral("target"));
+        const QJsonValue id = target.toObject().value(QStringLiteral("id"));
+        const QJsonValue author = target.toObject().value(QStringLiteral("author"));
+        const QJsonValue emoji = json.value(QStringLiteral("emoji"));
+        const QJsonValue remove = json.value(QStringLiteral("remove"));
+        const QJsonValue group = json.value(QStringLiteral("group"));
+        const QJsonValue sentTo = json.value(QStringLiteral("sentTo"));
+        if (!target.isObject() || !id.isString() || !isValidMessageId(id.toString()) || !author.isString()
+            || !isValidUsername(author.toString()))
+            return std::nullopt;
+        // Either an emoji, or "remove": true.
+        if (remove.isUndefined()) {
+            if (!emoji.isString() || !isValidReaction(emoji.toString()))
+                return std::nullopt;
+            content.emoji = emoji.toString();
+        } else if (remove != QJsonValue(true) || !emoji.isUndefined()) {
+            return std::nullopt;
+        } else {
+            content.remove = true;
+        }
+        if ((!group.isUndefined() && (!group.isString() || !isValidGroupId(group.toString())))
+            || (!sentTo.isUndefined() && (!sentTo.isString() || !isValidUsername(sentTo.toString()))))
+            return std::nullopt;
+        content.quote = Quote{id.toString(), author.toString(), QString()};
         content.group = group.toString();
         content.sentTo = sentTo.toString();
         return content;

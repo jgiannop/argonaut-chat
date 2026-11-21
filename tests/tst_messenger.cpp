@@ -940,6 +940,103 @@ private slots:
         QCOMPARE(alice.store->message(reply).quoteText, QString("unrelated"));
     }
 
+    void reactions()
+    {
+        Device alice(file("alice"));
+        Device bob(file("bob"));
+        Device carol(file("carol"));
+        Device dave(file("dave"));
+        for (auto [d, name] : {std::pair{&alice, "alice"}, {&bob, "bob"}, {&carol, "carol"}, {&dave, "dave"}})
+            QVERIFY(signUp(*d, name));
+        const qint64 toBob = startConversation(alice, "bob");
+        const qint64 hello = alice.messenger->send(toBob, "Passed my exam!");
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("alice") > 0, kWait);
+        const qint64 toAlice = bob.store->directConversation("alice");
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(toAlice), QString("Passed my exam!"), kWait);
+        const qint64 theirs = bob.store->messages(toAlice).last().id;
+        // Not on a request: accepting comes first.
+        QVERIFY(!bob.messenger->react(theirs, "👍"));
+        bob.messenger->acceptRequest(toAlice);
+
+        QSignalSpy told(alice.messenger.get(), &Messenger::reactionReceived);
+        QVERIFY(bob.messenger->react(theirs, "🎉"));
+        QCOMPARE(bob.store->myReaction(theirs), QString("🎉"));
+        QTRY_COMPARE_WITH_TIMEOUT(alice.store->reactions(hello).size(), 1, kWait);
+        QCOMPARE(alice.store->reactions(hello).first().author, QString("bob"));
+        QCOMPARE(alice.store->reactions(hello).first().emoji, QString("🎉"));
+        QTRY_COMPARE_WITH_TIMEOUT(told.size(), 1, kWait);
+        QCOMPARE(told.first().at(2).toString(), QString("🎉"));
+        QCOMPARE(told.first().at(3).toString(), QString("Passed my exam!"));
+        QVERIFY(bob.store->pendingReactions().isEmpty()); // sent
+
+        // Changed: one per person, the newest.
+        QVERIFY(bob.messenger->react(theirs, "❤️"));
+        QTRY_COMPARE_WITH_TIMEOUT(alice.store->reactions(hello).value(0).emoji, QString("❤️"), kWait);
+        QCOMPARE(alice.store->reactions(hello).size(), 1);
+        // Alice reacts to her own; then Bob takes his back.
+        QVERIFY(alice.messenger->react(hello, "😂"));
+        QTRY_COMPARE_WITH_TIMEOUT(bob.store->reactions(theirs).size(), 2, kWait);
+        QVERIFY(bob.messenger->react(theirs, QString()));
+        QTRY_COMPARE_WITH_TIMEOUT(alice.store->reactions(hello).size(), 1, kWait);
+        QCOMPARE(alice.store->reactions(hello).first().author, QString()); // hers alone
+        QVERIFY(bob.store->pendingReactions().isEmpty());
+        QCOMPARE(told.size(), 2); // no word for a removal, nor for her own
+
+        // Made while offline: sent once back.
+        bob.messenger->stop();
+        QVERIFY(bob.messenger->react(theirs, "👍"));
+        QCOMPARE(bob.store->pendingReactions().size(), 1);
+        QTest::qWait(200);
+        QCOMPARE(alice.store->reactions(hello).size(), 1);
+        bob.messenger->start();
+        QTRY_COMPARE_WITH_TIMEOUT(alice.store->reactions(hello).size(), 2, kWait);
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->pendingReactions().isEmpty(), kWait);
+
+        // Not something that is not an emoji.
+        QVERIFY(!bob.messenger->react(theirs, "lol"));
+        QVERIFY(!bob.messenger->react(theirs, "👍 👍"));
+
+        // In a group, from Carol, to all.
+        std::optional<qint64> group;
+        alice.messenger->createGroup("Study", {"bob", "carol"}, [&](qint64 c, const QString &) { group = c; });
+        QTRY_VERIFY_WITH_TIMEOUT(group.has_value() && *group > 0, kWait);
+        const QString gid = alice.store->group(*group).id;
+        QTRY_VERIFY_WITH_TIMEOUT(carol.store->groupConversation(gid) > 0, kWait);
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->groupConversation(gid) > 0, kWait);
+        const qint64 carolGroup = carol.store->groupConversation(gid);
+        const qint64 bobGroup = bob.store->groupConversation(gid);
+        carol.messenger->acceptRequest(carolGroup);
+        bob.messenger->acceptRequest(bobGroup);
+        const qint64 news = alice.messenger->send(*group, "Exam moved to Friday");
+        QTRY_COMPARE_WITH_TIMEOUT(carol.last(carolGroup), QString("Exam moved to Friday"), kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(bobGroup), QString("Exam moved to Friday"), kWait);
+        QVERIFY(carol.messenger->react(carol.store->messages(carolGroup).last().id, "😮"));
+        QTRY_COMPARE_WITH_TIMEOUT(alice.store->reactions(news).size(), 1, kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.store->reactions(bob.store->messages(bobGroup).last().id).size(), 1, kWait);
+        QCOMPARE(alice.store->reactions(news).first().author, QString("carol"));
+
+        // Forgeries by Dave, by hand: on Alice's message to Bob (not his
+        // conversation), into the group he is not in, and with a wrong author.
+        const qint64 daveToBob = startConversation(dave, "bob");
+        dave.messenger->send(daveToBob, "hi");
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("dave") > 0, kWait);
+        const QString uid = alice.store->message(hello).uid;
+        const QString daveMessage = dave.store->messages(daveToBob).last().uid;
+        sendByHand(dave, "bob", {Protocol::Content::reaction(uid, "alice", "💩", false),
+                                 Protocol::Content::reaction(alice.store->message(news).uid, "alice", "💩", false, gid),
+                                 Protocol::Content::reaction(daveMessage, "bob", "💩", false)});
+        QTRY_COMPARE_WITH_TIMEOUT(m_serverStore->queuedCount("bob", 1), 0, kWait);
+        QTest::qWait(200);
+        for (const ChatStore::Conversation &c : bob.store->conversations())
+            for (const ChatStore::Message &m : bob.store->messages(c.id))
+                for (const ChatStore::Reaction &r : bob.store->reactions(m.id))
+                    QVERIFY(r.emoji != QLatin1String("💩"));
+
+        // Gone with their message.
+        bob.messenger->deleteConversation(toAlice);
+        QVERIFY(bob.store->reactions(theirs).isEmpty());
+    }
+
     void keyStoreTrust()
     {
         Device alice(file("alice"));
@@ -965,6 +1062,40 @@ private:
         if (out.open(QIODevice::WriteOnly))
             out.write(data);
         return path;
+    }
+
+    // Contents sent by hand with `from`'s keys, as a changed program could,
+    // to device 1 of `to` (`from` stops meanwhile, so nothing else uses the session).
+    void sendByHand(Device &from, const QString &to, const QList<Protocol::Content> &contents)
+    {
+        from.messenger->stop();
+        std::optional<Session> session = from.keys->session(to, 1);
+        QVERIFY(session);
+        QList<QHash<quint32, QByteArray>> wires;
+        for (const Protocol::Content &content : contents) {
+            const QByteArray encoded = Protocol::encodeContent(content);
+            QVERIFY(!encoded.isEmpty());
+            wires.append({{1, session->encrypt(encoded)}});
+        }
+        from.keys->saveSession(to, 1, *session);
+        ChatClient raw;
+        QVERIFY(raw.open(m_url));
+        QTRY_VERIFY_WITH_TIMEOUT(raw.isConnected(), kWait);
+        int sent = 0;
+        bool ok = true;
+        raw.login(from.messenger->username(), 1, from.keys->account()->identity, [&](const ChatClient::Result &r) {
+            ok = ok && r.ok;
+            for (const auto &wire : wires)
+                raw.send(to, wire, [&](const ChatClient::Result &s) {
+                    ok = ok && s.ok;
+                    ++sent;
+                });
+        });
+        QTRY_COMPARE_WITH_TIMEOUT(sent, int(wires.size()), kWait);
+        QVERIFY(ok);
+        raw.close();
+        from.messenger->start();
+        QTRY_COMPARE_WITH_TIMEOUT(from.messenger->state(), Messenger::State::Online, kWait);
     }
 
     QString file(const QString &name) { return m_dir.filePath(QStringLiteral("%1-%2/chat.sqlite").arg(name).arg(++m_count)); }

@@ -245,6 +245,44 @@ private slots:
                                    + QByteArray(MaxQuoteChars + 1, 'x') + "\"}}")));
     }
 
+    void reactions()
+    {
+        const QString target = newMessageId();
+        const QString gid = newGroupId();
+        auto back = decodeContent(encodeContent(Content::reaction(target, "alice", "👍", false, gid)));
+        QVERIFY(back);
+        QCOMPARE(back->type, Content::Type::Reaction);
+        QCOMPARE(back->quote->id, target);
+        QCOMPARE(back->quote->author, QString("alice"));
+        QCOMPARE(back->emoji, QString("👍"));
+        QVERIFY(!back->remove);
+        QCOMPARE(back->group, gid);
+        back = decodeContent(encodeContent(Content::reaction(target, "alice", QString(), true)));
+        QVERIFY(back && back->remove && back->emoji.isEmpty());
+
+        // Emoji as people type them; nothing else.
+        for (const char *ok : {"👍", "❤️", "👍🏽", "👩‍👩‍👧", "🇬🇷", "🙏", "!", "♥"})
+            QVERIFY2(isValidReaction(QString::fromUtf8(ok)), ok);
+        for (const char *bad : {"", "a", "ok", "1", "👍 ", " ", "\u202e👍", "\t", "👍👍👍👍👍👍👍👍👍"})
+            QVERIFY2(!isValidReaction(QString::fromUtf8(bad)), bad);
+        QVERIFY(encodeContent(Content::reaction(target, "alice", "ok", false)).isEmpty());
+        QVERIFY(encodeContent(Content::reaction("x", "alice", "👍", false)).isEmpty());
+        QVERIFY(encodeContent(Content::reaction(target, "No!", "👍", false)).isEmpty());
+
+        const QByteArray head = "{\"v\":1,\"t\":\"reaction\",\"id\":\"" + newMessageId().toLatin1() + "\",\"sent\":1,";
+        const QByteArray to = "\"target\":{\"id\":\"" + target.toLatin1() + "\",\"author\":\"bob\"}";
+        QVERIFY(decodeContent(pad(head + to + ",\"emoji\":\"👍\"}")));
+        QVERIFY(decodeContent(pad(head + to + ",\"remove\":true}")));
+        QVERIFY(!decodeContent(pad(head + to + "}")));                                // neither
+        QVERIFY(!decodeContent(pad(head + to + ",\"emoji\":\"👍\",\"remove\":true}"))); // both
+        QVERIFY(!decodeContent(pad(head + to + ",\"remove\":false}")));
+        QVERIFY(!decodeContent(pad(head + to + ",\"emoji\":\"hello\"}")));
+        QVERIFY(!decodeContent(pad(head + to + ",\"emoji\":5}")));
+        QVERIFY(!decodeContent(pad(head + "\"emoji\":\"👍\"}")));                      // no target
+        QVERIFY(!decodeContent(pad(head + "\"target\":\"" + target.toLatin1() + "\",\"emoji\":\"👍\"}")));
+        QVERIFY(!decodeContent(pad(head + to + ",\"emoji\":\"👍\",\"group\":\"nope\"}")));
+    }
+
     void contentFromStrangers_data()
     {
         QTest::addColumn<QByteArray>("json");

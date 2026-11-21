@@ -127,6 +127,24 @@ public:
     // A note in the conversation, not a message from anyone.
     qint64 addSystemNote(qint64 conversation, const QString &text, const QDateTime &at);
 
+    // Reactions: one emoji per person per message (author empty: mine).
+    struct Reaction
+    {
+        qint64 message = 0;
+        QString author;
+        QString emoji;
+        qint64 at = 0; // ms
+    };
+    // Empty `emoji`: taken back. Mine are "pending" until sent (`pending`).
+    void setReaction(qint64 message, const QString &author, const QString &emoji, qint64 at, bool pending = false);
+    // Oldest first.
+    QList<Reaction> reactions(qint64 message) const;
+    QString myReaction(qint64 message) const;
+    // Mine not sent yet (an emoji, or empty: a removal), oldest first.
+    QList<Reaction> pendingReactions() const;
+    // Sent: the one made at `at` (a newer one stays pending).
+    void setReactionSent(qint64 message, qint64 at);
+
     // People whose messages are dropped.
     void block(const QString &username);
     void unblock(const QString &username);

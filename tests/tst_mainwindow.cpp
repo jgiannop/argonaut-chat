@@ -125,6 +125,67 @@ private slots:
         }
     }
 
+    void reactToAMessage()
+    {
+        ChatStore store(TestSupport::home() + QStringLiteral("/reactions.sqlite"));
+        KeyStore keys(&store);
+        Messenger messenger(&store, &keys);
+        MainWindow window(&store, &messenger);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        const int reactionsRole = Qt::UserRole + 18;
+        QTest::keyClicks(window.composeField(), QStringLiteral("Ran 10 km today"));
+        QTest::keyClick(window.composeField(), Qt::Key_Return);
+        const qint64 note = store.messages(store.noteToSelf()).last().id;
+        const int plain = window.messages()->visualItemRect(window.messages()->item(0)).height();
+
+        // React › 🎉 is not among them; 👍 is.
+        auto pick = [&](const QString &emoji) {
+            std::unique_ptr<QMenu> menu(window.messageMenu(note));
+            QMenu *react = menu->findChild<QMenu *>(QStringLiteral("reactMenu"));
+            QVERIFY(react && react->isEnabled());
+            for (QAction *a : react->actions()) {
+                if (a->data().toString() == emoji) {
+                    a->trigger();
+                    return;
+                }
+            }
+            QFAIL("no such reaction");
+        };
+        pick(QStringLiteral("👍"));
+        QCOMPARE(store.myReaction(note), QStringLiteral("👍"));
+        QCOMPARE(window.messages()->item(0)->data(reactionsRole).toString(), QStringLiteral("👍"));
+        QVERIFY(window.messages()->item(0)->toolTip().contains(QStringLiteral("You")));
+        QVERIFY(window.messages()->visualItemRect(window.messages()->item(0)).height() > plain); // room for the pill
+        {
+            std::unique_ptr<QMenu> menu(window.messageMenu(note));
+            QMenu *react = menu->findChild<QMenu *>(QStringLiteral("reactMenu"));
+            QVERIFY(react->actions().first()->isChecked()); // mine, ticked
+            QVERIFY(menu->findChild<QAction *>(QStringLiteral("removeReactionAction")));
+        }
+        // Another replaces it; the same again takes it back.
+        pick(QStringLiteral("❤️"));
+        QCOMPARE(store.myReaction(note), QStringLiteral("❤️"));
+        pick(QStringLiteral("❤️"));
+        QVERIFY(store.myReaction(note).isEmpty());
+        QVERIFY(window.messages()->item(0)->data(reactionsRole).isNull());
+
+        // Several people's: each emoji once, with how many.
+        const qint64 anna = store.addConversation(QStringLiteral("group"), QStringLiteral("Runners"), QStringLiteral("0123456789abcdef0123456789abcdef"));
+        const qint64 run = store.addMessage(anna, QStringLiteral("Sunday 8:00?"), QStringLiteral("anna")).id;
+        store.setReaction(run, QStringLiteral("bob"), QStringLiteral("👍"), 1);
+        store.setReaction(run, QStringLiteral("carol"), QStringLiteral("👍"), 2);
+        store.setReaction(run, QString(), QStringLiteral("😂"), 3);
+        window.openConversation(anna);
+        QCOMPARE(window.messages()->item(0)->data(reactionsRole).toString(), QStringLiteral("👍 2  😂"));
+        QVERIFY(window.messages()->item(0)->toolTip().contains(QStringLiteral("bob, carol")));
+        if (qEnvironmentVariableIsSet("CHAT_TEST_GRAB")) {
+            window.resize(1000, 640);
+            QTest::qWait(200);
+            window.grab().save(qEnvironmentVariable("CHAT_TEST_GRAB"));
+        }
+    }
+
     void othersMessagesAreUnreadUntilOpened()
     {
         ChatStore store(TestSupport::home() + QStringLiteral("/unread.sqlite"));

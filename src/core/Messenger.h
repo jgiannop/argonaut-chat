@@ -135,6 +135,12 @@ public:
     // Their picture (image bytes), once fetched; none for a request until accepted.
     QByteArray avatar(const QString &username) const { return m_store->profile(username).avatar; }
 
+    // Reactions (as Signal's): one emoji per person per message; mine to
+    // everyone in the conversation and my other devices, kept until sent.
+    // Empty `emoji`: take mine back. Not on notes, requests or left groups.
+    static QStringList quickReactions(); // 👍 ❤️ 😂 😮 😢 🙏
+    bool react(qint64 message, const QString &emoji);
+
     // Opened: their messages are seen, and they get read receipts (not for a request).
     void markRead(qint64 conversation);
     // A message request: accepted (they get the receipts now), deleted, or
@@ -159,6 +165,8 @@ signals:
     void messageReceived(qint64 conversation, const QString &from, const QString &text, bool request);
     // For people: something went wrong that they should know of.
     void problem(const QString &text);
+    // Someone reacted to a message of mine (not a removal, not in a request).
+    void reactionReceived(qint64 conversation, const QString &from, const QString &emoji, const QString &onText);
     // An attachment going up or coming down.
     void attachmentProgress(qint64 attachment, qint64 done, qint64 total);
 
@@ -189,6 +197,9 @@ private:
     void sendGroupUpdate(const ChatStore::Group &group, const QStringList &to);
     void handleGroupUpdate(const QString &from, const Protocol::Content &content);
     void handleLeave(const QString &from, const Protocol::Content &content);
+    // `mine`: from another device of mine (`from` is me).
+    void handleReaction(const QString &from, const Protocol::Content &content, bool mine);
+    void sendPendingReactions();
     QStringList othersIn(qint64 conversation) const;
     // Everyone I have accepted: direct peers, and members of my accepted groups.
     QStringList knownPeople() const;
@@ -240,6 +251,7 @@ private:
     QTimer m_rotation; // checks now and then while connected
     std::function<qint64()> m_clock;
     QSet<qint64> m_inFlight; // outbox messages being sent
+    QSet<qint64> m_reactionsInFlight; // messages whose reaction of mine is being sent
     bool m_downloading = false;
     bool m_avatarUploading = false;
     bool m_avatarFetching = false;
