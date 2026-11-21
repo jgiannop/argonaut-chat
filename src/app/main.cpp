@@ -4,6 +4,7 @@
 #include "KeyStore.h"
 #include "MainWindow.h"
 #include "Messenger.h"
+#include "SingleInstance.h"
 #include "Theme.h"
 
 #include <QApplication>
@@ -35,9 +36,14 @@ int main(int argc, char **argv)
     QApplication::setStyle(QStringLiteral("Fusion"));
     applyThemeKey(savedThemeKey());
 
+    // Already running (in the tray, say): that one shows its window, this one ends.
+    const QString file = ChatStore::defaultFile();
+    SingleInstance instance(file);
+    if (!instance.start())
+        return 0;
+
     // The history is encrypted; its key is in the system keyring. Without the
     // key nothing opens and nothing is changed.
-    const QString file = ChatStore::defaultFile();
     const QFileInfo info(file);
     const bool encryptedHistory = info.exists() && info.size() > 0 && !CipherSql::isPlainSqlite(file);
     const DatabaseKey::Result key = DatabaseKey::load(!encryptedHistory);
@@ -55,6 +61,7 @@ int main(int argc, char **argv)
     Messenger messenger(&store, &keys);
     MainWindow window(&store, &messenger);
     window.show();
+    QObject::connect(&instance, &SingleInstance::activated, &window, &MainWindow::showAndRaise);
     // The first time: sign up (or not now, for Note to Self alone).
     if (messenger.hasAccount())
         messenger.start();

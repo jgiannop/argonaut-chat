@@ -89,6 +89,7 @@ qt_add_library(chat_app STATIC
     src/app/Dialogs.cpp src/app/Dialogs.h
     src/app/MainWindow.cpp src/app/MainWindow.h
     src/app/Notifications.cpp src/app/Notifications.h
+    src/app/SingleInstance.cpp src/app/SingleInstance.h
     src/app/StyleSheet.cpp src/app/StyleSheet.h
     src/app/Theme.cpp src/app/Theme.h
     src/app/TrayIcon.cpp src/app/TrayIcon.h
