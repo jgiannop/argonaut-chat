@@ -5,7 +5,7 @@ Widgets: the same technology and the same look as
 [Argonaut](https://github.com/jgiannop/argonaut), the file manager, and
 [Argonaut Emails](https://github.com/jgiannop/argonaut-emails).
 
-Version 0.0.1: the start. How Signal works, and what that means for this
+Version 0.1.0: the first release, for Ubuntu and Windows. How Signal works, and what that means for this
 program: [docs/how-signal-works.md](docs/how-signal-works.md).
 
 ## What it does now
