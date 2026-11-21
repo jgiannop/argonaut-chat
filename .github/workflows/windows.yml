@@ -120,13 +120,25 @@ jobs:
           $version = (Select-String -Path CMakeLists.txt -Pattern 'project\(argonaut-chat VERSION ([0-9.]+)').Matches[0].Groups[1].Value
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
           New-Item -ItemType Directory dist | Out-Null
-          Copy-Item build\windows\argonaut-chat.exe dist\
-          # vcpkg's libraries, which its toolchain copied beside the program.
-          Copy-Item build\windows\*.dll dist\
-          Copy-Item keychain\bin\*.dll dist\
-          Copy-Item LICENSE dist\LICENSE.txt
-          windeployqt --release --no-translations --no-compiler-runtime --no-opengl-sw dist\argonaut-chat.exe
-          if ($LASTEXITCODE -ne 0) { exit 1 }
+          try {
+            Copy-Item build\windows\argonaut-chat.exe dist\
+            # vcpkg's libraries, which its toolchain copied beside the program.
+            Copy-Item build\windows\*.dll dist\
+            Copy-Item keychain\bin\*.dll dist\
+            Copy-Item LICENSE dist\LICENSE.txt
+          } catch {
+            Write-Output "::error title=build: folder::$_"
+            Get-ChildItem build\windows\*.dll, keychain -Recurse | Select-Object -ExpandProperty FullName
+            exit 1
+          }
+          "folder before windeployqt:" | Out-File deploy.log
+          Get-ChildItem dist | Select-Object -ExpandProperty Name | Out-File -Append deploy.log
+          windeployqt --release --no-translations --no-compiler-runtime --no-opengl-sw dist\argonaut-chat.exe 2>&1 | Tee-Object -Append -FilePath deploy.log
+          if ($LASTEXITCODE -ne 0) {
+            "windeployqt ended with $LASTEXITCODE" | Out-File -Append deploy.log
+            python .github/scripts/errors_as_notes.py deploy.log "build: windeployqt" "."
+            exit 1
+          }
           # Microsoft's C++ runtime (VCRUNTIME140.dll and the others): a fresh
           # Windows doesn't have it, and the program won't start.
           $crt = Get-ChildItem "$env:VCToolsRedistDir\x64" -Directory -Filter "Microsoft.VC*.CRT" | Select-Object -First 1
