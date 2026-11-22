@@ -5,7 +5,7 @@ Widgets: the same technology and the same look as
 [Argonaut](https://github.com/jgiannop/argonaut), the file manager, and
 [Argonaut Emails](https://github.com/jgiannop/argonaut-emails).
 
-Version 0.3.0, for Ubuntu and Windows. How Signal works, and what that means for this
+Version 0.3.1, for Ubuntu and Windows. How Signal works, and what that means for this
 program: [docs/how-signal-works.md](docs/how-signal-works.md).
 
 ## What it does now
@@ -36,9 +36,10 @@ program: [docs/how-signal-works.md](docs/how-signal-works.md).
 - **Typing indicators** (View › Typing Indicators to turn them off) and
   **find in a conversation** (Ctrl+F).
 - **Pictures and files by pasting or dropping** them on a chat (Ctrl+V a
-  screenshot); they wait above the field until you send. **Choose and copy
-  messages** (click, Ctrl/Shift+click, Ctrl+C), and a click on a reply's
-  quote goes to the message it answers.
+  screenshot); they wait above the field until you send. **Copy part of a
+  message** (drag over its text, double-click a word, triple-click all of
+  it) or whole ones (Ctrl/Shift+click several, Ctrl+C), and a click on a
+  reply's quote goes to the message it answers.
 - **Mute, archive and pin chats** (right-click a chat, or the Conversation
   menu): mute for an hour up to always, archive out of the list, pin up to
   four at the top.
@@ -119,24 +120,24 @@ update); conversations already going on keep working.
 
 Then:
 
-1. **Use 0.3.0 for real** with one or two people for a few days, and fix
+1. **Use 0.3.x for real** with one or two people for a few days, and fix
    what that turns up.
 2. Later: voice and video calls, moving history to a new linked computer,
    smaller voice messages (Opus), Signal's post-quantum ratchet (SPQR).
 
 ## Making a release
 
-Set the version in `CMakeLists.txt` (`project(argonaut-chat VERSION 0.3.0 …)`),
+Set the version in `CMakeLists.txt` (`project(argonaut-chat VERSION 0.3.1 …)`),
 commit, then tag and push:
 
 ```bash
-git tag v0.3.0
-git push origin main v0.3.0
+git tag v0.3.1
+git push origin main v0.3.1
 ```
 
 The Release workflow builds the two `.deb` packages and the Windows
 installer and zip, checks that each installs and starts, and publishes them
-as the release `v0.3.0`. Every push to `main` builds and tests on Linux
+as the release `v0.3.1`. Every push to `main` builds and tests on Linux
 (also under ASan/UBSan) and on Windows.
 
 ## Building

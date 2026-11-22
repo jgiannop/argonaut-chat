@@ -3,7 +3,7 @@
 ; Microsoft's C++ runtime) into Program Files, with a Start menu entry and an
 ; uninstaller.
 ;
-;   iscc /DAppVersion=0.3.0 /DSource=..\dist installer\argonaut-chat.iss
+;   iscc /DAppVersion=0.3.1 /DSource=..\dist installer\argonaut-chat.iss
 ;
 ; Without administrator rights it installs for the current user only.
 ; Uninstalling leaves the history (%APPDATA%\Argonaut\argonaut-chat) and its
