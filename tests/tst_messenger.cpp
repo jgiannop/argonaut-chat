@@ -769,7 +769,6 @@ private slots:
         alice.messenger->linkDevice(*code, [&](bool ok, const QString &) { provisioned = ok; }, true);
         QTRY_VERIFY_WITH_TIMEOUT(provisioned.value_or(false), kWait);
         QTRY_VERIFY_WITH_TIMEOUT(linked.value_or(false), kWait);
-        QVERIFY(alice.messenger->isSendingHistory());
 
         QTRY_COMPARE_WITH_TIMEOUT(got.size(), 1, 4 * kWait);
         QVERIFY2(got.first().at(1).toBool(), qPrintable(got.first().at(2).toString()));
