@@ -51,8 +51,10 @@ ssh -t jgiannop@188.34.165.32 'sudo bash ~/argonaut-chat/deploy/setup-server.sh 
 notices; without it there are none (certbot renews by itself anyway).
 
 It ends with a WebSocket handshake through the web server: "wss://… works"
-means TLS, the certificate, the proxy and the server all do. Then, in the
-app, sign up with the server `wss://188-34-165-32.sslip.io`.
+means TLS, the certificate, the proxy and the server all do. The app's
+address is built in (`src/core/AppConfig.h`, now
+`wss://188-34-165-32.sslip.io`): another one needs that changed and a new
+release; the app then moves existing accounts to it when it starts.
 
 ## Updating, or moving to your own domain
 

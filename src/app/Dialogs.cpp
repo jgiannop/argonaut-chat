@@ -46,14 +46,10 @@ SignUpDialog::SignUpDialog(Messenger *messenger, QWidget *parent)
     layout->addWidget(intro);
 
     auto *form = new QFormLayout;
-    m_server = new QLineEdit(this);
-    m_server->setObjectName(QStringLiteral("serverField"));
-    m_server->setPlaceholderText(QStringLiteral("wss://chat.example.org"));
     m_username = new QLineEdit(this);
     m_username->setObjectName(QStringLiteral("usernameField"));
     m_username->setPlaceholderText(tr("3 to 32 letters, digits, _ or ."));
     m_username->setMaxLength(32);
-    form->addRow(tr("Server:"), m_server);
     form->addRow(tr("Username:"), m_username);
     layout->addLayout(form);
 
@@ -85,7 +81,6 @@ SignUpDialog::SignUpDialog(Messenger *messenger, QWidget *parent)
     layout->addWidget(buttons);
     connect(buttons, &QDialogButtonBox::accepted, this, &SignUpDialog::signUp);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-    connect(m_server, &QLineEdit::textChanged, this, &SignUpDialog::updateButton);
     connect(m_username, &QLineEdit::textChanged, this, &SignUpDialog::updateButton);
     updateButton();
     resize(440, sizeHint().height());
@@ -93,11 +88,8 @@ SignUpDialog::SignUpDialog(Messenger *messenger, QWidget *parent)
 
 void SignUpDialog::updateButton()
 {
-    const QUrl url(m_server->text().trimmed());
-    const bool serverOk = url.isValid() && !url.host().isEmpty()
-                          && (url.scheme() == QLatin1String("wss") || url.scheme() == QLatin1String("ws"));
     const bool nameOk = !Protocol::normalizeUsername(m_username->text()).isEmpty();
-    m_signUp->setEnabled(!m_busy && serverOk && nameOk);
+    m_signUp->setEnabled(!m_busy && nameOk);
     if (!m_busy)
         m_message->setText(!m_username->text().isEmpty() && !nameOk
                                ? tr("A username is 3 to 32 letters (a-z), digits, _ or ., and starts with a letter.")
@@ -106,21 +98,15 @@ void SignUpDialog::updateButton()
 
 void SignUpDialog::link()
 {
-    const QUrl url(m_server->text().trimmed());
-    if (!url.isValid() || url.host().isEmpty()) {
-        m_message->setText(tr("First the server, as on your other computer."));
-        return;
-    }
     m_busy = true;
     m_linking = true;
     updateButton();
     m_link->setEnabled(false);
-    m_server->setEnabled(false);
     m_username->setEnabled(false);
     m_message->setText(tr("Connecting…"));
     QPointer<SignUpDialog> self(this);
     m_messenger->linkThisDevice(
-        url,
+        m_messenger->server(),
         [self](const QString &code) {
             if (!self)
                 return;
@@ -139,7 +125,6 @@ void SignUpDialog::link()
                 return;
             }
             self->m_codeRow->hide();
-            self->m_server->setEnabled(true);
             self->m_username->setEnabled(true);
             self->m_link->setEnabled(true);
             self->updateButton();
@@ -158,11 +143,10 @@ void SignUpDialog::signUp()
 {
     m_busy = true;
     updateButton();
-    m_server->setEnabled(false);
     m_username->setEnabled(false);
     m_message->setText(tr("Making your keys and signing up…"));
     QPointer<SignUpDialog> self(this);
-    m_messenger->signUp(QUrl(m_server->text().trimmed()), m_username->text(), [self](bool ok, const QString &error) {
+    m_messenger->signUp(m_messenger->server(), m_username->text(), [self](bool ok, const QString &error) {
         if (!self)
             return;
         self->m_busy = false;
@@ -170,7 +154,6 @@ void SignUpDialog::signUp()
             self->accept();
             return;
         }
-        self->m_server->setEnabled(true);
         self->m_username->setEnabled(true);
         self->updateButton();
         self->m_message->setText(error.isEmpty() ? tr("The sign-up did not work.") : error);

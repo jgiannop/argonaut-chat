@@ -2,6 +2,7 @@
 
 #include "ChatClient.h"
 #include "ChatStore.h"
+#include "AppConfig.h"
 #include "History.h"
 #include "KeyStore.h"
 
@@ -57,6 +58,10 @@ public:
     bool hasAccount() const { return m_account && m_account->registered; }
     QString username() const { return hasAccount() ? m_account->username : QString(); }
 
+    // The server to use (AppConfig::serverUrl() unless told otherwise: tests).
+    // An account kept with another address is moved to this one.
+    void useServer(const QUrl &server);
+    QUrl server() const { return m_server; }
     // A new account on `server`; connected when `done` says yes.
     void signUp(const QUrl &server, const QString &username, const Done &done);
     // Connected while there is an account, until stop().
@@ -335,6 +340,7 @@ private:
     QHash<qint64, QHash<QString, qint64>> m_typing;  // who types where: until when
     QTimer m_typingExpiry;
     bool m_downloading = false;
+    QUrl m_server = AppConfig::serverUrl();
     // History (History.h): going up, then its pointers to the new computer;
     // or coming down, piece by piece.
     void sendNextHistoryPiece();

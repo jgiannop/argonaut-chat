@@ -1123,7 +1123,7 @@ private slots:
         // Signing up through the dialog.
         SignUpDialog dialog(&messenger, &window);
         QVERIFY(!dialog.signUpButton()->isEnabled());
-        dialog.serverField()->setText(url);
+        messenger.useServer(QUrl(url));
         dialog.usernameField()->setText(QStringLiteral("Alice"));
         QVERIFY(dialog.signUpButton()->isEnabled());
         dialog.signUpButton()->click();
@@ -1553,9 +1553,9 @@ private slots:
         ChatStore laptopStore(TestSupport::home() + QStringLiteral("/laptop7/chat.sqlite"));
         KeyStore laptopKeys(&laptopStore);
         Messenger laptop(&laptopStore, &laptopKeys);
+        laptop.useServer(url);
         SignUpDialog dialog(&laptop);
         dialog.show();
-        dialog.serverField()->setText(url.toString());
         dialog.linkButton()->click();
         QTRY_VERIFY_WITH_TIMEOUT(!dialog.codeField()->text().isEmpty(), 5000);
         QVERIFY(dialog.codeField()->isVisible());
@@ -1596,8 +1596,8 @@ private slots:
         ChatStore thirdStore(TestSupport::home() + QStringLiteral("/third7/chat.sqlite"));
         KeyStore thirdKeys(&thirdStore);
         Messenger third(&thirdStore, &thirdKeys);
+        third.useServer(url);
         SignUpDialog cancelled(&third);
-        cancelled.serverField()->setText(url.toString());
         cancelled.linkButton()->click();
         QTRY_VERIFY_WITH_TIMEOUT(!cancelled.codeField()->text().isEmpty(), 5000);
         cancelled.reject();

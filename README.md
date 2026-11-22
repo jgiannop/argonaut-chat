@@ -159,8 +159,11 @@ every step.
 
 ## Trying it on one computer
 
-The server, then two copies of the app with their own data folders (each
-signs up with its own username; the server's address is `ws://127.0.0.1:8790`):
+The app talks only to the server in `src/core/AppConfig.h` (as Signal's
+talks only to Signal's; nobody types it). To try it all on one computer,
+set `ServerUrl` there to `ws://127.0.0.1:8790` and build; then the server,
+and two copies of the app with their own data folders (each signs up with
+its own username):
 
 ```bash
 ./build/debug/argonaut-chat-server --database /tmp/chat-server.sqlite
@@ -170,7 +173,8 @@ XDG_DATA_HOME=/tmp/bob ./build/debug/argonaut-chat
 
 On a server, run it behind a reverse proxy that does TLS (Caddy or nginx),
 with `--trust-proxy` so its rate limits see the real addresses; the app
-accepts only `wss://` addresses, except to the same computer.
+accepts only `wss://` addresses, except to the same computer. A new address
+means a new release: the app moves existing accounts to it when it starts.
 `deploy/setup-server.sh` does all of it on an Ubuntu 24.04 VPS:
 [docs/deploy.md](docs/deploy.md).
 

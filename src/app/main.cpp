@@ -1,3 +1,4 @@
+#include "AppConfig.h"
 #include "AppLock.h"
 #include "ChatStore.h"
 #include "Crypto.h"
@@ -71,6 +72,7 @@ int main(int argc, char **argv)
     }
     KeyStore keys(&store);
     Messenger messenger(&store, &keys);
+    messenger.useServer(AppConfig::serverUrl()); // the app's own (AppConfig.h), for every account
     MainWindow window(&store, &messenger);
     window.show();
     QObject::connect(&instance, &SingleInstance::activated, &window, &MainWindow::showAndRaise);

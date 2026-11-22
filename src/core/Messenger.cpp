@@ -121,6 +121,18 @@ void Messenger::finishSignUp(bool ok, const QString &error)
         done(ok, error);
 }
 
+void Messenger::useServer(const QUrl &server)
+{
+    m_server = server;
+    if (m_account && m_account->registered && m_account->server != server) {
+        m_account->server = server; // the same server under its new address
+        m_keys->saveAccount(*m_account);
+        if (m_state == State::Online || m_state == State::Connecting) {
+            m_client.close(); // connected again, at the new address
+        }
+    }
+}
+
 void Messenger::start()
 {
     if (!hasAccount())

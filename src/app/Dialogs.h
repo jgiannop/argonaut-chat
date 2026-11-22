@@ -25,7 +25,6 @@ public:
     explicit SignUpDialog(Messenger *messenger, QWidget *parent = nullptr);
 
     // Tests reach the parts.
-    QLineEdit *serverField() const { return m_server; }
     QLineEdit *usernameField() const { return m_username; }
     QPushButton *signUpButton() const { return m_signUp; }
     QPushButton *linkButton() const { return m_link; }
@@ -41,7 +40,6 @@ private:
     void updateButton();
 
     Messenger *m_messenger;
-    QLineEdit *m_server = nullptr;
     QLineEdit *m_username = nullptr;
     QLabel *m_message = nullptr;
     QPushButton *m_signUp = nullptr;

@@ -717,6 +717,23 @@ private slots:
         QVERIFY(bob.last(bobTrip) != QString("just us"));
     }
 
+    // The server is the app's own (AppConfig.h); a new address there moves
+    // an account to it, without signing up again.
+    void serverAddress()
+    {
+        Device alice(file("alice"));
+        QCOMPARE(alice.messenger->server(), AppConfig::serverUrl());
+        QVERIFY(AppConfig::serverUrl().scheme() == QLatin1String("wss")); // never plain on the internet
+        QVERIFY(signUp(alice, "alice"));
+        const QUrl elsewhere(QStringLiteral("ws://127.0.0.1:1"));
+        alice.messenger->useServer(elsewhere);
+        QCOMPARE(alice.keys->account()->server, elsewhere);
+        QTRY_VERIFY_WITH_TIMEOUT(alice.messenger->state() != Messenger::State::Online, kWait);
+        alice.messenger->useServer(m_url);
+        QCOMPARE(alice.keys->account()->server, m_url);
+        QTRY_COMPARE_WITH_TIMEOUT(alice.messenger->state(), Messenger::State::Online, 4 * kWait);
+    }
+
     // A new computer linked with history: the last year's messages and files
     // come, encrypted, through the server; once only.
     void historyToANewDevice()
