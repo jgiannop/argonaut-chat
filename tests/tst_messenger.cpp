@@ -6,6 +6,7 @@
 #include "Voice.h"
 
 #include <QCoreApplication>
+#include <cmath>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -1523,16 +1524,25 @@ private slots:
         const qint64 toAlice = bob.store->directConversation("alice");
         bob.messenger->acceptRequest(toAlice);
 
-        // Two seconds of sound.
-        const QByteArray samples = Crypto::randomBytes(2 * Voice::SampleRate * 2);
+        // Two seconds of sound: a tone that rises.
+        QByteArray samples(2 * Voice::SampleRate * 2, Qt::Uninitialized);
+        auto *pcm = reinterpret_cast<qint16 *>(samples.data());
+        for (int i = 0; i < 2 * Voice::SampleRate; ++i)
+            pcm[i] = qint16(8000 * std::sin(2 * 3.141592653589793 * (300.0 + i / 160.0) * i / Voice::SampleRate));
         QString error;
         QCOMPARE(alice.messenger->sendVoice(toBob, QByteArray(100, '\0'), &error), 0); // too short
         QVERIFY(!error.isEmpty());
+        // A recording's own file: only a clean Ogg Opus of 0.1 s or more.
+        QCOMPARE(alice.messenger->sendVoiceNote(toBob, "OggS rubbish", &error), 0);
+        QCOMPARE(alice.messenger->sendVoiceNote(toBob, Voice::toOpus(QByteArray(800, '\0')), &error), 0); // 25 ms
+        QCOMPARE(alice.messenger->sendVoiceNote(toBob, Voice::toWav(samples), &error), 0);
         const qint64 voice = alice.messenger->sendVoice(toBob, samples, &error);
         QVERIFY2(voice > 0, qPrintable(error));
         const ChatStore::StoredAttachment mine = alice.store->attachments(voice).value(0);
         QVERIFY(mine.voice);
-        QCOMPARE(mine.type, QString("audio/wav"));
+        QCOMPARE(mine.type, QString("audio/ogg")); // Opus
+        QVERIFY(mine.name.endsWith(QStringLiteral(".ogg")));
+        QVERIFY(mine.size < samples.size() / 8); // 64 KB of samples, about 4 KB sent
         QTRY_COMPARE_WITH_TIMEOUT(alice.store->message(voice).status, QString("delivered"), kWait);
 
         QTRY_VERIFY_WITH_TIMEOUT(bob.store->messages(toAlice).size() == 2, kWait);
@@ -1542,10 +1552,10 @@ private slots:
         QVERIFY(got.voice);
         const auto data = bob.messenger->attachmentData(got.id);
         QVERIFY(data);
-        const auto audio = Voice::fromWav(*data);
+        const auto audio = Voice::decode(*data);
         QVERIFY(audio);
-        QCOMPARE(audio->samples, samples);
-        QCOMPARE(audio->durationMs(), 2000);
+        QCOMPARE(audio->sampleRate, 48000);
+        QVERIFY(qAbs(audio->durationMs() - 2000) <= 30);
         // In the list: a voice message.
         QCOMPARE(bob.store->conversation(toAlice).lastText, QStringLiteral("🎤 Voice message"));
         QCOMPARE(bob.messenger->quoteOf(theirs)->text, QStringLiteral("🎤 Voice message")); // a reply's quote

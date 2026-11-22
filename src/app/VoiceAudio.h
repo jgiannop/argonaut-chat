@@ -6,6 +6,8 @@
 #include <QObject>
 #include <QTimer>
 
+#include "Voice.h"
+
 #include <memory>
 
 class QAudioSink;
@@ -13,8 +15,9 @@ class QAudioSource;
 class QIODevice;
 
 // Records a voice message from the default microphone: what the device
-// gives, turned into 16-bit mono at Voice::SampleRate. Stops by itself at
-// Voice::MaxSeconds (`limitReached`).
+// gives, turned into 16-bit mono at Voice::SampleRate and encoded as Opus as
+// it comes (so sending does not wait). Stops by itself at Voice::MaxSeconds
+// (`limitReached`).
 class VoiceRecorder : public QObject
 {
     Q_OBJECT
@@ -24,7 +27,8 @@ public:
     ~VoiceRecorder() override;
 
     bool start(QString *error = nullptr);
-    // The samples so far, ready for Messenger::sendVoice; recording ends.
+    // The Ogg Opus file so far, for Messenger::sendVoiceNote (empty if it
+    // failed); recording ends.
     QByteArray stop();
     void cancel();
     bool isRecording() const { return m_source != nullptr; }
@@ -38,7 +42,9 @@ private:
     std::unique_ptr<QAudioSource> m_source;
     QIODevice *m_input = nullptr;
     QAudioFormat m_format;
-    QByteArray m_raw;
+    void feed(bool all);
+    QByteArray m_pending; // what the device gave, not yet encoded
+    std::unique_ptr<Voice::OpusWriter> m_writer;
     QElapsedTimer m_clock;
     QTimer m_timer;
 };
@@ -53,7 +59,7 @@ public:
     ~VoicePlayer() override;
 
     // A WAV from Voice::toWav (or anyone's, checked); `id` names it (the attachment).
-    bool play(qint64 id, const QByteArray &wav, QString *error = nullptr);
+    bool play(qint64 id, const QByteArray &data, QString *error = nullptr);
     void stop();
     qint64 playing() const { return m_id; } // 0: nothing
     qint64 positionMs() const;

@@ -31,8 +31,8 @@ program: [docs/how-signal-works.md](docs/how-signal-works.md).
 - **Replies, reactions, editing and deleting**, as in Signal (right-click a
   message): reply with a quote, react with an emoji, edit what you sent
   within 24 hours, delete it for yourself or for everyone.
-- **Voice messages** (🎤): recorded here, sent encrypted like a file,
-  up to 5 minutes; a click plays one.
+- **Voice messages** (🎤): recorded here, sent encrypted like a file
+  (Opus, about 120 KB a minute), up to 5 minutes; a click plays one.
 - **Typing indicators** (View › Typing Indicators to turn them off) and
   **find in a conversation** (Ctrl+F).
 - **Pictures and files by pasting or dropping** them on a chat (Ctrl+V a
@@ -123,7 +123,7 @@ Then:
 1. **Use 0.3.x for real** with one or two people for a few days, and fix
    what that turns up.
 2. Later: voice and video calls, moving history to a new linked computer,
-   smaller voice messages (Opus), Signal's post-quantum ratchet (SPQR).
+   Signal's post-quantum ratchet (SPQR).
 
 ## Making a release
 
@@ -144,7 +144,7 @@ as the release `v0.3.1`. Every push to `main` builds and tests on Linux
 
 Dependencies (Ubuntu 24.04): `cmake ninja-build pkg-config qt6-base-dev
 qt6-websockets-dev qt6-multimedia-dev libsodium-dev libsqlcipher-dev
-qtkeychain-qt6-dev`.
+qtkeychain-qt6-dev libopus-dev libogg-dev libopusfile-dev libopusenc-dev`.
 
 ```bash
 cmake --preset debug

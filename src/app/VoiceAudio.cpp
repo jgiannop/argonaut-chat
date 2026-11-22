@@ -7,6 +7,9 @@
 #include <QAudioSource>
 #include <QMediaDevices>
 
+#include <algorithm>
+#include <numeric>
+
 namespace {
 
 // 16-bit if the device takes it, else its own preference (16-bit or float).
@@ -33,7 +36,7 @@ VoiceRecorder::VoiceRecorder(QObject *parent)
     connect(&m_timer, &QTimer::timeout, this, [this] {
         if (!m_input)
             return;
-        m_raw.append(m_input->readAll());
+        feed(false);
         const qint64 ms = elapsedMs();
         emit tick(ms);
         if (ms >= Voice::MaxSeconds * 1000LL)
@@ -65,24 +68,55 @@ bool VoiceRecorder::start(QString *error)
             *error = tr("The microphone could not be opened.");
         return false;
     }
-    m_raw.clear();
+    m_pending.clear();
+    m_writer = std::make_unique<Voice::OpusWriter>();
+    if (!m_writer->isValid()) {
+        cancel();
+        if (error)
+            *error = tr("Voice messages cannot be recorded with this build.");
+        return false;
+    }
     m_clock.start();
     m_timer.start();
     return true;
+}
+
+void VoiceRecorder::feed(bool all)
+{
+    if (!m_input || !m_writer)
+        return;
+    m_pending.append(m_input->readAll());
+    const int rate = m_format.sampleRate();
+    const int channels = m_format.channelCount();
+    const int frameBytes = (m_format.sampleFormat() == QAudioFormat::Float ? 4 : 2) * channels;
+    if (rate <= 0 || channels <= 0)
+        return;
+    // Whole blocks of the rates' ratio (48 kHz: 3 frames, 44.1 kHz: 441),
+    // so the pieces resample as the whole would; the rest waits.
+    const qsizetype block = rate / std::gcd(rate, Voice::SampleRate);
+    qsizetype frames = m_pending.size() / frameBytes;
+    if (!all)
+        frames -= frames % block;
+    if (frames <= 0)
+        return;
+    QByteArray chunk = m_pending.left(frames * frameBytes);
+    m_pending.remove(0, chunk.size());
+    if (m_format.sampleFormat() == QAudioFormat::Float)
+        chunk = Voice::fromFloat(chunk);
+    chunk = Voice::convert(chunk, rate, channels, Voice::SampleRate, 1);
+    const qint64 room = qint64(Voice::MaxSeconds) * Voice::SampleRate - m_writer->samplesWritten();
+    m_writer->write(chunk.left(qsizetype(std::max<qint64>(0, room)) * 2));
 }
 
 QByteArray VoiceRecorder::stop()
 {
     if (!m_source)
         return {};
-    m_raw.append(m_input->readAll());
+    feed(true);
     m_source->stop();
-    QByteArray samples = m_raw;
-    if (m_format.sampleFormat() == QAudioFormat::Float)
-        samples = Voice::fromFloat(samples);
-    samples = Voice::convert(samples, m_format.sampleRate(), m_format.channelCount(), Voice::SampleRate, 1);
+    const QByteArray ogg = m_writer ? m_writer->finish() : QByteArray();
     cancel();
-    return samples.left(qsizetype(Voice::MaxSeconds) * Voice::SampleRate * 2);
+    return ogg;
 }
 
 void VoiceRecorder::cancel()
@@ -92,7 +126,8 @@ void VoiceRecorder::cancel()
         m_source->stop();
     m_source.reset();
     m_input = nullptr;
-    m_raw.clear();
+    m_pending.clear();
+    m_writer.reset();
 }
 
 qint64 VoiceRecorder::elapsedMs() const
@@ -120,10 +155,10 @@ VoicePlayer::~VoicePlayer()
     stop();
 }
 
-bool VoicePlayer::play(qint64 id, const QByteArray &wav, QString *error)
+bool VoicePlayer::play(qint64 id, const QByteArray &data, QString *error)
 {
     stop();
-    const auto audio = Voice::fromWav(wav);
+    const auto audio = Voice::decode(data); // Opus, or WAV from before 0.3.2
     if (!audio) {
         if (error)
             *error = tr("This voice message cannot be played.");

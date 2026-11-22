@@ -1,4 +1,5 @@
 #include "Attachment.h"
+#include "Crypto.h"
 #include "TestSupport.h"
 #include "Voice.h"
 
@@ -7,6 +8,7 @@
 #include <QTest>
 #include <QtEndian>
 
+#include <algorithm>
 #include <cmath>
 
 namespace {
@@ -117,7 +119,97 @@ private slots:
             QVERIFY(qAbs(c[i] - b[i]) <= 1);
     }
 
-    // The pointer says "voice" only for audio/wav; older versions ignore it.
+    // Opus: a sixteenth of the size, the same sound back (at 48 kHz).
+    void opusRoundTrip()
+    {
+        const QByteArray samples = chord(3.0);
+        const QByteArray ogg = Voice::toOpus(samples);
+        QVERIFY(ogg.startsWith("OggS"));
+        QVERIFY2(ogg.size() < samples.size() / 12, qPrintable(QString::number(ogg.size())));
+        QVERIFY(!ogg.contains("Voice message")); // no tags of ours
+
+        const auto audio = Voice::fromOpus(ogg);
+        QVERIFY(audio);
+        QCOMPARE(audio->sampleRate, 48000);
+        QCOMPARE(audio->channels, 1);
+        QVERIFY(qAbs(audio->durationMs() - 3000) <= 30);
+        QCOMPARE(Voice::decode(ogg)->samples, audio->samples);
+        // Lossy, but the same tone: as loud, and alike sample by sample.
+        const QByteArray back = Voice::convert(audio->samples, 48000, 1, Voice::SampleRate, 1);
+        const auto *a = reinterpret_cast<const qint16 *>(samples.constData());
+        const auto *b = reinterpret_cast<const qint16 *>(back.constData());
+        double energyA = 0, energyB = 0, error = 0;
+        const int n = int(std::min(samples.size(), back.size()) / 2);
+        // Opus delays nothing once decoded (the pre-skip is removed), so the two line up.
+        for (int i = Voice::SampleRate / 10; i < n - Voice::SampleRate / 10; ++i) {
+            energyA += double(a[i]) * a[i];
+            energyB += double(b[i]) * b[i];
+            error += double(a[i] - b[i]) * (a[i] - b[i]);
+        }
+        QVERIFY(energyB > energyA * 0.7 && energyB < energyA * 1.3);
+        QVERIFY2(error < energyA * 0.1, qPrintable(QString::number(error / energyA)));
+
+        // Its length without decoding; a WAV's too.
+        QVERIFY(qAbs(Voice::durationMs(ogg) - 3000) <= 30);
+        QCOMPARE(Voice::durationMs(Voice::toWav(samples)), 3000);
+        QCOMPARE(Voice::durationMs("neither"), -1);
+
+        // Made in pieces while recording: the same sound as all at once.
+        Voice::OpusWriter writer;
+        QVERIFY(writer.isValid());
+        for (qsizetype at = 0; at < samples.size(); at += 6400) // 200 ms
+            QVERIFY(writer.write(samples.mid(at, 6400)));
+        QCOMPARE(writer.samplesWritten(), samples.size() / 2);
+        const QByteArray pieces = writer.finish();
+        QVERIFY(!writer.isValid());
+        QVERIFY(!writer.write(samples)); // finished
+        // (Not to the bit: the encoder's analysis sees other boundaries.)
+        const auto piecewise = Voice::fromOpus(pieces);
+        QVERIFY(piecewise);
+        QCOMPARE(piecewise->samples.size(), audio->samples.size());
+        const auto *w = reinterpret_cast<const qint16 *>(audio->samples.constData());
+        const auto *v = reinterpret_cast<const qint16 *>(piecewise->samples.constData());
+        double whole = 0, apart = 0;
+        for (qsizetype i = 0; i < audio->samples.size() / 2; ++i) {
+            whole += double(w[i]) * w[i];
+            apart += double(w[i] - v[i]) * (w[i] - v[i]);
+        }
+        QVERIFY2(apart < whole * 0.05, qPrintable(QString::number(apart / whole)));
+        QVERIFY(Voice::OpusWriter().finish().isEmpty()); // nothing written
+        QVERIFY(!Voice::OpusWriter(96000).isValid());
+
+        QVERIFY(Voice::toOpus(QByteArray()).isEmpty());
+        QVERIFY(Voice::toOpus(QByteArray(3, '\0')).isEmpty()); // half a sample
+        QVERIFY(Voice::toOpus(samples, 96000).isEmpty());
+    }
+
+    // A stranger's Ogg: anything but one clean Opus stream, short enough, is refused.
+    void strangersOpus()
+    {
+        const QByteArray ogg = Voice::toOpus(chord(1.0));
+        QVERIFY(Voice::fromOpus(ogg));
+        QVERIFY(!Voice::fromOpus(QByteArray()));
+        QVERIFY(!Voice::fromOpus("OggS"));
+        QVERIFY(!Voice::fromOpus(QByteArray("OggS") + Crypto::randomBytes(4000)));
+        QVERIFY(!Voice::fromOpus(Voice::toWav(chord(1.0)))); // a WAV is not Ogg
+        QVERIFY(!Voice::decode("nothing at all"));
+        QVERIFY(Voice::decode(Voice::toWav(chord(1.0)))); // WAV from before 0.3.2 still plays
+        // Cut short, or a byte changed in the middle (Ogg's checksum finds it).
+        QVERIFY(!Voice::fromOpus(ogg.left(ogg.size() / 2)));
+        QByteArray changed = ogg;
+        changed[changed.size() / 2] = char(changed.at(changed.size() / 2) ^ 0x40);
+        QVERIFY(!Voice::fromOpus(changed));
+        QCOMPARE(Voice::durationMs(changed), -1);
+        // Two streams one after the other (they could differ in channels).
+        QVERIFY(!Voice::fromOpus(ogg + Voice::toOpus(chord(1.0))));
+        // Longer than a recording can be.
+        const QByteArray tooLong = Voice::toOpus(QByteArray(qsizetype(Voice::MaxSeconds + 6) * Voice::SampleRate * 2, '\0'));
+        QVERIFY(!tooLong.isEmpty());
+        QVERIFY(!Voice::fromOpus(tooLong));
+    }
+
+    // The pointer says "voice" only for audio/wav (what older versions know),
+    // "voiceNote" only for audio/ogg (which they ignore).
     void voicePointers()
     {
         Attachment::Pointer p{QString(32, QLatin1Char('a')), QByteArray(32, 'k'), QByteArray(32, 'd'), 1000,
@@ -133,6 +225,38 @@ private slots:
         json.insert(QStringLiteral("type"), QStringLiteral("audio/wav"));
         json.insert(QStringLiteral("voice"), QStringLiteral("yes"));
         QVERIFY(!Attachment::fromJson(json));
+
+        Attachment::Pointer opus{QString(32, QLatin1Char('a')), QByteArray(32, 'k'), QByteArray(32, 'd'), 1000,
+                                 QStringLiteral("Voice message.ogg"), QStringLiteral("audio/ogg"), true};
+        json = Attachment::toJson(opus);
+        QVERIFY(!json.contains(QStringLiteral("voice"))); // 0.3.1 would drop the message
+        QCOMPARE(json.value(QStringLiteral("voiceNote")).toBool(), true);
+        QVERIFY(Attachment::fromJson(json)->voice);
+        QJsonObject wrong = json;
+        wrong.insert(QStringLiteral("type"), QStringLiteral("audio/wav"));
+        QVERIFY(!Attachment::fromJson(wrong)); // "voiceNote" with a WAV
+        wrong = json;
+        wrong.insert(QStringLiteral("voice"), true);
+        QVERIFY(!Attachment::fromJson(wrong)); // "voice" with Ogg, and both
+        wrong = json;
+        wrong.insert(QStringLiteral("voiceNote"), 1);
+        QVERIFY(!Attachment::fromJson(wrong));
+        wrong.insert(QStringLiteral("voiceNote"), false);
+        QVERIFY(!Attachment::fromJson(wrong)->voice);
+    }
+
+private:
+    // Mono 16-bit at Voice::SampleRate: a 440 Hz tone with a slower one under it.
+    static QByteArray chord(double seconds)
+    {
+        const int n = int(seconds * Voice::SampleRate);
+        QByteArray out(qsizetype(n) * 2, Qt::Uninitialized);
+        auto *pcm = reinterpret_cast<qint16 *>(out.data());
+        for (int i = 0; i < n; ++i) {
+            const double t = double(i) / Voice::SampleRate;
+            pcm[i] = qint16(6000 * std::sin(2 * 3.141592653589793 * 440 * t) + 3000 * std::sin(2 * 3.141592653589793 * 150 * t));
+        }
+        return out;
     }
 };
 

@@ -112,6 +112,64 @@ std::optional<Audio> fromWav(const QByteArray &wav)
     return audio;
 }
 
+std::optional<Audio> decode(const QByteArray &data)
+{
+    if (data.startsWith("RIFF"))
+        return fromWav(data);
+    if (data.startsWith("OggS"))
+        return fromOpus(data);
+    return std::nullopt;
+}
+
+qint64 durationMs(const QByteArray &data)
+{
+    if (data.startsWith("RIFF")) {
+        const auto audio = fromWav(data);
+        return audio ? audio->durationMs() : -1;
+    }
+    return opusDurationMs(data);
+}
+
+#ifndef CHAT_OPUS
+// The server's build: no Opus libraries (VoiceOpus.cpp has the real ones).
+struct OpusWriter::Private
+{
+};
+
+OpusWriter::OpusWriter(int) {}
+OpusWriter::~OpusWriter() = default;
+
+bool OpusWriter::isValid() const
+{
+    return false;
+}
+
+bool OpusWriter::write(const QByteArray &)
+{
+    return false;
+}
+
+QByteArray OpusWriter::finish()
+{
+    return {};
+}
+
+QByteArray toOpus(const QByteArray &, int)
+{
+    return {};
+}
+
+std::optional<Audio> fromOpus(const QByteArray &)
+{
+    return std::nullopt;
+}
+
+qint64 opusDurationMs(const QByteArray &)
+{
+    return -1;
+}
+#endif
+
 QByteArray convert(const QByteArray &samples, int fromRate, int fromChannels, int toRate, int toChannels)
 {
     if (fromRate <= 0 || toRate <= 0 || fromChannels < 1 || toChannels < 1)

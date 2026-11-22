@@ -994,10 +994,26 @@ qint64 Messenger::sendVoice(qint64 conversation, const QByteArray &samples, QStr
             *error = tr("The recording is too short.");
         return 0;
     }
-    const QString name = QStringLiteral("Voice message %1.wav")
-                             .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH.mm.ss")));
-    return sendData(conversation, name, QString::fromLatin1(Voice::Type), Voice::toWav(samples), QString(), error,
-                    replyTo, true);
+    // Opus; WAV only if that fails (it does not, with the app's build).
+    const QByteArray opus = Voice::toOpus(samples);
+    if (!opus.isEmpty())
+        return sendVoiceNote(conversation, opus, error, replyTo);
+    const QString when = QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH.mm.ss"));
+    return sendData(conversation, QStringLiteral("Voice message %1.wav").arg(when), QString::fromLatin1(Voice::Type),
+                    Voice::toWav(samples), QString(), error, replyTo, true);
+}
+
+qint64 Messenger::sendVoiceNote(qint64 conversation, const QByteArray &ogg, QString *error, qint64 replyTo)
+{
+    const qint64 ms = Voice::opusDurationMs(ogg);
+    if (ms < 100) {
+        if (error)
+            *error = ms < 0 ? tr("The recording could not be made.") : tr("The recording is too short.");
+        return 0;
+    }
+    const QString when = QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH.mm.ss"));
+    return sendData(conversation, QStringLiteral("Voice message %1.ogg").arg(when), QString::fromLatin1(Voice::OpusType),
+                    ogg, QString(), error, replyTo, true);
 }
 
 qint64 Messenger::sendData(qint64 conversation, const QString &fileName, const QString &type, const QByteArray &data,

@@ -82,7 +82,10 @@ public:
     // unencrypted); its type is told from its name and its start.
     qint64 sendFileData(qint64 conversation, const QString &fileName, const QByteArray &data, const QString &caption,
                         QString *error = nullptr, qint64 replyTo = 0, const QList<Protocol::Mention> &mentions = {});
+    // A voice message from mono 16-bit samples (encoded here: tests), or
+    // from an Ogg Opus file made while recording (Voice::OpusWriter).
     qint64 sendVoice(qint64 conversation, const QByteArray &samples, QString *error = nullptr, qint64 replyTo = 0);
+    qint64 sendVoiceNote(qint64 conversation, const QByteArray &ogg, QString *error = nullptr, qint64 replyTo = 0);
     // What a reply to `message` quotes: its id, author and the start of its text.
     std::optional<Protocol::Quote> quoteOf(qint64 message) const;
     // An attachment here, decrypted in memory; nothing if it is not here (yet).

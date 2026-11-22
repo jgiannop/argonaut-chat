@@ -2202,13 +2202,11 @@ QString MainWindow::voiceLine(const ChatStore::StoredAttachment &a)
         return line;
     }
     if (!m_voiceDurations.contains(a.id)) {
-        // Its length, once: decrypted in memory and checked.
+        // Its length, once: decrypted in memory, read without decoding.
         qint64 ms = -1;
         if (m_messenger) {
-            if (const auto data = m_messenger->attachmentData(a.id)) {
-                if (const auto audio = Voice::fromWav(*data))
-                    ms = audio->durationMs();
-            }
+            if (const auto data = m_messenger->attachmentData(a.id))
+                ms = Voice::durationMs(*data);
         }
         m_voiceDurations.insert(a.id, ms);
     }
@@ -2262,14 +2260,21 @@ void MainWindow::stopRecording(bool send)
 {
     if (!m_recorder.isRecording())
         return;
-    const QByteArray samples = send ? m_recorder.stop() : QByteArray();
+    const QByteArray ogg = send ? m_recorder.stop() : QByteArray();
     m_recorder.cancel();
     m_recordBar->hide();
     m_compose->setEnabled(true);
     m_voiceButton->setEnabled(m_messenger != nullptr);
     m_compose->setFocus();
-    if (send)
-        sendVoice(samples);
+    if (!send || !m_messenger || m_current == 0)
+        return;
+    QString error;
+    aboutToSend();
+    if (m_messenger->sendVoiceNote(m_current, ogg, &error, m_replyTo) == 0) {
+        showNotice(error);
+        return;
+    }
+    cancelReply();
 }
 
 void MainWindow::sendVoice(const QByteArray &samples)

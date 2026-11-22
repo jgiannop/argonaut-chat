@@ -32,6 +32,7 @@ for release in "${RELEASES[@]}"; do
             apt-get update -q >/dev/null
             apt-get install -y -q --no-install-recommends build-essential cmake ninja-build pkg-config \
                 dpkg-dev file qt6-base-dev qt6-websockets-dev qt6-multimedia-dev libsodium-dev libsqlcipher-dev qtkeychain-qt6-dev \
+                libopus-dev libogg-dev libopusfile-dev libopusenc-dev \
                 >/dev/null
             cmake -S /src -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
                 -DBUILD_TESTING=OFF -DCHAT_PACKAGE=ON >/dev/null

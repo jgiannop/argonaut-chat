@@ -59,13 +59,20 @@ keep the blob as it was (the key in the encrypted database).
 
 ### Voice messages
 
-A voice message is an attachment like any other (above), marked `"voice":
-true`, with `"type": "audio/wav"` (anything else marked so drops the
-message): a WAV of 16-bit PCM, recorded mono at 16 kHz, at most 5 minutes.
-No codec is needed anywhere. The recipient plays it only once it reads
-as a plain, consistent WAV of 16-bit PCM, 1 or 2 channels, 8 to 48 kHz, at
-most 5 minutes and a little (`Voice::fromWav`); decrypted in memory only.
-Versions before 0.2 ignore the mark and show a `.wav` file.
+A voice message is an attachment like any other (above), recorded mono at
+16 kHz, at most 5 minutes. Since 0.3.2 it is **Ogg Opus** (RFC 7845; 16
+kbit/s, about 120 KB a minute), marked `"voiceNote": true` with `"type":
+"audio/ogg"`. Before that it was a WAV of 16-bit PCM marked `"voice": true`
+with `"type": "audio/wav"`; such messages still play. Each mark is valid
+only with its own type, and never both: anything else drops the message.
+(0.2–0.3.1 drop a `"voice"` mark on another type, so Opus uses a new key,
+which they ignore: to them it is an `.ogg` file.)
+
+The recipient plays it only once it reads cleanly, decrypted in memory
+only: a WAV must be a plain, consistent one of 16-bit PCM, 1 or 2
+channels, 8 to 48 kHz (`Voice::fromWav`); an Ogg must hold one Opus
+stream of 1 or 2 channels that decodes without a hole or an error, by
+opusfile (`Voice::fromOpus`). Either at most 5 minutes and a little.
 
 ### Replies
 

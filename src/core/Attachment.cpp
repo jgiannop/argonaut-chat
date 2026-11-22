@@ -95,8 +95,12 @@ QJsonObject toJson(const Pointer &pointer)
                      {QStringLiteral("size"), double(pointer.size)},
                      {QStringLiteral("name"), pointer.name},
                      {QStringLiteral("type"), pointer.type}};
+    // A voice message. "voice" (WAV) is what versions before 0.3.2 know, and
+    // they refuse it with another type: Opus ones say "voiceNote", which they
+    // ignore (an .ogg file to them).
     if (pointer.voice)
-        json.insert(QStringLiteral("voice"), true); // older versions ignore it: a .wav file to them
+        json.insert(pointer.type == QLatin1String("audio/wav") ? QStringLiteral("voice") : QStringLiteral("voiceNote"),
+                    true);
     return json;
 }
 
@@ -120,11 +124,16 @@ std::optional<Pointer> fromJson(const QJsonValue &json)
     pointer.size = *size;
     pointer.name = safeName(name.toString());
     pointer.type = type.toString();
-    // A voice message: only audio/wav (the rest of what "voice" claims is checked when played).
+    // A voice message: "voice" only with audio/wav, "voiceNote" only with
+    // audio/ogg, never both (the rest of what they claim is checked when played).
     const QJsonValue voice = object.value(QStringLiteral("voice"));
-    if (!voice.isUndefined() && (!voice.isBool() || (voice.toBool() && pointer.type != QLatin1String("audio/wav"))))
+    const QJsonValue voiceNote = object.value(QStringLiteral("voiceNote"));
+    if ((!voice.isUndefined() && (!voice.isBool() || (voice.toBool() && pointer.type != QLatin1String("audio/wav"))))
+        || (!voiceNote.isUndefined()
+            && (!voiceNote.isBool() || (voiceNote.toBool() && pointer.type != QLatin1String("audio/ogg"))))
+        || (voice.toBool() && voiceNote.toBool()))
         return std::nullopt;
-    pointer.voice = voice.toBool();
+    pointer.voice = voice.toBool() || voiceNote.toBool();
     return pointer;
 }
 
