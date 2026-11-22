@@ -193,6 +193,9 @@ void ChatStore::createTables()
                           " avatar BLOB,"
                           " pending_avatar TEXT NOT NULL DEFAULT '',"
                           " updated INTEGER NOT NULL)"));
+    // Linked with history to come (History.h): until when it is awaited.
+    q.exec(QStringLiteral("CREATE TABLE IF NOT EXISTS history_expected (id INTEGER PRIMARY KEY CHECK (id = 1),"
+                          " until INTEGER NOT NULL)"));
     q.exec(QStringLiteral("CREATE TABLE IF NOT EXISTS app_lock ("
                           " id INTEGER PRIMARY KEY CHECK (id = 1),"
                           " hash TEXT NOT NULL,"
@@ -477,6 +480,43 @@ void ChatStore::setAppLock(const AppLockState &state)
     q.addBindValue(state.failures);
     q.addBindValue(state.waitUntil);
     q.exec();
+}
+
+qint64 ChatStore::historyExpectedUntil() const
+{
+    QSqlQuery q(m_db);
+    if (q.exec(QStringLiteral("SELECT until FROM history_expected WHERE id = 1")) && q.next())
+        return q.value(0).toLongLong();
+    return 0;
+}
+
+void ChatStore::setHistoryExpectedUntil(qint64 untilMs)
+{
+    QSqlQuery q(m_db);
+    if (untilMs <= 0) {
+        q.exec(QStringLiteral("DELETE FROM history_expected"));
+        return;
+    }
+    q.prepare(QStringLiteral("INSERT OR REPLACE INTO history_expected (id, until) VALUES (1, ?)"));
+    q.addBindValue(untilMs);
+    q.exec();
+}
+
+QList<qint64> ChatStore::historyMessages(qint64 sinceMs) const
+{
+    // Newest first; not deleted, not notes, not disappearing, not waiting to be sent.
+    QList<qint64> ids;
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT m.id FROM messages m JOIN conversations c ON c.id = m.conversation"
+                             " WHERE m.sent_at >= ? AND m.deleted = 0 AND m.system = 0 AND m.expire_seconds = 0"
+                             " AND m.status <> 'sending' AND c.state = 'accepted'"
+                             " ORDER BY m.sent_at DESC, m.id DESC"));
+    q.addBindValue(sinceMs);
+    if (q.exec()) {
+        while (q.next())
+            ids << q.value(0).toLongLong();
+    }
+    return ids;
 }
 
 void ChatStore::block(const QString &username)

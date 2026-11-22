@@ -101,6 +101,7 @@ qt_add_library(chat_core STATIC
     src/core/ChatStore.cpp src/core/ChatStore.h
     src/core/CipherSql.cpp src/core/CipherSql.h
     src/core/Crypto.cpp src/core/Crypto.h
+    src/core/History.cpp src/core/History.h
     src/core/KeyStore.cpp src/core/KeyStore.h
     src/core/Messenger.cpp src/core/Messenger.h
     src/core/MlKem.cpp src/core/MlKem.h

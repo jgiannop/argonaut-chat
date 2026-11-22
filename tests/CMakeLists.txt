@@ -25,6 +25,7 @@ chat_test(ratchet)
 chat_test(protocol)
 chat_test(attachment)
 chat_test(voice)
+chat_test(history)
 chat_test(server LIBRARY chat_server)
 # Two devices through a real server, many cases: ~50 s here, near 60 on CI's Windows.
 chat_test(messenger LIBRARY chat_server TIMEOUT 300)

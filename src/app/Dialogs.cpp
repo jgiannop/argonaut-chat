@@ -8,6 +8,7 @@
 
 #include <QBuffer>
 #include <QClipboard>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QGuiApplication>
 #include <QDialogButtonBox>
@@ -499,14 +500,20 @@ DevicesDialog::DevicesDialog(Messenger *messenger, QWidget *parent)
 {
     setWindowTitle(tr("Linked Devices"));
     auto *layout = new QVBoxLayout(this);
-    auto *intro = new QLabel(tr("Your account on up to five computers, all with the same identity. A newly linked "
-                                "computer starts empty: it gets what comes from then on, not the history."),
-                             this);
+    auto *intro = new QLabel(tr("Your account on up to five computers, all with the same identity."), this);
     intro->setWordWrap(true);
     layout->addWidget(intro);
     m_list = new QListWidget(this);
     m_list->setObjectName(QStringLiteral("deviceList"));
     layout->addWidget(m_list);
+    // As Signal Desktop offers when linking: the history, encrypted with keys
+    // only the two computers have; through the server, which cannot read it.
+    m_history = new QCheckBox(tr("Send my messages and files from the last year to the computer I link"), this);
+    m_history->setObjectName(QStringLiteral("historyCheck"));
+    m_history->setChecked(true);
+    m_history->setToolTip(tr("Encrypted on this computer; the server only passes it on (it keeps the encrypted "
+                             "pieces for at most 30 days). Without it, the new computer starts empty."));
+    layout->addWidget(m_history);
     m_message = new QLabel(this);
     m_message->setWordWrap(true);
     layout->addWidget(m_message);
@@ -525,6 +532,14 @@ DevicesDialog::DevicesDialog(Messenger *messenger, QWidget *parent)
             linkWithCode(code);
     });
     connect(m_remove, &QPushButton::clicked, this, [this] { removeSelected(true); });
+    connect(m_messenger, &Messenger::historyProgress, this, [this](bool sending, int percent) {
+        if (sending)
+            m_message->setText(tr("Sending your history to the new computer… %1%").arg(percent));
+    });
+    connect(m_messenger, &Messenger::historyFinished, this, [this](bool sending, bool, const QString &message) {
+        if (sending)
+            m_message->setText(message);
+    });
     connect(m_list, &QListWidget::currentRowChanged, this, &DevicesDialog::updateButtons);
     reload();
     resize(420, 340);
@@ -565,13 +580,19 @@ void DevicesDialog::linkWithCode(const QString &code)
 {
     m_message->setText(tr("Sending your account to it…"));
     QPointer<DevicesDialog> self(this);
-    m_messenger->linkDevice(code, [self](bool ok, const QString &error) {
-        if (!self)
-            return;
-        self->m_message->setText(ok ? tr("Sent. The new computer is joining.") : error);
-        if (ok)
-            QTimer::singleShot(2500, self, &DevicesDialog::reload);
-    });
+    const bool withHistory = m_history->isChecked();
+    m_messenger->linkDevice(
+        code,
+        [self, withHistory](bool ok, const QString &error) {
+            if (!self)
+                return;
+            self->m_message->setText(ok ? (withHistory ? tr("Sent. The new computer is joining; your history follows.")
+                                                       : tr("Sent. The new computer is joining."))
+                                        : error);
+            if (ok)
+                QTimer::singleShot(2500, self, &DevicesDialog::reload);
+        },
+        withHistory);
 }
 
 void DevicesDialog::removeSelected(bool ask)

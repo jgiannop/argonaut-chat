@@ -33,6 +33,7 @@ constexpr int MaxContentBytes = 128 * 1024;    // a padded Content
 constexpr int MaxCipherMessageBytes = 192 * 1024;
 constexpr int MaxReceiptIds = 1000;
 constexpr int MaxAttachments = 10; // per message
+constexpr int MaxHistoryPieces = 64; // History::MaxPieces
 constexpr int MaxQuoteChars = 200;  // a reply's excerpt of the message it answers
 constexpr int MaxGroupMembers = 50; // me included
 // Disappearing messages: at most four weeks (seconds).
@@ -79,14 +80,14 @@ bool isValidMentions(const QList<Mention> &mentions, const QString &body);
 
 struct Content
 {
-    enum class Type { Text, Receipt, Profile, Group, Leave, Timer, Reaction, Delete, Edit, Typing };
+    enum class Type { Text, Receipt, Profile, Group, Leave, Timer, Reaction, Delete, Edit, Typing, History };
     enum class Receipt { Delivered, Read };
 
     Type type = Type::Text;
     QString id;         // this message's id
     qint64 sentAt = 0;  // ms since the epoch, UTC, as the sender's clock says
     QString body;       // Text (with attachments: their caption, maybe empty); Edit: the new text
-    QList<Attachment::Pointer> attachments; // Text
+    QList<Attachment::Pointer> attachments; // Text; History: the pieces of the stream (History.h), in order
     Receipt receipt = Receipt::Delivered;
     QStringList receiptFor; // Receipt: the ids of the messages it is for
     // Profile: the sender's display name (maybe empty) and picture (maybe none).
@@ -123,6 +124,8 @@ struct Content
     static Content groupUpdate(const QString &group, const QString &name, const QString &admin,
                                const QStringList &members, int revision);
     static Content leave(const QString &group);
+    // To my own new computer only: where the history it was promised is.
+    static Content history(const QList<Attachment::Pointer> &pieces);
     static Content timer(qint64 seconds, const QString &group = QString());
     // On the message `targetId` by `targetAuthor`; empty `emoji` with `remove`.
     // I am typing (or stopped) in a direct conversation, or a group's.

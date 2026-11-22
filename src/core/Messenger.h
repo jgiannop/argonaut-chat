@@ -2,6 +2,7 @@
 
 #include "ChatClient.h"
 #include "ChatStore.h"
+#include "History.h"
 #include "KeyStore.h"
 
 #include <QJsonObject>
@@ -113,7 +114,12 @@ public:
     void linkThisDevice(const QUrl &server, const LinkCode &showCode, const Done &done);
     void cancelLinking();
     // A device of the account: the account's keys to the device showing `code`.
-    void linkDevice(const QString &code, const Done &done);
+    // `withHistory`: the last year's messages and files follow, encrypted
+    // (History.h), once the new computer has joined.
+    void linkDevice(const QString &code, const Done &done, bool withHistory = false);
+    // History going to a new computer, or coming from my other one.
+    bool isSendingHistory() const { return m_historyWriter != nullptr || m_historyDelivering; }
+    bool isReceivingHistory() const { return m_historyReader != nullptr; }
     using DevicesDone = std::function<void(const QList<quint32> &devices, const QString &error)>;
     void listDevices(const DevicesDone &done);
     void removeDevice(quint32 device, const Done &done);
@@ -221,6 +227,10 @@ signals:
     void reactionReceived(qint64 conversation, const QString &from, const QString &emoji, const QString &onText);
     // An attachment going up or coming down.
     void attachmentProgress(qint64 attachment, qint64 done, qint64 total);
+    // History to a new computer (`sending`) or from my other one: how far,
+    // and how it ended (`message` for people).
+    void historyProgress(bool sending, int percent);
+    void historyFinished(bool sending, bool ok, const QString &message);
 
 private:
     void setState(State state);
@@ -325,6 +335,22 @@ private:
     QHash<qint64, QHash<QString, qint64>> m_typing;  // who types where: until when
     QTimer m_typingExpiry;
     bool m_downloading = false;
+    // History (History.h): going up, then its pointers to the new computer;
+    // or coming down, piece by piece.
+    void sendNextHistoryPiece();
+    void deliverHistory();
+    void failHistory(bool sending, const QString &why);
+    void handleHistory(const Protocol::Content &content);
+    void fetchNextHistoryPiece();
+    std::unique_ptr<History::Writer> m_historyWriter;
+    QList<Attachment::Pointer> m_historyPieces;
+    QList<quint32> m_devicesBeforeLink;
+    bool m_historyDelivering = false;
+    int m_historyWaits = 0;
+    std::unique_ptr<History::Reader> m_historyReader;
+    QList<Attachment::Pointer> m_historyToFetch;
+    int m_historyIndex = 0;
+    bool m_historyFetching = false;
     bool m_avatarUploading = false;
     bool m_avatarFetching = false;
     QSet<QString> m_profileInFlight;

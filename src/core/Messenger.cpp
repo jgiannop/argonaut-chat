@@ -204,6 +204,7 @@ void Messenger::onConnected()
                        m_rotation.start();
                        flushOutbox();
                        downloadPending();
+                       fetchNextHistoryPiece(); // history coming, where it stopped
                        shareProfileWithAll();
                        fetchAvatars();
                        refreshMyDevices();
@@ -1331,6 +1332,8 @@ void Messenger::handleContent(const QString &from, const Protocol::Envelope &env
     }
     if (m_store->isBlocked(from))
         return; // dropped, and they learn nothing
+    if (content.type == Protocol::Content::Type::History)
+        return; // only ever from a computer of mine
     if (content.type == Protocol::Content::Type::Profile) {
         // Kept, even before a request is accepted (shown with their username);
         // the picture is fetched only once accepted.
@@ -1909,6 +1912,8 @@ void Messenger::onProvision(const QByteArray &sealed)
     m_keys->addSignedPreKey(signedPreKey, now(), true);
     m_keys->addOneTimePreKeys(preKeys);
     m_account = account;
+    // History promised: awaited (from a computer of this account) for a week.
+    m_store->setHistoryExpectedUntil(json.value(QStringLiteral("history")) == QJsonValue(true) ? now() + History::WaitMs : 0);
     const QJsonObject state = json;
     m_client.addDevice(name, identity, Protocol::publicPart(signedPreKey), Protocol::publicParts(preKeys),
                        [this, account, profileName, avatar, state](const ChatClient::Result &result) {
@@ -1935,7 +1940,7 @@ void Messenger::onProvision(const QByteArray &sealed)
                        });
 }
 
-void Messenger::linkDevice(const QString &code, const Done &done)
+void Messenger::linkDevice(const QString &code, const Done &done, bool withHistory)
 {
     QByteArray key;
     QString slot;
@@ -1945,6 +1950,10 @@ void Messenger::linkDevice(const QString &code, const Done &done)
     }
     if (!hasAccount() || m_state != State::Online) {
         done(false, tr("Not connected to the server."));
+        return;
+    }
+    if (withHistory && isSendingHistory()) {
+        done(false, tr("History is already going to another computer."));
         return;
     }
     const ChatStore::Profile mine = m_store->myProfile();
@@ -1975,6 +1984,8 @@ void Messenger::linkDevice(const QString &code, const Done &done)
     json.insert(QStringLiteral("contacts"), contacts);
     json.insert(QStringLiteral("groups"), groups);
     json.insert(QStringLiteral("blocked"), QJsonArray::fromStringList(m_store->blocked()));
+    if (withHistory)
+        json.insert(QStringLiteral("history"), true); // it follows, once the new one has joined
     QByteArray plain = QJsonDocument(json).toJson(QJsonDocument::Compact);
     const QByteArray sealed = Crypto::sealTo(key, plain);
     Crypto::wipe(plain);
@@ -1982,7 +1993,8 @@ void Messenger::linkDevice(const QString &code, const Done &done)
         done(false, tr("That is not a link code."));
         return;
     }
-    m_client.sendProvisioning(slot, sealed, [this, done](const ChatClient::Result &result) {
+    const QList<quint32> before = m_myDevices;
+    m_client.sendProvisioning(slot, sealed, [this, done, withHistory, before](const ChatClient::Result &result) {
         if (!result.ok) {
             done(false, result.error == QLatin1String("not-found")
                             ? tr("No computer is waiting with that code (it lasts ten minutes).")
@@ -1992,7 +2004,162 @@ void Messenger::linkDevice(const QString &code, const Done &done)
         // The new one joins in a moment: then it is one of mine.
         QTimer::singleShot(2000, this, &Messenger::refreshMyDevices);
         done(true, QString());
+        if (withHistory) {
+            m_devicesBeforeLink = before;
+            if (m_account)
+                m_devicesBeforeLink << m_account->device;
+            m_historyPieces.clear();
+            m_historyWriter = std::make_unique<History::Writer>(m_store, now());
+            emit historyProgress(true, 0);
+            QTimer::singleShot(0, this, &Messenger::sendNextHistoryPiece);
+        }
     });
+}
+
+void Messenger::sendNextHistoryPiece()
+{
+    if (!m_historyWriter)
+        return;
+    if (m_state != State::Online) {
+        failHistory(true, tr("The connection was lost before your history was sent."));
+        return;
+    }
+    const QByteArray piece = m_historyWriter->next();
+    if (piece.isEmpty()) {
+        m_historyWriter.reset();
+        m_historyDelivering = true;
+        m_historyWaits = 0;
+        deliverHistory();
+        return;
+    }
+    if (m_historyPieces.size() >= Protocol::MaxHistoryPieces) {
+        failHistory(true, tr("Your history is too large to send."));
+        return;
+    }
+    // Each piece with a key of its own; the keys go only end-to-end.
+    const auto encrypted = Attachment::encrypt(piece);
+    if (!encrypted) {
+        failHistory(true, tr("Your history could not be encrypted."));
+        return;
+    }
+    const Attachment::Pointer pointer{QString(), encrypted->key, encrypted->digest, piece.size(),
+                                      QStringLiteral("history-%1").arg(m_historyPieces.size() + 1),
+                                      QStringLiteral("application/octet-stream"), false};
+    m_client.uploadAttachment(encrypted->blob, {}, [this, pointer](const QString &id, const ChatClient::Result &result) {
+        if (!m_historyWriter)
+            return;
+        if (!result.ok) {
+            failHistory(true, result.error == QLatin1String("rate-limited") || result.error == QLatin1String("full")
+                                  ? tr("The server takes no more files today; your history was not sent.")
+                                  : tr("Your history could not be sent: %1").arg(result.message));
+            return;
+        }
+        Attachment::Pointer uploaded = pointer;
+        uploaded.id = id;
+        m_historyPieces << uploaded;
+        emit historyProgress(true, qMin(99, int(m_historyWriter->progress() * 100)));
+        sendNextHistoryPiece();
+    });
+}
+
+void Messenger::deliverHistory()
+{
+    if (!m_historyDelivering)
+        return;
+    // To the computer that joined (any other of mine ignores it: it awaits none).
+    listDevices([this](const QList<quint32> &devices, const QString &) {
+        bool joined = false;
+        for (quint32 device : devices)
+            joined = joined || !m_devicesBeforeLink.contains(device);
+        if (!joined) {
+            if (++m_historyWaits > 200) { // ten minutes
+                failHistory(true, tr("The new computer did not join; your history was not sent."));
+                return;
+            }
+            QTimer::singleShot(3000, this, &Messenger::deliverHistory);
+            return;
+        }
+        m_myDevices = devices;
+        sendContent(username(), Protocol::Content::history(m_historyPieces), [this](bool ok, const QString &error) {
+            m_historyDelivering = false;
+            m_historyPieces.clear();
+            emit historyProgress(true, 100);
+            emit historyFinished(true, ok, ok ? tr("Your history was sent to the new computer.")
+                                              : tr("Your history could not be sent: %1").arg(error));
+        });
+    });
+}
+
+void Messenger::failHistory(bool sending, const QString &why)
+{
+    if (sending) {
+        m_historyWriter.reset();
+        m_historyDelivering = false;
+        m_historyPieces.clear();
+    } else {
+        m_historyReader.reset();
+        m_historyToFetch.clear();
+        m_historyFetching = false;
+    }
+    emit historyFinished(sending, false, why);
+}
+
+void Messenger::handleHistory(const Protocol::Content &content)
+{
+    // Only what this computer was promised when it was linked, once, within the week.
+    const qint64 until = m_store->historyExpectedUntil();
+    if (until == 0 || until < now() || m_historyReader)
+        return;
+    m_store->setHistoryExpectedUntil(0);
+    m_historyReader = std::make_unique<History::Reader>(m_store, username(), now());
+    m_historyToFetch = content.attachments;
+    m_historyIndex = 0;
+    emit historyProgress(false, 0);
+    fetchNextHistoryPiece();
+}
+
+void Messenger::fetchNextHistoryPiece()
+{
+    if (!m_historyReader || m_historyFetching || m_state != State::Online)
+        return;
+    if (m_historyIndex >= m_historyToFetch.size()) {
+        const bool ok = m_historyReader->finish();
+        const int messages = m_historyReader->messagesTaken();
+        const int files = m_historyReader->filesTaken();
+        m_historyReader.reset();
+        m_historyToFetch.clear();
+        emit historyProgress(false, 100);
+        emit historyFinished(false, ok,
+                             ok ? tr("Your history is here: %n message(s)", nullptr, messages)
+                                      + tr(", %n file(s).", nullptr, files)
+                                : tr("Your history came incomplete; what came is kept."));
+        return;
+    }
+    const Attachment::Pointer piece = m_historyToFetch.at(m_historyIndex);
+    m_historyFetching = true;
+    m_client.downloadAttachment(
+        piece.id, Attachment::blobSize(piece.size), {}, [this, piece](const QByteArray &blob, const ChatClient::Result &result) {
+            m_historyFetching = false;
+            if (!m_historyReader)
+                return;
+            if (result.error == QLatin1String("disconnected"))
+                return; // on the next sign-in
+            if (result.error == QLatin1String("rate-limited")) {
+                QTimer::singleShot(60 * 1000, this, &Messenger::fetchNextHistoryPiece);
+                return;
+            }
+            // Only what the pointer promised, then read as a stranger's.
+            const auto plain = result.ok ? Attachment::decrypt(blob, piece.key, piece.digest, piece.size) : std::nullopt;
+            if (!plain || !m_historyReader->feed(*plain)) {
+                const int messages = m_historyReader->messagesTaken();
+                failHistory(false, messages > 0 ? tr("Your history came incomplete; what came is kept.")
+                                                : tr("Your history could not be received."));
+                return;
+            }
+            ++m_historyIndex;
+            emit historyProgress(false, qMin(99, m_historyIndex * 100 / int(m_historyToFetch.size())));
+            fetchNextHistoryPiece();
+        });
 }
 
 void Messenger::listDevices(const DevicesDone &done)
@@ -2134,6 +2301,9 @@ void Messenger::handleSync(const Protocol::Envelope &envelope, const Protocol::C
         return;
     case Protocol::Content::Type::Typing:
         return; // my own typing, elsewhere: nothing to show
+    case Protocol::Content::Type::History:
+        handleHistory(content);
+        return;
     }
 }
 

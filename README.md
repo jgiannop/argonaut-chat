@@ -59,8 +59,9 @@ program: [docs/how-signal-works.md](docs/how-signal-works.md).
 - **Disappearing messages** (Conversation › Disappearing Messages): from
   30 seconds to 4 weeks after they are seen, gone on every side.
 - **Linked devices**: your account on up to five computers (File › Linked
-  Devices…), linked by a code; what you send and read follows you; a new
-  computer starts without the old history.
+  Devices…), linked by a code; what you send and read follows you. A new
+  computer can get the last year's messages and files from the one that
+  links it, encrypted end to end (the server only passes the pieces on).
 - **Your name and picture** (File › Profile…), sent only to the people you
   write to or accept, encrypted; the server never sees them. Others always
   see your username too.
@@ -81,8 +82,7 @@ program: [docs/how-signal-works.md](docs/how-signal-works.md).
 
 ## Not there yet
 
-Calls, Sender Keys for big groups, moving the history to a linked
-computer, Signal's post-quantum ratchet (SPQR).
+Calls, Sender Keys for big groups, Signal's post-quantum ratchet (SPQR).
 
 ## Installing
 
@@ -122,8 +122,7 @@ Then:
 
 1. **Use 0.3.x for real** with one or two people for a few days, and fix
    what that turns up.
-2. Later: voice and video calls, moving history to a new linked computer,
-   Signal's post-quantum ratchet (SPQR).
+2. Later: voice and video calls, Signal's post-quantum ratchet (SPQR).
 
 ## Making a release
 

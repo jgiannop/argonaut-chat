@@ -348,8 +348,31 @@ the user types that code; it sends the account, sealed to that key with
 libsodium's sealed box (the server cannot read or forge it), into the slot:
 `{"v":1, "username", "identity" (the secret key), "name", "avatar"?,
 "contacts": [accepted people], "groups": [{id, name, admin, members,
-revision}], "blocked": [...]}`. The new computer joins with `add-device`,
-starts with the same trust but no history.
+revision}], "blocked": [...], "history"?: true}`. The new computer joins
+with `add-device` and starts with the same trust.
+
+**History** (since 0.3.2, as Signal Desktop's transfer when linking; the
+user's choice, on by default): `"history": true` says it follows, and the
+new computer awaits it for a week. The old computer writes the last year's
+conversations, messages (not deleted, disappearing, unsent or system
+notes, nor requests' or left groups'), replies, mentions, edits, reactions
+and files (up to 768 MiB of files, the newest first) as one stream
+(`src/core/History.h`: `ACHIST1\n`, then frames of a kind — `C`
+conversation, `M` message, `F` a file's bytes, `E` the end with the counts
+— and a 32-bit big-endian length). It cuts the stream into pieces of 16
+MiB, each uploaded as an attachment with a key of its own (≤ 64 pieces),
+waits for the new device to appear in `devices`, and sends my devices a
+Content `{"t":"history", "pieces": [pointers]}` — end-to-end encrypted, so
+only my computers ever see the keys. The new computer takes one such
+message, only from a device of mine, only while awaiting one; downloads
+the pieces in order, checks each against its pointer, and reads the
+stream as a stranger's: every frame and field checked (usernames, ids,
+times, statuses, quotes, mentions only in groups, reactions, files'
+names, types and sizes matching their bytes), a conversation with someone
+blocked or a group it is not in left out, a message it already has (by
+id) not taken twice; its files are encrypted again with new keys. What
+came before a broken piece stays. The server sees only how many pieces and
+how large, and keeps them encrypted for its usual 30 days.
 
 Messages to someone go to all their devices (the server insists). What I
 send goes also to my other devices, as a text with `sentTo` (or its

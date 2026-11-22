@@ -4,6 +4,7 @@
 #include "KeyStore.h"
 #include "ImageViewer.h"
 #include "MainWindow.h"
+#include "Protocol.h"
 #include "Notifications.h"
 #include "Messenger.h"
 #include "ServerStore.h"
@@ -30,6 +31,7 @@
 #include <memory>
 #include <QPlainTextEdit>
 #include <QMenuBar>
+#include <QCheckBox>
 #include <QTest>
 
 class TestMainWindow : public QObject
@@ -1559,13 +1561,20 @@ private slots:
         QVERIFY(dialog.codeField()->isVisible());
         QVERIFY(dialog.messageLabel()->text().contains(QStringLiteral("Linked Devices")));
 
-        // Alice's computer takes the code; the laptop is in.
+        // Alice's computer takes the code (history on, as it starts); the laptop is in,
+        // and her notes follow it.
+        aliceStore.addMessage(aliceStore.noteToSelf(), QStringLiteral("a note from before"), QString(),
+                              QDateTime::currentDateTimeUtc(), Protocol::newMessageId());
         DevicesDialog devices(&alice);
+        QVERIFY(devices.historyCheck()->isChecked());
         QTRY_COMPARE_WITH_TIMEOUT(devices.list()->count(), 1, 5000);
         devices.linkWithCode(dialog.codeField()->text());
         QTRY_COMPARE_WITH_TIMEOUT(dialog.result(), int(QDialog::Accepted), 5000);
         QCOMPARE(laptop.username(), QStringLiteral("alice"));
         QCOMPARE(laptop.device(), 2u);
+        QTRY_COMPARE_WITH_TIMEOUT(laptopStore.messages(laptopStore.noteToSelf()).size(), 1, 10000);
+        QCOMPARE(laptopStore.messages(laptopStore.noteToSelf()).first().body, QStringLiteral("a note from before"));
+        QTRY_VERIFY_WITH_TIMEOUT(devices.messageLabel()->text().contains(QStringLiteral("history was sent")), 10000);
 
         // Both, this one marked; only the first computer removes the others.
         DevicesDialog onLaptop(&laptop);

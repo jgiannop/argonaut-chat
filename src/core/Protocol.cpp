@@ -413,6 +413,16 @@ bool isValidReaction(const QString &emoji)
     return symbol;
 }
 
+Content Content::history(const QList<Attachment::Pointer> &pieces)
+{
+    Content content;
+    content.type = Type::History;
+    content.id = newMessageId();
+    content.sentAt = QDateTime::currentMSecsSinceEpoch();
+    content.attachments = pieces;
+    return content;
+}
+
 Content Content::leave(const QString &group)
 {
     Content content;
@@ -620,6 +630,17 @@ QByteArray encodeContent(const Content &content)
             json.insert(QStringLiteral("group"), content.group);
         if (!content.sentTo.isEmpty())
             json.insert(QStringLiteral("sentTo"), content.sentTo);
+    } else if (content.type == Content::Type::History) {
+        if (content.attachments.isEmpty() || content.attachments.size() > MaxHistoryPieces)
+            return {};
+        QJsonArray pieces;
+        for (const Attachment::Pointer &piece : content.attachments) {
+            if (!Attachment::fromJson(Attachment::toJson(piece)))
+                return {};
+            pieces.append(Attachment::toJson(piece));
+        }
+        json.insert(QStringLiteral("t"), QStringLiteral("history"));
+        json.insert(QStringLiteral("pieces"), pieces);
     } else if (content.type == Content::Type::Leave) {
         if (!isValidGroupId(content.group))
             return {};
@@ -805,6 +826,19 @@ std::optional<Content> decodeContent(const QByteArray &padded)
         content.quote = Quote{id.toString(), author.toString(), QString()};
         content.group = group.toString();
         content.sentTo = sentTo.toString();
+        return content;
+    }
+    if (type == QLatin1String("history")) {
+        content.type = Content::Type::History;
+        const QJsonValue pieces = json.value(QStringLiteral("pieces"));
+        if (!pieces.isArray() || pieces.toArray().isEmpty() || pieces.toArray().size() > MaxHistoryPieces)
+            return std::nullopt;
+        for (const QJsonValue &item : pieces.toArray()) {
+            const auto pointer = Attachment::fromJson(item);
+            if (!pointer || pointer->voice)
+                return std::nullopt;
+            content.attachments.append(*pointer);
+        }
         return content;
     }
     if (type == QLatin1String("group") || type == QLatin1String("leave")) {

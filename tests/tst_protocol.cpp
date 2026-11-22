@@ -186,6 +186,38 @@ private slots:
         QVERIFY(decodeContent(pad(head + "\"admin\":\"alice\",\"members\":[\"alice\"],\"revision\":1}")));
     }
 
+    // History's pieces: 1 to 64 pointers, no voice marks; strict.
+    void historyPieces()
+    {
+        const Attachment::Pointer piece{QString(32, QLatin1Char('a')), QByteArray(32, 'k'), QByteArray(32, 'd'), 1000,
+                                        QStringLiteral("history-1"), QStringLiteral("application/octet-stream"), false};
+        const Protocol::Content content = Protocol::Content::history({piece, piece});
+        const auto back = Protocol::decodeContent(Protocol::encodeContent(content));
+        QVERIFY(back);
+        QCOMPARE(back->type, Protocol::Content::Type::History);
+        QCOMPARE(back->attachments.size(), 2);
+        QCOMPARE(back->attachments.first().key, piece.key);
+        QVERIFY(Protocol::encodeContent(Protocol::Content::history({})).isEmpty());
+        QList<Attachment::Pointer> many;
+        for (int i = 0; i <= Protocol::MaxHistoryPieces; ++i)
+            many << piece;
+        QVERIFY(Protocol::encodeContent(Protocol::Content::history(many)).isEmpty());
+        many.removeLast();
+        QVERIFY(!Protocol::encodeContent(Protocol::Content::history(many)).isEmpty());
+        // By hand: as it should be, then a voice mark, then no list.
+        QJsonObject json{{QStringLiteral("v"), 1}, {QStringLiteral("t"), QStringLiteral("history")},
+                         {QStringLiteral("id"), Protocol::newMessageId()}, {QStringLiteral("sent"), 1.7e12},
+                         {QStringLiteral("pieces"), QJsonArray{Attachment::toJson(piece)}}};
+        QVERIFY(Protocol::decodeContent(Protocol::pad(QJsonDocument(json).toJson(QJsonDocument::Compact))));
+        QJsonObject pointer = Attachment::toJson(piece);
+        pointer.insert(QStringLiteral("type"), QStringLiteral("audio/ogg"));
+        pointer.insert(QStringLiteral("voiceNote"), true);
+        json.insert(QStringLiteral("pieces"), QJsonArray{pointer});
+        QVERIFY(!Protocol::decodeContent(Protocol::pad(QJsonDocument(json).toJson(QJsonDocument::Compact))));
+        json.remove(QStringLiteral("pieces"));
+        QVERIFY(!Protocol::decodeContent(Protocol::pad(QJsonDocument(json).toJson(QJsonDocument::Compact))));
+    }
+
     void timers()
     {
         Content text = Content::text("gone soon");

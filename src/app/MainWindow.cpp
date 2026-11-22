@@ -1203,6 +1203,13 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
             showNotice(tr("Your safety number with %1 has changed.").arg(username));
         });
         connect(m_messenger, &Messenger::problem, this, &MainWindow::showNotice);
+        // History moving to or from another computer of mine: how far, then how it went.
+        connect(m_messenger, &Messenger::historyProgress, this, [this](bool sending, int percent) {
+            showNotice(sending ? tr("Sending your history to the new computer… %1%").arg(percent)
+                               : tr("Receiving your history… %1%").arg(percent));
+        });
+        connect(m_messenger, &Messenger::historyFinished, this,
+                [this](bool, bool, const QString &message) { showNotice(message); });
         connect(m_messenger, &Messenger::messageReceived, this, &MainWindow::notify);
         connect(m_messenger, &Messenger::typingChanged, this, [this](qint64 conversation) {
             if (conversation == m_current)

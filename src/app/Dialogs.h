@@ -3,6 +3,7 @@
 #include <QDialog>
 
 class AppLock;
+class QCheckBox;
 class Messenger;
 class QComboBox;
 class QDialogButtonBox;
@@ -145,6 +146,7 @@ public:
     QListWidget *list() const { return m_list; }
     QPushButton *removeButton() const { return m_remove; }
     QLabel *messageLabel() const { return m_message; }
+    QCheckBox *historyCheck() const { return m_history; }
     // Link New Device…'s work, after the code is typed.
     void linkWithCode(const QString &code);
     void removeSelected(bool ask);
@@ -157,6 +159,7 @@ private:
     QListWidget *m_list = nullptr;
     QPushButton *m_remove = nullptr;
     QLabel *m_message = nullptr;
+    QCheckBox *m_history = nullptr;
 };
 
 // The people whose messages are dropped, to unblock.

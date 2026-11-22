@@ -717,6 +717,71 @@ private slots:
         QVERIFY(bob.last(bobTrip) != QString("just us"));
     }
 
+    // A new computer linked with history: the last year's messages and files
+    // come, encrypted, through the server; once only.
+    void historyToANewDevice()
+    {
+        Device alice(file("alice"));
+        Device bob(file("bob"));
+        QVERIFY(signUp(alice, "alice"));
+        QVERIFY(signUp(bob, "bob"));
+        const qint64 toBob = startConversation(alice, "bob");
+        alice.messenger->send(toBob, "before the laptop");
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("alice") > 0, kWait);
+        const qint64 toAlice = bob.store->directConversation("alice");
+        bob.messenger->acceptRequest(toAlice);
+        bob.messenger->send(toAlice, "an answer");
+        QTRY_COMPARE_WITH_TIMEOUT(alice.last(toBob), QString("an answer"), kWait);
+        const QByteArray photo = Crypto::randomBytes(300 * 1024);
+        QString error;
+        const qint64 sentPhoto = alice.messenger->sendFile(toBob, writeFile("photo.jpg", photo), "the view", &error);
+        QVERIFY2(sentPhoto > 0, qPrintable(error));
+        QTRY_COMPARE_WITH_TIMEOUT(alice.store->message(sentPhoto).status, QString("delivered"), kWait);
+        alice.store->addMessage(alice.store->noteToSelf(), "my own note", QString(), QDateTime::currentDateTimeUtc(),
+                                Protocol::newMessageId());
+
+        Device laptop(file("laptop"));
+        QSignalSpy sent(alice.messenger.get(), &Messenger::historyFinished);
+        QSignalSpy got(laptop.messenger.get(), &Messenger::historyFinished);
+        std::optional<QString> code;
+        std::optional<bool> linked;
+        laptop.messenger->linkThisDevice(m_url, [&](const QString &shown) { code = shown; },
+                                         [&](bool ok, const QString &) { linked = ok; });
+        QTRY_VERIFY_WITH_TIMEOUT(code.has_value(), kWait);
+        std::optional<bool> provisioned;
+        alice.messenger->linkDevice(*code, [&](bool ok, const QString &) { provisioned = ok; }, true);
+        QTRY_VERIFY_WITH_TIMEOUT(provisioned.value_or(false), kWait);
+        QTRY_VERIFY_WITH_TIMEOUT(linked.value_or(false), kWait);
+        QVERIFY(alice.messenger->isSendingHistory());
+
+        QTRY_COMPARE_WITH_TIMEOUT(got.size(), 1, 4 * kWait);
+        QVERIFY2(got.first().at(1).toBool(), qPrintable(got.first().at(2).toString()));
+        QTRY_COMPARE_WITH_TIMEOUT(sent.size(), 1, kWait);
+        QCOMPARE(sent.first().at(0).toBool(), true);
+        QVERIFY(sent.first().at(1).toBool());
+        QVERIFY(!alice.messenger->isSendingHistory());
+        QVERIFY(!laptop.messenger->isReceivingHistory());
+
+        const qint64 laptopToBob = laptop.store->directConversation("bob");
+        const QList<ChatStore::Message> there = laptop.store->messages(laptopToBob);
+        QCOMPARE(there.size(), 3);
+        QCOMPARE(there.at(0).body, QString("before the laptop"));
+        QVERIFY(there.at(0).outgoing());
+        QCOMPARE(there.at(1).body, QString("an answer"));
+        QCOMPARE(there.at(1).author, QString("bob"));
+        QCOMPARE(there.at(2).body, QString("the view"));
+        const auto files = laptop.store->attachments(there.at(2).id);
+        QCOMPARE(files.size(), 1);
+        QCOMPARE(laptop.messenger->attachmentData(files.first().id).value_or(QByteArray()), photo);
+        QCOMPARE(laptop.store->messages(laptop.store->noteToSelf()).size(), 1);
+        QVERIFY(laptop.store->unseenUids(laptopToBob).isEmpty());
+        QCOMPARE(laptop.store->historyExpectedUntil(), 0); // once only
+
+        // Life goes on there: a reply quoting the old message works.
+        bob.messenger->send(toAlice, "welcome, laptop");
+        QTRY_COMPARE_WITH_TIMEOUT(laptop.last(laptopToBob), QString("welcome, laptop"), kWait);
+    }
+
     void linkedDevices()
     {
         Device alice(file("alice"));

@@ -279,6 +279,14 @@ public:
     AppLockState appLock() const;
     void setAppLock(const AppLockState &state); // an empty hash removes it
 
+    // Moving history to a newly linked computer (History.h). The messages to
+    // send: since `sinceMs`, newest first, in accepted conversations, none
+    // deleted, disappearing, a note, or still waiting to be sent.
+    QList<qint64> historyMessages(qint64 sinceMs) const;
+    // The new computer: history awaited until then (ms); 0: none.
+    qint64 historyExpectedUntil() const;
+    void setHistoryExpectedUntil(qint64 untilMs);
+
     // The open database, for KeyStore (the same file).
     QSqlDatabase database() const { return m_db; }
 
