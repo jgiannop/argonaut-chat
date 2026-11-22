@@ -38,6 +38,7 @@
 #include <QScrollBar>
 #include <QSplitter>
 #include <QStackedWidget>
+#include <QElapsedTimer>
 #include <QStyledItemDelegate>
 #include <QRegularExpression>
 #include <QTextBlock>
@@ -239,6 +240,33 @@ protected:
     }
 };
 
+// The messages' list: the option a row is drawn with, to find what a click
+// is on. A plain click (or drag) chooses no row, as in Signal: only
+// Ctrl/Shift+click and Ctrl+A choose whole messages (tinted, to copy).
+class MessageList : public QListWidget
+{
+public:
+    using QListWidget::QListWidget;
+    QStyleOptionViewItem optionFor(const QModelIndex &index) const
+    {
+        QStyleOptionViewItem option;
+        initViewItemOption(&option);
+        option.rect = visualRect(index);
+        return option;
+    }
+
+protected:
+    QItemSelectionModel::SelectionFlags selectionCommand(const QModelIndex &index, const QEvent *event) const override
+    {
+        if (event
+            && (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseMove
+                || event->type() == QEvent::MouseButtonRelease || event->type() == QEvent::MouseButtonDblClick)
+            && !(static_cast<const QMouseEvent *>(event)->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier)))
+            return event->type() == QEvent::MouseButtonPress ? QItemSelectionModel::Clear : QItemSelectionModel::NoUpdate;
+        return QListWidget::selectionCommand(index, event);
+    }
+};
+
 // A message as a bubble: mine at the right in the accent colour, theirs at
 // the left; a picture or a file line on top when it has an attachment, then
 // the text, then the time (and for mine, whether it was sent). Selected
@@ -269,10 +297,15 @@ public:
     static int reactionHeight(const QStyleOptionViewItem &option) { return QFontMetrics(option.font).height() + 8; }
     static constexpr int QuoteBar = 3;
 
-    // A text with @mentions: laid out here (as drawText would wrap it), each
-    // mention on a tint, mine (of me) bold on a stronger one. Its size.
-    static QSize layMentions(QTextLayout &layout, const QStyleOptionViewItem &option, const QModelIndex &index, int width,
-                             bool mine, const Theme *theme)
+    // What the mouse has chosen of a message's text: [start, end) in its
+    // characters; none: start == end.
+    std::function<QPair<int, int>(qint64 message)> textSelection;
+
+    // A message's text, laid out here (so a click finds its characters):
+    // @mentions on a tint, mine (of me) bold on a stronger one, the part
+    // chosen with the mouse (`selected`) as chosen text is. Its size.
+    static QSize layText(QTextLayout &layout, const QStyleOptionViewItem &option, const QModelIndex &index, int width,
+                         bool mine, const Theme *theme, QPair<int, int> selected = {0, 0})
     {
         QString text = index.data().toString();
         text.replace(QLatin1Char('\n'), QChar::LineSeparator); // the same length: the ranges still fit
@@ -293,6 +326,14 @@ public:
             range.format.setBackground(tint);
             if (me)
                 range.format.setFontWeight(QFont::Bold);
+            formats.append(range);
+        }
+        if (selected.second > selected.first) {
+            QTextLayout::FormatRange range;
+            range.start = selected.first;
+            range.length = selected.second - selected.first;
+            range.format.setBackground(mine ? QColor(Qt::white) : theme->accent);
+            range.format.setForeground(mine ? theme->accent : QColor(Qt::white));
             formats.append(range);
         }
         layout.setFormats(formats);
@@ -320,9 +361,39 @@ public:
         int height = 0;
     };
 
+    // How wide a text may be.
+    static int textWidth(const QStyleOptionViewItem &option) { return qMax(120, option.rect.width() * 7 / 10) - 2 * Pad; }
+
+    // The character of the message's text at `pos` (in the view), and whether
+    // `pos` is on the text itself; -1: it has no text.
+    int textPosition(const QStyleOptionViewItem &option, const QModelIndex &index, const QPoint &pos, bool *onText) const
+    {
+        *onText = false;
+        if (index.data().toString().isEmpty() || index.data(SystemRole).toBool() || index.data(DeletedRole).toBool())
+            return -1;
+        bool read = false;
+        const QStyleOptionViewItem o = below(option, index);
+        const Layout l = layout(o, index, footerFor(index, &read));
+        const QRect text = l.text.translated(bubbleRect(o, index, l).topLeft());
+        *onText = text.contains(pos);
+        QTextLayout lay;
+        layText(lay, o, index, textWidth(o), index.data(OutgoingRole).toBool(), m_theme);
+        const QPointF at = pos - text.topLeft();
+        if (lay.lineCount() == 0)
+            return 0;
+        if (at.y() < 0)
+            return 0;
+        for (int i = 0; i < lay.lineCount(); ++i) {
+            const QTextLine line = lay.lineAt(i);
+            if (at.y() < line.y() + line.height())
+                return line.xToCursor(at.x());
+        }
+        return lay.text().size();
+    }
+
     Layout layout(const QStyleOptionViewItem &option, const QModelIndex &index, const QString &footer) const
     {
-        const int most = qMax(120, option.rect.width() * 7 / 10) - 2 * Pad;
+        const int most = textWidth(option);
         const QFontMetrics fm(option.font);
         QFont small = option.font;
         small.setPointSizeF(option.font.pointSizeF() * 0.85);
@@ -367,14 +438,9 @@ public:
             width = qMax(width, w);
         }
         const QString text = index.data().toString();
-        if (!text.isEmpty() && !index.data(MentionsRole).toList().isEmpty()) {
+        if (!text.isEmpty()) {
             QTextLayout lay;
-            const QSize t = layMentions(lay, option, index, most, index.data(OutgoingRole).toBool(), m_theme);
-            l.text = QRect(Pad, y, t.width(), t.height());
-            y += t.height();
-            width = qMax(width, t.width());
-        } else if (!text.isEmpty()) {
-            const QRect t = QFontMetrics(textFont(option, index)).boundingRect(QRect(0, 0, most, 100000), Qt::TextWordWrap, text);
+            const QSize t = layText(lay, option, index, most, index.data(OutgoingRole).toBool(), m_theme);
             l.text = QRect(Pad, y, t.width(), t.height());
             y += t.height();
             width = qMax(width, t.width());
@@ -580,14 +646,11 @@ public:
             p->setFont(textFont(option, index));
             if (deleted)
                 p->setPen(mine ? QColor(255, 255, 255, 200) : m_theme->dimFg);
-            if (!index.data(MentionsRole).toList().isEmpty()) {
-                const int most = qMax(120, option.rect.width() * 7 / 10) - 2 * Pad; // as in layout()
-                QTextLayout lay;
-                layMentions(lay, option, index, most, mine, m_theme);
-                lay.draw(p, l.text.translated(origin).topLeft());
-            } else {
-                p->drawText(l.text.translated(origin), Qt::TextWordWrap, index.data().toString());
-            }
+            QTextLayout lay;
+            const QPair<int, int> selected =
+                textSelection ? textSelection(index.data(IdRole).toLongLong()) : QPair<int, int>(0, 0);
+            layText(lay, option, index, textWidth(option), mine, m_theme, selected);
+            lay.draw(p, l.text.translated(origin).topLeft());
             p->setFont(option.font);
         }
         p->setFont(small);
@@ -711,10 +774,17 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
     m_safety->setCursor(Qt::PointingHandCursor);
     headerLayout->addWidget(m_safety);
     connect(m_safety, &QToolButton::clicked, this, &MainWindow::showSafetyNumber);
-    m_messages = new QListWidget(chat);
+    m_messages = new MessageList(chat);
     m_messages->setObjectName(QStringLiteral("messageList"));
     auto *bubbles = new BubbleDelegate(&m_theme, m_messages);
+    m_bubbles = bubbles;
     m_messages->setItemDelegate(bubbles);
+    bubbles->textSelection = [this](qint64 message) -> QPair<int, int> {
+        if (message != m_textSelection.message)
+            return {0, 0};
+        return {qMin(m_textSelection.anchor, m_textSelection.cursor), qMax(m_textSelection.anchor, m_textSelection.cursor)};
+    };
+    m_messages->viewport()->setMouseTracking(true); // the text cursor over text
     // Chosen with a click (Ctrl/Shift for more, Ctrl+A all) to copy with Ctrl+C.
     m_messages->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_messages->setFocusPolicy(Qt::ClickFocus);
@@ -757,7 +827,19 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
             menu.exec(m_messages->viewport()->mapToGlobal(pos));
             return;
         }
-        std::unique_ptr<QMenu> menu(messageMenu(item->data(IdRole).toLongLong()));
+        const qint64 id = item->data(IdRole).toLongLong();
+        std::unique_ptr<QMenu> menu(messageMenu(id));
+        // Part of its text chosen: Copy (that part) first.
+        if (menu && id == m_textSelection.message && !selectedText().isEmpty()) {
+            auto *copy = new QAction(tr("Copy"), menu.get());
+            copy->setObjectName(QStringLiteral("copySelectionAction"));
+            copy->setShortcut(QKeySequence::Copy);
+            connect(copy, &QAction::triggered, this, [this] { QGuiApplication::clipboard()->setText(selectedText()); });
+            QAction *first = menu->actions().value(0);
+            menu->insertAction(first, copy);
+            if (first)
+                menu->insertSeparator(first);
+        }
         if (menu && !menu->isEmpty())
             menu->exec(m_messages->viewport()->mapToGlobal(pos));
     });
@@ -1424,6 +1506,7 @@ void MainWindow::openConversation(qint64 id)
 {
     if (id != m_current) {
         cancelReply(); // a reply belongs to its conversation
+        clearTextSelection();
         m_messageLimit = DefaultMessageLimit;
         m_flash = 0;
         m_flashTimer.stop();
@@ -1927,9 +2010,46 @@ QString MainWindow::selectedMessagesText() const
     return lines.join(QLatin1Char('\n'));
 }
 
+int MainWindow::textPositionAt(QListWidgetItem *item, const QPoint &pos, bool *onText) const
+{
+    const QModelIndex index = m_messages->indexFromItem(item);
+    const auto *list = static_cast<const MessageList *>(m_messages);
+    return static_cast<const BubbleDelegate *>(m_bubbles)->textPosition(list->optionFor(index), index, pos, onText);
+}
+
+void MainWindow::clearTextSelection()
+{
+    if (m_textSelection.message == 0)
+        return;
+    m_textSelection = {};
+    m_selectingText = false;
+    m_messages->viewport()->update();
+}
+
+QString MainWindow::selectedText() const
+{
+    QListWidgetItem *item = messageItem(m_textSelection.message);
+    if (!item || item->data(DeletedRole).toBool())
+        return {};
+    const QString text = item->text();
+    const int start = qBound(0, qMin(m_textSelection.anchor, m_textSelection.cursor), int(text.size()));
+    const int end = qBound(0, qMax(m_textSelection.anchor, m_textSelection.cursor), int(text.size()));
+    return text.mid(start, end - start);
+}
+
+void MainWindow::selectText(qint64 message, int start, int end)
+{
+    m_textSelection = {message, start, end};
+    m_selectingText = false;
+    m_messages->viewport()->update();
+}
+
 void MainWindow::copySelectedMessages()
 {
-    const QString text = selectedMessagesText();
+    // None chosen: the one clicked last (the list's current one).
+    QString text = selectedMessagesText();
+    if (text.isEmpty() && m_messages->selectedItems().isEmpty() && m_messages->currentItem())
+        text = copyText(m_store->message(m_messages->currentItem()->data(IdRole).toLongLong()));
     if (!text.isEmpty())
         QGuiApplication::clipboard()->setText(text);
 }
@@ -2538,6 +2658,92 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
     default:
         break;
     }
+    // Choosing part of a message's text: pressed on it and dragged (a
+    // double-click: a word). Elsewhere, or with Ctrl/Shift, the list chooses
+    // whole messages as before.
+    if (m_messages && watched == m_messages->viewport()) {
+        const QEvent::Type type = event->type();
+        if (type == QEvent::MouseButtonPress || type == QEvent::MouseButtonDblClick || type == QEvent::MouseMove
+            || type == QEvent::MouseButtonRelease) {
+            auto *mouse = static_cast<QMouseEvent *>(event);
+            const QPoint pos = mouse->position().toPoint();
+            if ((type == QEvent::MouseButtonPress || type == QEvent::MouseButtonDblClick)
+                && mouse->button() == Qt::LeftButton
+                && !(mouse->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier))) {
+                QListWidgetItem *item = m_messages->itemAt(pos);
+                bool onText = false;
+                const int at = item ? textPositionAt(item, pos, &onText) : -1;
+                // A third click soon after a double-click, near it: the whole text (Qt has no triple-click event).
+                const bool triple = type == QEvent::MouseButtonPress && m_doubleClicked.isValid()
+                                    && m_doubleClicked.elapsed() < QApplication::doubleClickInterval()
+                                    && (pos - m_doubleClickPos).manhattanLength() <= QApplication::startDragDistance();
+                if (type == QEvent::MouseButtonDblClick) {
+                    m_doubleClicked.start();
+                    m_doubleClickPos = pos;
+                } else {
+                    m_doubleClicked.invalidate();
+                }
+                if (item && onText && at >= 0) {
+                    const qint64 id = item->data(IdRole).toLongLong();
+                    if (triple) {
+                        m_textSelection = {id, 0, int(item->text().size())};
+                        m_selectingText = false;
+                    } else if (type == QEvent::MouseButtonDblClick) {
+                        // The word under it.
+                        const QString text = item->text();
+                        auto inWord = [&text](int i) {
+                            return i >= 0 && i < text.size() && (text.at(i).isLetterOrNumber() || text.at(i) == u'_');
+                        };
+                        int start = qMin(at, int(text.size()));
+                        int end = start;
+                        if (!inWord(start) && inWord(start - 1))
+                            --start, --end;
+                        while (inWord(start - 1))
+                            --start;
+                        while (inWord(end))
+                            ++end;
+                        m_textSelection = {id, start, end};
+                        m_selectingText = false;
+                    } else {
+                        m_textSelection = {id, at, at};
+                        m_selectingText = true;
+                    }
+                    m_messages->setFocus();
+                    m_messages->clearSelection(); // part of one, not whole ones
+                    m_messages->selectionModel()->setCurrentIndex(m_messages->indexFromItem(item),
+                                                                  QItemSelectionModel::NoUpdate);
+                    m_messages->viewport()->update();
+                    return true;
+                }
+                if (type == QEvent::MouseButtonPress)
+                    clearTextSelection();
+            } else if (type == QEvent::MouseMove && m_selectingText) {
+                if (QListWidgetItem *item = messageItem(m_textSelection.message)) {
+                    bool onText = false;
+                    const int at = textPositionAt(item, pos, &onText);
+                    if (at >= 0 && at != m_textSelection.cursor) {
+                        m_textSelection.cursor = at;
+                        m_messages->viewport()->update();
+                    }
+                }
+                return true;
+            } else if (type == QEvent::MouseMove && !(mouse->buttons() & Qt::LeftButton)) {
+                QListWidgetItem *item = m_messages->itemAt(pos);
+                bool onText = false;
+                if (item)
+                    textPositionAt(item, pos, &onText);
+                if (onText)
+                    m_messages->viewport()->setCursor(Qt::IBeamCursor);
+                else
+                    m_messages->viewport()->unsetCursor();
+            } else if (type == QEvent::MouseButtonRelease && m_selectingText) {
+                m_selectingText = false;
+                if (m_textSelection.anchor == m_textSelection.cursor)
+                    clearTextSelection(); // only a click
+                return true;
+            }
+        }
+    }
     // Files or a picture dropped on the conversation: to send, as on the field.
     if (m_messages && watched == m_messages->viewport()) {
         if (event->type() == QEvent::DragEnter || event->type() == QEvent::DragMove) {
@@ -2562,10 +2768,14 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
     if (watched == m_messages && event->type() == QEvent::KeyPress) {
         auto *key = static_cast<QKeyEvent *>(event);
         if (key->matches(QKeySequence::Copy)) {
-            copySelectedMessages();
+            if (!selectedText().isEmpty())
+                QGuiApplication::clipboard()->setText(selectedText()); // part of one
+            else
+                copySelectedMessages();
             return true;
         }
         if (key->key() == Qt::Key_Escape) {
+            clearTextSelection();
             m_messages->clearSelection();
             m_compose->setFocus();
             return true;

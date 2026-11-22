@@ -7,6 +7,7 @@
 
 #include <QHash>
 #include <QMainWindow>
+#include <QElapsedTimer>
 #include <QTimer>
 #include <QPixmap>
 
@@ -22,6 +23,7 @@ class QToolButton;
 class QPlainTextEdit;
 class QPushButton;
 class QStackedWidget;
+class QStyledItemDelegate;
 
 // Signal's layout: the conversations at the left (newest first, with the
 // last message and the unread count), the chosen one at the right, its
@@ -40,6 +42,9 @@ public:
     // Tests reach the parts.
     QListWidget *conversations() const { return m_conversations; }
     QListWidget *messages() const { return m_messages; }
+    // The part of one message's text chosen with the mouse (empty: none).
+    QString selectedText() const;
+    void selectText(qint64 message, int start, int end);
     QPlainTextEdit *composeField() const { return m_compose; }
     qint64 currentConversation() const { return m_current; }
     QLabel *connectionLabel() const { return m_connection; }
@@ -290,6 +295,21 @@ private:
     bool m_quoteClicked = false; // that click is not the bubble's own (play, save)
     QListWidgetItem *messageItem(qint64 message) const;
     QString copyText(const ChatStore::Message &m) const;
+    // Part of a message's text, chosen with the mouse (drag; a double-click
+    // takes a word): copied by Ctrl+C or Copy in its menu before whole messages.
+    struct TextSelection
+    {
+        qint64 message = 0;
+        int anchor = 0;
+        int cursor = 0;
+    };
+    TextSelection m_textSelection;
+    bool m_selectingText = false;
+    QElapsedTimer m_doubleClicked; // for a triple-click
+    QPoint m_doubleClickPos;
+    QStyledItemDelegate *m_bubbles = nullptr;
+    int textPositionAt(QListWidgetItem *item, const QPoint &pos, bool *onText) const;
+    void clearTextSelection();
     QWidget *m_findBar = nullptr;
     QLineEdit *m_findField = nullptr;
     QLabel *m_findCount = nullptr;

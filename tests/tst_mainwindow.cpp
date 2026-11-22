@@ -565,6 +565,79 @@ private slots:
     }
 
     // Choosing messages and copying them.
+    // Part of a message's text, chosen with the mouse, copied alone.
+    void selectPartOfAMessage()
+    {
+        ChatStore store(TestSupport::home() + QStringLiteral("/selecttext.sqlite"));
+        KeyStore keys(&store);
+        Messenger messenger(&store, &keys);
+        const qint64 anna = store.addConversation(QStringLiteral("direct"), QStringLiteral("anna"), QStringLiteral("anna"));
+        store.setAccepted(anna);
+        const QString text = QStringLiteral("Hello wonderful world");
+        const qint64 id = store.addMessage(anna, text, QStringLiteral("anna")).id;
+        store.markRead(anna); // no "New messages" line above it
+        MainWindow window(&store, &messenger);
+        window.resize(1000, 640);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        window.openConversation(anna);
+        QTRY_COMPARE(window.messages()->count(), 1);
+        QWidget *viewport = window.messages()->viewport();
+        const QRect row = window.messages()->visualItemRect(window.messages()->item(0));
+        // Theirs: the text starts 14 + 10 px in, 4 + 10 px down.
+        const QFontMetrics fm(window.messages()->font());
+        const int left = row.left() + 24;
+        const int y = row.top() + 14 + fm.height() / 2;
+
+        // A double-click on "wonderful": that word.
+        QTest::mouseDClick(viewport, Qt::LeftButton, {}, QPoint(left + fm.horizontalAdvance(QStringLiteral("Hello wond")), y));
+        QCOMPARE(window.selectedText(), QStringLiteral("wonderful"));
+        QVERIFY(window.messages()->selectedItems().isEmpty()); // not the whole message
+        window.messages()->setFocus();
+        QTest::keyClick(window.messages(), Qt::Key_C, Qt::ControlModifier);
+        QCOMPARE(QGuiApplication::clipboard()->text(), QStringLiteral("wonderful"));
+        // A third click: the whole text.
+        QTest::mouseClick(viewport, Qt::LeftButton, {}, QPoint(left + fm.horizontalAdvance(QStringLiteral("Hello wond")), y));
+        QCOMPARE(window.selectedText(), text);
+        QVERIFY(window.messages()->selectedItems().isEmpty());
+
+        // Dragged from its start to the middle: "Hello won".
+        auto drag = [&](const QPoint &from, const QPoint &to) {
+            QTest::mousePress(viewport, Qt::LeftButton, {}, from);
+            QMouseEvent move(QEvent::MouseMove, to, viewport->mapToGlobal(to), Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+            QCoreApplication::sendEvent(viewport, &move);
+            QTest::mouseRelease(viewport, Qt::LeftButton, {}, to);
+        };
+        drag(QPoint(left + 1, y), QPoint(left + fm.horizontalAdvance(QStringLiteral("Hello won")), y));
+        QCOMPARE(window.selectedText(), QStringLiteral("Hello won"));
+        // Backwards, past the end of the bubble: from there to the end.
+        drag(QPoint(left + fm.horizontalAdvance(QStringLiteral("Hello ")), y), QPoint(row.right() - 5, row.bottom()));
+        QCOMPARE(window.selectedText(), QStringLiteral("wonderful world"));
+        if (qEnvironmentVariableIsSet("CHAT_TEST_GRAB"))
+            window.grab().save(qEnvironmentVariable("CHAT_TEST_GRAB"));
+        // Its menu copies that part.
+        std::unique_ptr<QMenu> menu(window.messageMenu(id));
+        QVERIFY(menu);
+        QPoint at(left + 5, y);
+        QTimer::singleShot(100, [] {
+            if (auto *open = qobject_cast<QMenu *>(QApplication::activePopupWidget())) {
+                if (auto *copy = open->findChild<QAction *>(QStringLiteral("copySelectionAction")))
+                    copy->trigger();
+                open->close();
+            }
+        });
+        QGuiApplication::clipboard()->clear();
+        emit window.messages()->customContextMenuRequested(at);
+        QTRY_COMPARE(QGuiApplication::clipboard()->text(), QStringLiteral("wonderful world"));
+        // A plain click lets go; Ctrl+C then copies the whole message, as before.
+        QTest::mouseClick(viewport, Qt::LeftButton, {}, QPoint(left + 3, y));
+        QVERIFY(window.selectedText().isEmpty());
+        QTest::mouseClick(viewport, Qt::LeftButton, {}, QPoint(row.right() - 20, row.center().y())); // beside the text
+        window.messages()->setFocus();
+        QTest::keyClick(window.messages(), Qt::Key_C, Qt::ControlModifier);
+        QCOMPARE(QGuiApplication::clipboard()->text(), text);
+    }
+
     void copyMessages()
     {
         ChatStore store(TestSupport::home() + QStringLiteral("/copy.sqlite"));
@@ -581,13 +654,20 @@ private slots:
         QCOMPARE(list->count(), 3);
         QCOMPARE(list->selectionMode(), QAbstractItemView::ExtendedSelection);
 
-        // One: its text as it is, by Ctrl+C on the list.
+        // A plain click marks no row (as in Signal); Ctrl+C then copies the one clicked, as it is.
         QTest::mouseClick(list->viewport(), Qt::LeftButton, {}, list->visualItemRect(list->item(1)).center());
-        QVERIFY(list->item(1)->isSelected());
-        QCOMPARE(window.selectedMessagesText(), QStringLiteral("second\nhas two lines"));
+        QVERIFY(!list->item(1)->isSelected());
+        QVERIFY(list->selectedItems().isEmpty());
         QGuiApplication::clipboard()->clear();
         QTest::keyClick(list, Qt::Key_C, Qt::ControlModifier);
         QCOMPARE(QGuiApplication::clipboard()->text(), QStringLiteral("second\nhas two lines"));
+        // Ctrl+click chooses it (tinted), and another; a plain click lets both go.
+        QTest::mouseClick(list->viewport(), Qt::LeftButton, Qt::ControlModifier, list->visualItemRect(list->item(1)).center());
+        QTest::mouseClick(list->viewport(), Qt::LeftButton, Qt::ControlModifier, list->visualItemRect(list->item(2)).center());
+        QCOMPARE(list->selectedItems().size(), 2);
+        QTest::mouseClick(list->viewport(), Qt::LeftButton, {}, list->visualItemRect(list->item(0)).center());
+        QVERIFY(list->selectedItems().isEmpty());
+        list->setFocus();
 
         // All: one line each with the time and who.
         QTest::keyClick(list, Qt::Key_A, Qt::ControlModifier);
