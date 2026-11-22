@@ -940,11 +940,21 @@ qint64 Messenger::sendFile(qint64 conversation, const QString &path, const QStri
         return fail(tr("The file could not be read."));
     if (file.size() > Attachment::MaxFileBytes)
         return fail(tr("The file is larger than %1 MB.").arg(Attachment::MaxFileBytes / (1024 * 1024)));
-    const QByteArray data = file.readAll();
-    QString type = QMimeDatabase().mimeTypeForFileNameAndData(path, data.left(4096)).name();
+    return sendFileData(conversation, QFileInfo(path).fileName(), file.readAll(), caption, error, replyTo);
+}
+
+qint64 Messenger::sendFileData(qint64 conversation, const QString &fileName, const QByteArray &data, const QString &caption,
+                               QString *error, qint64 replyTo)
+{
+    if (data.size() > Attachment::MaxFileBytes) {
+        if (error)
+            *error = tr("The file is larger than %1 MB.").arg(Attachment::MaxFileBytes / (1024 * 1024));
+        return 0;
+    }
+    QString type = QMimeDatabase().mimeTypeForFileNameAndData(fileName, data.left(4096)).name();
     if (!Attachment::isValidType(type))
         type = QStringLiteral("application/octet-stream");
-    return sendData(conversation, QFileInfo(path).fileName(), type, data, caption, error, replyTo, false);
+    return sendData(conversation, fileName, type, data, caption, error, replyTo, false);
 }
 
 qint64 Messenger::sendVoice(qint64 conversation, const QByteArray &samples, QString *error, qint64 replyTo)

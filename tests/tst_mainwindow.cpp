@@ -9,7 +9,10 @@
 #include "TestSupport.h"
 
 #include <QApplication>
+#include <QBuffer>
 #include <QClipboard>
+#include <QMimeData>
+#include <QUrl>
 #include <QDir>
 #include <QFile>
 #include <QImage>
@@ -384,6 +387,117 @@ private slots:
         list->item(0)->setSelected(true);
         window.deleteMessage(list->item(0)->data(Qt::UserRole + 1).toLongLong(), false, false);
         QCOMPARE(window.selectedMessagesText(), QString());
+    }
+
+    // Files and pictures wait above the field until sent: 📎, pasted, dropped.
+    void pasteAndDropFiles()
+    {
+        ChatStore store(TestSupport::home() + QStringLiteral("/paste.sqlite"));
+        KeyStore keys(&store);
+        Messenger messenger(&store, &keys);
+        MainWindow window(&store, &messenger);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        const qint64 notes = store.noteToSelf();
+        window.openConversation(notes);
+        QListWidget *list = window.messages();
+        QPlainTextEdit *field = window.composeField();
+
+        // A screenshot pasted: waiting, not sent.
+        QImage shot(320, 200, QImage::Format_RGB32);
+        shot.fill(QColor(200, 80, 30));
+        QGuiApplication::clipboard()->setImage(shot);
+        field->setFocus();
+        QTest::keyClick(field, Qt::Key_V, Qt::ControlModifier);
+        QCOMPARE(window.pendingAttachments(), 1);
+        QVERIFY(window.attachBar()->isVisible());
+        QVERIFY(field->toPlainText().isEmpty());
+        QCOMPARE(list->count(), 0);
+        // Text pasted is text, and an office program's text with a picture of it too.
+        QGuiApplication::clipboard()->setText(QStringLiteral("look"));
+        QTest::keyClick(field, Qt::Key_V, Qt::ControlModifier);
+        QCOMPARE(field->toPlainText(), QStringLiteral("look"));
+        auto *both = new QMimeData;
+        both->setText(QStringLiteral(" at this"));
+        both->setImageData(shot);
+        QGuiApplication::clipboard()->setMimeData(both);
+        QTest::keyClick(field, Qt::Key_V, Qt::ControlModifier);
+        QCOMPARE(field->toPlainText(), QStringLiteral("look at this"));
+        QCOMPARE(window.pendingAttachments(), 1);
+
+        // Enter: the picture, with the text, as a PNG of just its pixels.
+        QTest::keyClick(field, Qt::Key_Return);
+        QCOMPARE(window.pendingAttachments(), 0);
+        QVERIFY(!window.attachBar()->isVisible());
+        QVERIFY(field->toPlainText().isEmpty());
+        QTRY_COMPARE(list->count(), 1);
+        const ChatStore::Message sent = store.messages(notes).last();
+        QCOMPARE(sent.body, QStringLiteral("look at this"));
+        const QList<ChatStore::StoredAttachment> files = store.attachments(sent.id);
+        QCOMPARE(files.size(), 1);
+        QCOMPARE(files.first().type, QStringLiteral("image/png"));
+        QVERIFY(files.first().name.startsWith(QStringLiteral("Pasted image ")));
+        QImage back;
+        QVERIFY(back.loadFromData(messenger.attachmentData(files.first().id).value_or(QByteArray())));
+        QCOMPARE(back.size(), shot.size());
+
+        // Two files dropped on the conversation; one taken back with its ✕.
+        const QString a = TestSupport::home() + QStringLiteral("/a.txt");
+        const QString b = TestSupport::home() + QStringLiteral("/b.txt");
+        for (const QString &path : {a, b}) {
+            QFile f(path);
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            f.write(path.toUtf8());
+        }
+        QMimeData dropped;
+        dropped.setUrls({QUrl::fromLocalFile(a), QUrl::fromLocalFile(b)});
+        const QPoint middle = list->viewport()->rect().center();
+        QDragEnterEvent enter(middle, Qt::CopyAction, &dropped, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(list->viewport(), &enter);
+        QVERIFY(enter.isAccepted());
+        QDropEvent drop(middle, Qt::CopyAction, &dropped, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(list->viewport(), &drop);
+        QVERIFY(drop.isAccepted());
+        QCOMPARE(window.pendingAttachments(), 2);
+        if (qEnvironmentVariableIsSet("CHAT_TEST_GRAB")) {
+            QVERIFY(window.addAttachmentData(QStringLiteral("shot.png"), [&] {
+                QByteArray png;
+                QBuffer buffer(&png);
+                buffer.open(QIODevice::WriteOnly);
+                shot.save(&buffer, "PNG");
+                return png;
+            }()));
+            QTest::keyClicks(field, QStringLiteral("the notes and the picture"));
+            QTest::qWait(100);
+            window.grab().save(qEnvironmentVariable("CHAT_TEST_GRAB"));
+            window.removeAttachment(2);
+            field->clear();
+        }
+        const auto removes = window.attachBar()->findChildren<QToolButton *>(QStringLiteral("removeAttachmentButton"));
+        QCOMPARE(removes.size(), 2);
+        removes.first()->click();
+        QCOMPARE(window.pendingAttachments(), 1);
+        QTRY_COMPARE(window.attachBar()->findChildren<QToolButton *>(QStringLiteral("removeAttachmentButton")).size(), 1);
+        QVERIFY(window.findChild<QPushButton *>(QStringLiteral("sendButton"))->isEnabled()); // nothing typed: still something to send
+        QTest::keyClick(field, Qt::Key_Return);
+        QTRY_COMPARE(list->count(), 2);
+        QCOMPARE(store.attachments(store.messages(notes).last().id).first().name, QStringLiteral("b.txt"));
+
+        // A folder: not sent, said so; text dropped is text.
+        QMimeData folder;
+        folder.setUrls({QUrl::fromLocalFile(TestSupport::home())});
+        QVERIFY(window.takeAttachments(&folder));
+        QCOMPARE(window.pendingAttachments(), 0);
+        QVERIFY(window.noticeLabel()->isVisible());
+        QMimeData text;
+        text.setText(QStringLiteral("words"));
+        QVERIFY(!window.takeAttachments(&text));
+        // Kept for this conversation only.
+        QVERIFY(window.addAttachment(a));
+        const qint64 anna = store.addConversation(QStringLiteral("direct"), QStringLiteral("Anna"), QStringLiteral("anna"));
+        store.setAccepted(anna);
+        window.openConversation(anna);
+        QCOMPARE(window.pendingAttachments(), 0);
     }
 
     void findInAConversation()

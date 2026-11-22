@@ -28,6 +28,8 @@ QWidget#composer { background: @window; border-top: 1px solid @border; }
 QWidget#replyBar { background: @pathBg; border-left: 3px solid @accent; border-radius: 6px; }
 QLabel#replyLabel { color: @dimFg; }
 QWidget#recordBar { background: @pathBg; border-radius: 6px; }
+QWidget#attachBar { background: transparent; }
+QWidget#attachChip { background: @pathBg; border: 1px solid @border; border-radius: 8px; }
 QLabel#recordLabel { color: #e01b24; font-weight: bold; }
 QWidget#findBar { background: @window; border-bottom: 1px solid @border; }
 QLineEdit#findField { background: @pathBg; border: none; border-radius: 8px; padding: 5px 8px; color: @fg; }

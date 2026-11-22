@@ -77,6 +77,10 @@ public:
                     qint64 replyTo = 0);
     // A voice message: 16-bit mono samples at Voice::SampleRate, sent as a
     // WAV attachment marked "voice".
+    // The same for bytes in memory (a pasted picture: never written to disk
+    // unencrypted); its type is told from its name and its start.
+    qint64 sendFileData(qint64 conversation, const QString &fileName, const QByteArray &data, const QString &caption,
+                        QString *error = nullptr, qint64 replyTo = 0);
     qint64 sendVoice(qint64 conversation, const QByteArray &samples, QString *error = nullptr, qint64 replyTo = 0);
     // What a reply to `message` quotes: its id, author and the start of its text.
     std::optional<Protocol::Quote> quoteOf(qint64 message) const;

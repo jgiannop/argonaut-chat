@@ -24,6 +24,10 @@
 #include <QListWidget>
 #include <QLocale>
 #include <QMenuBar>
+#include <QMimeData>
+#include <QImageReader>
+#include <QBuffer>
+#include <QFileInfo>
 #include <QMouseEvent>
 #include <QMessageBox>
 #include <QPainter>
@@ -165,6 +169,46 @@ public:
 
 private:
     const Theme *m_theme;
+};
+
+// The local files a paste or drop carries.
+QStringList localFiles(const QMimeData *data)
+{
+    QStringList out;
+    if (data && data->hasUrls()) {
+        for (const QUrl &url : data->urls()) {
+            if (url.isLocalFile())
+                out << url.toLocalFile();
+        }
+    }
+    return out;
+}
+
+// Files, or a picture with no text (a screenshot; an office program's copied
+// text carries a picture of itself too: that stays text).
+bool carriesAttachments(const QMimeData *data)
+{
+    return data && (!localFiles(data).isEmpty() || (data->hasImage() && !data->hasText()));
+}
+
+// The message field: files or a picture pasted or dropped on it go to
+// `take` (true: taken); anything else is text, as usual.
+class ComposeField : public QPlainTextEdit
+{
+public:
+    using QPlainTextEdit::QPlainTextEdit;
+    std::function<bool(const QMimeData *)> take;
+
+protected:
+    bool canInsertFromMimeData(const QMimeData *source) const override
+    {
+        return carriesAttachments(source) || QPlainTextEdit::canInsertFromMimeData(source);
+    }
+    void insertFromMimeData(const QMimeData *source) override
+    {
+        if (!(take && carriesAttachments(source) && take(source)))
+            QPlainTextEdit::insertFromMimeData(source);
+    }
 };
 
 // A message as a bubble: mine at the right in the accent colour, theirs at
@@ -538,6 +582,8 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
     m_messages->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_messages->setFocusPolicy(Qt::ClickFocus);
     m_messages->installEventFilter(this);
+    m_messages->viewport()->setAcceptDrops(true); // files dropped on the conversation
+    m_messages->viewport()->installEventFilter(this);
     bubbles->quoteClicked = [this](const QModelIndex &index) {
         // After the click is over: going there rebuilds the list under it.
         m_quoteClicked = true;
@@ -602,10 +648,21 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
     replyLayout->addWidget(cancelReply);
     m_replyBar->hide();
     composerOuter->addWidget(m_replyBar);
+    // Above the field: the files that go with the next message.
+    m_attachBar = new QWidget(composer);
+    m_attachBar->setObjectName(QStringLiteral("attachBar"));
+    m_attachBar->setAttribute(Qt::WA_StyledBackground);
+    auto *attachLayout = new QHBoxLayout(m_attachBar);
+    attachLayout->setContentsMargins(6, 6, 6, 6);
+    attachLayout->setSpacing(6);
+    m_attachBar->hide();
+    composerOuter->addWidget(m_attachBar);
     auto *composerLayout = new QHBoxLayout;
     composerLayout->setContentsMargins(0, 0, 0, 0);
     composerOuter->addLayout(composerLayout);
-    m_compose = new QPlainTextEdit(composer);
+    auto *field = new ComposeField(composer);
+    field->take = [this](const QMimeData *data) { return takeAttachments(data); };
+    m_compose = field;
     m_compose->setObjectName(QStringLiteral("composeField"));
     m_compose->setPlaceholderText(tr("Message"));
     m_compose->setFixedHeight(40);
@@ -618,13 +675,14 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
     m_attach = new QToolButton(composer);
     m_attach->setObjectName(QStringLiteral("attachButton"));
     m_attach->setText(QStringLiteral("📎"));
-    m_attach->setToolTip(tr("Send a file (up to 25 MB), encrypted; what you have typed goes with it"));
+    m_attach->setToolTip(tr("Attach files (up to 25 MB each), encrypted; you can paste or drop them here too"));
     m_attach->setCursor(Qt::PointingHandCursor);
     m_attach->setEnabled(m_messenger != nullptr);
     connect(m_attach, &QToolButton::clicked, this, [this] {
-        const QString path = QFileDialog::getOpenFileName(this, tr("Send a File"));
-        if (!path.isEmpty())
-            attachFile(path);
+        for (const QString &path : QFileDialog::getOpenFileNames(this, tr("Attach Files"))) {
+            if (!addAttachment(path))
+                break;
+        }
     });
     m_voiceButton = new QToolButton(composer);
     m_voiceButton->setObjectName(QStringLiteral("voiceButton"));
@@ -747,7 +805,7 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
 
     connect(m_send, &QPushButton::clicked, this, &MainWindow::send);
     connect(m_compose, &QPlainTextEdit::textChanged, this, [this] {
-        m_send->setEnabled(m_current != 0 && !m_compose->toPlainText().trimmed().isEmpty());
+        updateSendButton();
         // The field grows with what is written, up to six lines.
         const int lines = qBound(1, int(m_compose->document()->size().height()), 6);
         m_compose->setFixedHeight(qMax(40, lines * m_compose->fontMetrics().lineSpacing() + 18));
@@ -1010,6 +1068,8 @@ void MainWindow::openConversation(qint64 id)
         m_messageLimit = DefaultMessageLimit;
         m_flash = 0;
         m_flashTimer.stop();
+        m_pending.clear(); // they were for that conversation
+        refreshAttachBar();
         stopRecording(false); // a recording belongs to its conversation
         m_player.stop();
         if (m_findBar && m_findBar->isVisible()) {
@@ -1033,7 +1093,7 @@ void MainWindow::openConversation(qint64 id)
     markCurrentRead();
     reloadMessages();
     m_compose->setFocus();
-    m_send->setEnabled(!m_compose->toPlainText().trimmed().isEmpty());
+    updateSendButton();
 }
 
 void MainWindow::markCurrentRead()
@@ -1639,6 +1699,156 @@ void MainWindow::attachFile(const QString &path)
     cancelReply();
 }
 
+bool MainWindow::canAttach() const
+{
+    return m_messenger && m_current != 0 && m_composer->isVisible() && m_compose->isEnabled() && !m_recorder.isRecording();
+}
+
+bool MainWindow::addAttachment(const QString &path)
+{
+    if (!canAttach())
+        return false;
+    const QFileInfo info(path);
+    if (!info.isFile() || !info.isReadable()) {
+        showNotice(tr("%1 is a folder or cannot be read.").arg(info.fileName()));
+        return false;
+    }
+    if (info.size() > Attachment::MaxFileBytes) {
+        showNotice(tr("%1 is larger than %2 MB.").arg(info.fileName()).arg(Attachment::MaxFileBytes / (1024 * 1024)));
+        return false;
+    }
+    if (m_pending.size() >= MaxPendingFiles) {
+        showNotice(tr("At most %1 files at a time.").arg(MaxPendingFiles));
+        return false;
+    }
+    if (m_editing != 0) {
+        m_compose->clear();
+        cancelReply(); // files are a new message, not an edit
+    }
+    PendingFile f;
+    f.path = path;
+    f.name = info.fileName();
+    f.size = info.size();
+    QImageReader reader(path);
+    if (reader.canRead() && reader.size().isValid()) {
+        reader.setScaledSize(reader.size().scaled(48, 48, Qt::KeepAspectRatio));
+        f.thumbnail = QPixmap::fromImage(reader.read());
+    }
+    m_pending << f;
+    refreshAttachBar();
+    return true;
+}
+
+bool MainWindow::addAttachmentData(const QString &name, const QByteArray &data)
+{
+    if (!canAttach())
+        return false;
+    if (data.size() > Attachment::MaxFileBytes) {
+        showNotice(tr("%1 is larger than %2 MB.").arg(name).arg(Attachment::MaxFileBytes / (1024 * 1024)));
+        return false;
+    }
+    if (m_pending.size() >= MaxPendingFiles) {
+        showNotice(tr("At most %1 files at a time.").arg(MaxPendingFiles));
+        return false;
+    }
+    if (m_editing != 0) {
+        m_compose->clear();
+        cancelReply();
+    }
+    PendingFile f;
+    f.name = name;
+    f.data = data;
+    f.size = data.size();
+    QImage image;
+    if (image.loadFromData(data))
+        f.thumbnail = QPixmap::fromImage(image.scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    m_pending << f;
+    refreshAttachBar();
+    return true;
+}
+
+bool MainWindow::takeAttachments(const QMimeData *data)
+{
+    if (!canAttach() || !carriesAttachments(data))
+        return false;
+    const QStringList files = localFiles(data);
+    if (!files.isEmpty()) {
+        for (const QString &path : files) {
+            if (!addAttachment(path))
+                break;
+        }
+        return true;
+    }
+    // A picture: as PNG (whatever it carried along, nothing but the pixels goes).
+    const QImage image = qvariant_cast<QImage>(data->imageData());
+    QByteArray png;
+    QBuffer buffer(&png);
+    if (image.isNull() || !buffer.open(QIODevice::WriteOnly) || !image.save(&buffer, "PNG"))
+        return false;
+    const QString name = tr("Pasted image %1.png").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH.mm.ss")));
+    addAttachmentData(name, png);
+    return true;
+}
+
+void MainWindow::removeAttachment(int index)
+{
+    if (index < 0 || index >= m_pending.size())
+        return;
+    m_pending.removeAt(index);
+    refreshAttachBar();
+}
+
+void MainWindow::refreshAttachBar()
+{
+    auto *layout = static_cast<QHBoxLayout *>(m_attachBar->layout());
+    while (QLayoutItem *item = layout->takeAt(0)) {
+        if (QWidget *w = item->widget()) {
+            w->hide();
+            w->setParent(nullptr);
+            w->deleteLater(); // its ✕ may be the one being clicked
+        }
+        delete item;
+    }
+    for (int i = 0; i < m_pending.size(); ++i) {
+        const PendingFile &f = m_pending.at(i);
+        auto *chip = new QWidget(m_attachBar);
+        chip->setObjectName(QStringLiteral("attachChip"));
+        chip->setAttribute(Qt::WA_StyledBackground);
+        chip->setToolTip(QStringLiteral("%1\n%2").arg(f.name, QLocale().formattedDataSize(f.size)));
+        auto *chipLayout = new QHBoxLayout(chip);
+        chipLayout->setContentsMargins(6, 4, 2, 4);
+        chipLayout->setSpacing(4);
+        auto *icon = new QLabel(chip);
+        if (!f.thumbnail.isNull())
+            icon->setPixmap(f.thumbnail);
+        else
+            icon->setText(QStringLiteral("📎"));
+        chipLayout->addWidget(icon);
+        if (f.thumbnail.isNull()) {
+            auto *name = new QLabel(chip);
+            name->setTextFormat(Qt::PlainText);
+            name->setText(name->fontMetrics().elidedText(f.name, Qt::ElideMiddle, 160));
+            chipLayout->addWidget(name);
+        }
+        auto *remove = new QToolButton(chip);
+        remove->setObjectName(QStringLiteral("removeAttachmentButton"));
+        remove->setText(QStringLiteral("✕"));
+        remove->setToolTip(tr("Don't send this one"));
+        remove->setAutoRaise(true);
+        connect(remove, &QToolButton::clicked, this, [this, i] { removeAttachment(i); });
+        chipLayout->addWidget(remove);
+        layout->addWidget(chip);
+    }
+    layout->addStretch(1);
+    m_attachBar->setVisible(!m_pending.isEmpty());
+    updateSendButton();
+}
+
+void MainWindow::updateSendButton()
+{
+    m_send->setEnabled(m_current != 0 && (!m_compose->toPlainText().trimmed().isEmpty() || !m_pending.isEmpty()));
+}
+
 QString MainWindow::typingText(qint64 conversation) const
 {
     if (!m_messenger)
@@ -1812,6 +2022,28 @@ void MainWindow::send()
         cancelReply();
         return;
     }
+    if (!m_pending.isEmpty() && m_messenger && m_current != 0) {
+        // Each file its own message, the first answering what is replied to,
+        // the text with the last. One that fails stays, with those after it.
+        while (!m_pending.isEmpty()) {
+            const PendingFile f = m_pending.first();
+            const QString caption = m_pending.size() == 1 ? text : QString();
+            QString error;
+            const qint64 id = f.path.isEmpty() ? m_messenger->sendFileData(m_current, f.name, f.data, caption, &error, m_replyTo)
+                                               : m_messenger->sendFile(m_current, f.path, caption, &error, m_replyTo);
+            if (id == 0) {
+                showNotice(tr("%1: %2").arg(f.name, error));
+                refreshAttachBar();
+                return;
+            }
+            m_pending.removeFirst();
+            m_replyTo = 0;
+        }
+        refreshAttachBar();
+        m_compose->clear();
+        cancelReply();
+        return;
+    }
     if (text.isEmpty() || m_current == 0)
         return;
     if (m_messenger)
@@ -1824,6 +2056,23 @@ void MainWindow::send()
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
+    // Files or a picture dropped on the conversation: to send, as on the field.
+    if (m_messages && watched == m_messages->viewport()) {
+        if (event->type() == QEvent::DragEnter || event->type() == QEvent::DragMove) {
+            auto *drag = static_cast<QDropEvent *>(event);
+            if (canAttach() && carriesAttachments(drag->mimeData())) {
+                drag->acceptProposedAction();
+                return true;
+            }
+        } else if (event->type() == QEvent::Drop) {
+            auto *drop = static_cast<QDropEvent *>(event);
+            if (takeAttachments(drop->mimeData())) {
+                drop->acceptProposedAction();
+                m_compose->setFocus();
+                return true;
+            }
+        }
+    }
     // The messages: Ctrl+C copies the chosen ones, Esc lets go of them, and
     // typing goes on in the field.
     if (watched == m_messages && event->type() == QEvent::KeyPress) {

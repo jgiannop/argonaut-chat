@@ -15,6 +15,7 @@ class QLabel;
 class QLineEdit;
 class QListWidget;
 class QListWidgetItem;
+class QMimeData;
 class QMenu;
 class QToolButton;
 class QPlainTextEdit;
@@ -54,8 +55,19 @@ public:
     // The open conversation's disappearing messages (0: off).
     void setDisappearing(qint64 seconds);
     QMenu *timerMenu() const { return m_timerMenu; }
-    // A file into the open conversation, with what is typed as its caption (the 📎 button).
+    // A file into the open conversation at once, with what is typed as its caption.
     void attachFile(const QString &path);
+    // Files waiting above the field until Enter/Send (📎, pasted, dropped on
+    // the field or the messages; ✕ takes one back), each its own message, the
+    // typed text with the last. false and a notice: a folder, too big, too many.
+    bool addAttachment(const QString &path);
+    bool addAttachmentData(const QString &name, const QByteArray &data); // a pasted picture
+    // What a paste or drop carries: local files, or a picture without text (a
+    // screenshot). false: nothing for us, it is text.
+    bool takeAttachments(const QMimeData *data);
+    int pendingAttachments() const { return int(m_pending.size()); }
+    void removeAttachment(int index);
+    QWidget *attachBar() const { return m_attachBar; }
     // An attachment, decrypted, into `path` (a click on it asks where).
     bool saveAttachment(qint64 attachment, const QString &path);
     // Finds them on the server and opens the conversation (New Chat).
@@ -176,6 +188,20 @@ private:
     void showFindMatch();
     static constexpr int DefaultMessageLimit = 500;
     int m_messageLimit = DefaultMessageLimit; // grows to show an older match
+    struct PendingFile
+    {
+        QString path;    // a file on disk, read when sent
+        QString name;
+        QByteArray data; // or bytes in memory (pasted)
+        qint64 size = 0;
+        QPixmap thumbnail;
+    };
+    static constexpr int MaxPendingFiles = 10;
+    QList<PendingFile> m_pending;
+    QWidget *m_attachBar = nullptr;
+    bool canAttach() const;
+    void refreshAttachBar();
+    void updateSendButton();
     qint64 m_flash = 0;          // the message a quote's click went to, outlined for a moment
     QTimer m_flashTimer;
     bool m_quoteClicked = false; // that click is not the bubble's own (play, save)
