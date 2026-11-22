@@ -5,7 +5,7 @@ Widgets: the same technology and the same look as
 [Argonaut](https://github.com/jgiannop/argonaut), the file manager, and
 [Argonaut Emails](https://github.com/jgiannop/argonaut-emails).
 
-Version 0.3.1, for Ubuntu and Windows. How Signal works, and what that means for this
+Version 0.3.2, for Ubuntu and Windows. How Signal works, and what that means for this
 program: [docs/how-signal-works.md](docs/how-signal-works.md).
 
 ## What it does now
@@ -126,17 +126,17 @@ Then:
 
 ## Making a release
 
-Set the version in `CMakeLists.txt` (`project(argonaut-chat VERSION 0.3.1 …)`),
+Set the version in `CMakeLists.txt` (`project(argonaut-chat VERSION 0.3.2 …)`),
 commit, then tag and push:
 
 ```bash
-git tag v0.3.1
-git push origin main v0.3.1
+git tag v0.3.2
+git push origin main v0.3.2
 ```
 
 The Release workflow builds the two `.deb` packages and the Windows
 installer and zip, checks that each installs and starts, and publishes them
-as the release `v0.3.1`. Every push to `main` builds and tests on Linux
+as the release `v0.3.2`. Every push to `main` builds and tests on Linux
 (also under ASan/UBSan) and on Windows.
 
 ## Building
