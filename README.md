@@ -5,7 +5,7 @@ Widgets: the same technology and the same look as
 [Argonaut](https://github.com/jgiannop/argonaut), the file manager, and
 [Argonaut Emails](https://github.com/jgiannop/argonaut-emails).
 
-Version 0.2.1, for Ubuntu and Windows. How Signal works, and what that means for this
+Version 0.3.0, for Ubuntu and Windows. How Signal works, and what that means for this
 program: [docs/how-signal-works.md](docs/how-signal-works.md).
 
 ## What it does now
@@ -108,35 +108,35 @@ your own computer: `packaging/build-debs.sh` (in Docker, into `dist/`).
 
 ## Next
 
-In this order (agreed 2026-11-22):
+Done in 0.3.0 (2026-11-22): **PQXDH**, the post-quantum start of a
+conversation that Signal uses (X3DH plus ML-KEM-1024 from mlkem-native,
+`third_party/mlkem-native`), so that recorded traffic stays safe from a
+future quantum computer; and the **app lock**.
 
-1. **Use 0.2.1 for real** with one or two people for a few days, and fix
+**Updating to 0.3.0**: the server first (done on the VPS), then every app.
+New conversations need both sides on 0.3 or later (an older app is told to
+update); conversations already going on keep working.
+
+Then:
+
+1. **Use 0.3.0 for real** with one or two people for a few days, and fix
    what that turns up.
-2. **PQXDH** (done, not released yet): the post-quantum start of a
-   conversation that Signal uses (X3DH plus ML-KEM-1024), so that recorded
-   traffic stays safe from a future quantum computer. ML-KEM comes from
-   mlkem-native (`third_party/mlkem-native`); existing conversations keep
-   working. New conversations need both sides on 0.3 or later, and the
-   server updated first.
-3. **Locking the app** (done, not released yet): after some idle minutes
-   or on demand, the window hides the chats until a passphrase is typed.
-
-Later: voice and video calls, moving history to a new linked computer,
-smaller voice messages (Opus).
+2. Later: voice and video calls, moving history to a new linked computer,
+   smaller voice messages (Opus), Signal's post-quantum ratchet (SPQR).
 
 ## Making a release
 
-Set the version in `CMakeLists.txt` (`project(argonaut-chat VERSION 0.2.1 …)`),
+Set the version in `CMakeLists.txt` (`project(argonaut-chat VERSION 0.3.0 …)`),
 commit, then tag and push:
 
 ```bash
-git tag v0.2.1
-git push origin main v0.2.1
+git tag v0.3.0
+git push origin main v0.3.0
 ```
 
 The Release workflow builds the two `.deb` packages and the Windows
 installer and zip, checks that each installs and starts, and publishes them
-as the release `v0.2.1`. Every push to `main` builds and tests on Linux
+as the release `v0.3.0`. Every push to `main` builds and tests on Linux
 (also under ASan/UBSan) and on Windows.
 
 ## Building

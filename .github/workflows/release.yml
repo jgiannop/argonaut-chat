@@ -1,12 +1,12 @@
 name: Release
 
-# Push a tag like v0.2.1 (matching project(argonaut-chat VERSION ...) in
+# Push a tag like v0.3.0 (matching project(argonaut-chat VERSION ...) in
 # CMakeLists.txt) to build the packages and publish them as a GitHub Release:
 #
-#   argonaut-chat_0.2.1_ubuntu24.04_amd64.deb     Ubuntu 24.04
-#   argonaut-chat_0.2.1_ubuntu26.04_amd64.deb     Ubuntu 26.04
-#   argonaut-chat-0.2.1-windows-setup.exe         Windows 10/11, the installer
-#   argonaut-chat-0.2.1-windows-x64.zip           Windows, the same as a folder
+#   argonaut-chat_0.3.0_ubuntu24.04_amd64.deb     Ubuntu 24.04
+#   argonaut-chat_0.3.0_ubuntu26.04_amd64.deb     Ubuntu 26.04
+#   argonaut-chat-0.3.0-windows-setup.exe         Windows 10/11, the installer
+#   argonaut-chat-0.3.0-windows-x64.zip           Windows, the same as a folder
 #   SHA256SUMS
 #
 # A .deb is tied to its release's Qt, so each is built (and installed, to

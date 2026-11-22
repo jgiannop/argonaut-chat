@@ -64,9 +64,9 @@ Tests are Qt Test, one line each in `tests/CMakeLists.txt` (`chat_test(name [LIB
 - **Order of work** (steps 1-5 done 2026-11-20; then keep-alive, notifications, packages, server backup, attachments, profiles, groups, linked devices, disappearing messages, all 2026-11-20/21): 1) crypto in `chat_core` (keys, X3DH, Double Ratchet) with tests; 2) the protocol (message formats); 3) the server; 4) the app talking to it (accounts, contacts, sending); 5) the encrypted local database; then groups, attachments, linked devices.
 
 - **Next, in this order** (agreed with the owner 2026-11-22; also in README "Next"):
-  1. Release 0.2.1 (everything since 0.2.0: jump/copy, paste/drop, mute/archive/pin, where you left off, read receipts off, @mentions), then real use with one or two people for a few days, fixing what that turns up.
-  2. **PQXDH** — done 2026-11-22 (owner's choices: ML-KEM from mlkem-native copied into `third_party`, since Ubuntu 24.04 has neither liboqs nor OpenSSL ≥ 3.5; PQXDH required, no X3DH fallback). Not released yet: the next release is 0.3.0, and the VPS's server must be updated before anyone uses it.
-  3. **App lock** — done 2026-11-22 (own passphrase with Argon2id, not the system's; see the App lock entry above). Not released yet (0.3.0).
+  1. Released 0.2.1 (jump/copy, paste/drop, mute/archive/pin, where you left off, read receipts off, @mentions); real use by the owner with one or two people still to come (now with 0.3.0), fixing what that turns up.
+  2. **PQXDH** — done 2026-11-22 (owner's choices: ML-KEM from mlkem-native copied into `third_party`, since Ubuntu 24.04 has neither liboqs nor OpenSSL ≥ 3.5; PQXDH required, no X3DH fallback). Released in 0.3.0 (2026-11-22), the VPS's server updated first.
+  3. **App lock** — done 2026-11-22 (own passphrase with Argon2id, not the system's; see the App lock entry above). Released in 0.3.0.
   - Later: voice and video calls (WebRTC and a TURN relay on the VPS, which also serves teachkids.gr), moving history to a new linked computer, Opus voice messages.
 
 ## Rules
