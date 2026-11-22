@@ -14,6 +14,7 @@ class TrayIcon;
 class QLabel;
 class QLineEdit;
 class QListWidget;
+class QListWidgetItem;
 class QMenu;
 class QToolButton;
 class QPlainTextEdit;
@@ -99,6 +100,14 @@ public:
     void deleteMessage(qint64 message, bool forEveryone, bool ask);
     // A message's right-click menu (the caller owns it); none for a note.
     QMenu *messageMenu(qint64 message);
+    // A click on a reply's quote: the message it answers scrolled into view
+    // and outlined for a moment (false: it is gone, deleted or never here).
+    bool jumpToQuote(qint64 reply);
+    qint64 flashedMessage() const { return m_flash; }
+    // Copying (click, Ctrl/Shift+click, Ctrl+A; Ctrl+C): one message's text as
+    // it is, several as "[date time] Name: text" lines, oldest first.
+    QString selectedMessagesText() const;
+    void copySelectedMessages();
 
 signals:
     // A notification was shown (tests: the offscreen platform has no tray).
@@ -167,6 +176,11 @@ private:
     void showFindMatch();
     static constexpr int DefaultMessageLimit = 500;
     int m_messageLimit = DefaultMessageLimit; // grows to show an older match
+    qint64 m_flash = 0;          // the message a quote's click went to, outlined for a moment
+    QTimer m_flashTimer;
+    bool m_quoteClicked = false; // that click is not the bubble's own (play, save)
+    QListWidgetItem *messageItem(qint64 message) const;
+    QString copyText(const ChatStore::Message &m) const;
     QWidget *m_findBar = nullptr;
     QLineEdit *m_findField = nullptr;
     QLabel *m_findCount = nullptr;

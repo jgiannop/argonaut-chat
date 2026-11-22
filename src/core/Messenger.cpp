@@ -391,7 +391,9 @@ qint64 Messenger::send(qint64 conversation, const QString &text, qint64 replyTo)
     const auto quote = replyTo != 0 && m_store->message(replyTo).conversation == conversation ? quoteOf(replyTo)
                                                                                                : std::nullopt;
     if (c.kind == QLatin1String("self")) {
-        const qint64 id = m_store->addMessage(conversation, text).id;
+        // An id as the others' have, so a reply to it can find it.
+        const qint64 id =
+            m_store->addMessage(conversation, text, QString(), QDateTime::currentDateTimeUtc(), Protocol::newMessageId()).id;
         if (id != 0 && quote)
             m_store->setQuote(id, quote->id, quote->author, quote->text);
         if (id != 0 && c.expireSeconds > 0) {

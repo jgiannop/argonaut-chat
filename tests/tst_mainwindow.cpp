@@ -9,6 +9,7 @@
 #include "TestSupport.h"
 
 #include <QApplication>
+#include <QClipboard>
 #include <QDir>
 #include <QFile>
 #include <QImage>
@@ -285,6 +286,104 @@ private slots:
         QVERIFY(!again.typingIndicatorsAction()->isChecked());
         again.typingIndicatorsAction()->setChecked(true);
         QVERIFY(messenger.typingIndicators());
+    }
+
+    // A click on a reply's quote goes to what it answers, outlined for a moment.
+    void jumpToTheQuotedMessage()
+    {
+        ChatStore store(TestSupport::home() + QStringLiteral("/jump.sqlite"));
+        KeyStore keys(&store);
+        Messenger messenger(&store, &keys);
+        MainWindow window(&store, &messenger);
+        window.resize(700, 500);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        const int highlightRole = Qt::UserRole + 21;
+        const qint64 notes = store.noteToSelf();
+        window.openConversation(notes);
+        messenger.send(notes, QStringLiteral("Buy bread, milk and the long list of other things"));
+        const qint64 original = store.messages(notes).last().id;
+        QVERIFY(!store.message(original).uid.isEmpty()); // notes have ids too, for this
+        for (int i = 0; i < 30; ++i)
+            messenger.send(notes, QStringLiteral("filler %1").arg(i));
+        messenger.send(notes, QStringLiteral("ok"), original);
+        const qint64 reply = store.messages(notes).last().id;
+        window.openConversation(notes);
+        QListWidget *list = window.messages();
+        QListWidgetItem *first = list->item(0);
+        QVERIFY(!list->viewport()->rect().intersects(list->visualItemRect(first))); // scrolled away, at the bottom
+
+        // The quote is the top of the newest bubble (mine: at the right).
+        QListWidgetItem *last = list->item(list->count() - 1);
+        QCOMPARE(last->data(Qt::UserRole + 1).toLongLong(), reply);
+        const QRect r = list->visualItemRect(last);
+        QTest::mouseClick(list->viewport(), Qt::LeftButton, {}, QPoint(r.right() - 40, r.top() + 4 + 10 + 8));
+        QTRY_COMPARE(window.flashedMessage(), original);
+        first = list->item(0);
+        QVERIFY(first->data(highlightRole).toBool());
+        QVERIFY(list->viewport()->rect().intersects(list->visualItemRect(first)));
+        QTRY_COMPARE_WITH_TIMEOUT(window.flashedMessage(), 0, 3000);
+        QVERIFY(!list->item(0)->data(highlightRole).toBool());
+
+        // What it answered, deleted: nowhere to go.
+        window.deleteMessage(original, false, false);
+        QVERIFY(!window.jumpToQuote(reply));
+        QVERIFY(window.noticeLabel()->isVisible());
+        QCOMPARE(window.flashedMessage(), 0);
+    }
+
+    // Choosing messages and copying them.
+    void copyMessages()
+    {
+        ChatStore store(TestSupport::home() + QStringLiteral("/copy.sqlite"));
+        KeyStore keys(&store);
+        Messenger messenger(&store, &keys);
+        MainWindow window(&store, &messenger);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        const qint64 notes = store.noteToSelf();
+        window.openConversation(notes);
+        for (const char *text : {"first line", "second\nhas two lines", "third"})
+            messenger.send(notes, QString::fromUtf8(text));
+        QListWidget *list = window.messages();
+        QCOMPARE(list->count(), 3);
+        QCOMPARE(list->selectionMode(), QAbstractItemView::ExtendedSelection);
+
+        // One: its text as it is, by Ctrl+C on the list.
+        QTest::mouseClick(list->viewport(), Qt::LeftButton, {}, list->visualItemRect(list->item(1)).center());
+        QVERIFY(list->item(1)->isSelected());
+        QCOMPARE(window.selectedMessagesText(), QStringLiteral("second\nhas two lines"));
+        QGuiApplication::clipboard()->clear();
+        QTest::keyClick(list, Qt::Key_C, Qt::ControlModifier);
+        QCOMPARE(QGuiApplication::clipboard()->text(), QStringLiteral("second\nhas two lines"));
+
+        // All: one line each with the time and who.
+        QTest::keyClick(list, Qt::Key_A, Qt::ControlModifier);
+        const QStringList lines = window.selectedMessagesText().split(QLatin1Char('\n'));
+        QCOMPARE(lines.size(), 4);
+        QVERIFY(lines.at(0).startsWith(QLatin1Char('[')));
+        QVERIFY(lines.at(0).endsWith(QStringLiteral("] You: first line")));
+        QCOMPARE(lines.at(2), QStringLiteral("has two lines"));
+        QVERIFY(lines.at(3).endsWith(QStringLiteral("You: third")));
+        // A message arriving rebuilds the list: the choice stays.
+        messenger.send(notes, QStringLiteral("fourth"));
+        QCOMPARE(list->count(), 4);
+        QCOMPARE(list->selectedItems().size(), 3);
+        QVERIFY(!list->item(3)->isSelected());
+        if (qEnvironmentVariableIsSet("CHAT_TEST_GRAB"))
+            window.grab().save(qEnvironmentVariable("CHAT_TEST_GRAB"));
+
+        // Typing goes on in the field; Esc lets go.
+        QTest::keyClicks(list, QStringLiteral("hi"));
+        QVERIFY(window.composeField()->hasFocus());
+        QCOMPARE(window.composeField()->toPlainText(), QStringLiteral("hi"));
+        list->setFocus();
+        QTest::keyClick(list, Qt::Key_Escape);
+        QVERIFY(list->selectedItems().isEmpty());
+        // A deleted one has nothing to copy.
+        list->item(0)->setSelected(true);
+        window.deleteMessage(list->item(0)->data(Qt::UserRole + 1).toLongLong(), false, false);
+        QCOMPARE(window.selectedMessagesText(), QString());
     }
 
     void findInAConversation()

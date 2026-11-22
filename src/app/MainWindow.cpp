@@ -9,6 +9,7 @@
 
 #include <QAction>
 #include <QCloseEvent>
+#include <QSet>
 #include <QSettings>
 #include <QActionGroup>
 #include <QApplication>
@@ -23,6 +24,7 @@
 #include <QListWidget>
 #include <QLocale>
 #include <QMenuBar>
+#include <QMouseEvent>
 #include <QMessageBox>
 #include <QPainter>
 #include <QPainterPath>
@@ -38,6 +40,8 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 
+#include <algorithm>
+#include <functional>
 #include <memory>
 
 namespace {
@@ -165,10 +169,14 @@ private:
 
 // A message as a bubble: mine at the right in the accent colour, theirs at
 // the left; a picture or a file line on top when it has an attachment, then
-// the text, then the time (and for mine, whether it was sent).
+// the text, then the time (and for mine, whether it was sent). Selected
+// ones (to copy) on a tinted band; a click on a reply's quote calls
+// `quoteClicked`.
 class BubbleDelegate : public QStyledItemDelegate
 {
 public:
+    std::function<void(const QModelIndex &)> quoteClicked;
+
     BubbleDelegate(const Theme *theme, QObject *parent)
         : QStyledItemDelegate(parent)
         , m_theme(theme)
@@ -282,6 +290,36 @@ public:
         return footer;
     }
 
+    static QRect bubbleRect(const QStyleOptionViewItem &option, const QModelIndex &index, const Layout &l)
+    {
+        const bool mine = index.data(OutgoingRole).toBool();
+        return {mine ? option.rect.right() - 14 - l.width : option.rect.left() + 14, option.rect.top() + 4, l.width, l.height};
+    }
+
+    // Where a reply's quote is in the view (empty: none).
+    QRect quoteRect(const QStyleOptionViewItem &option, const QModelIndex &index) const
+    {
+        if (index.data(SystemRole).toBool() || index.data(QuoteAuthorRole).toString().isEmpty())
+            return {};
+        bool read = false;
+        const Layout l = layout(option, index, footerFor(index, &read));
+        return l.quote.translated(bubbleRect(option, index, l).topLeft());
+    }
+
+    bool editorEvent(QEvent *event, QAbstractItemModel *model, const QStyleOptionViewItem &option,
+                     const QModelIndex &index) override
+    {
+        if (event->type() == QEvent::MouseButtonRelease && quoteClicked) {
+            auto *mouse = static_cast<QMouseEvent *>(event);
+            if (mouse->button() == Qt::LeftButton && !(mouse->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier))
+                && quoteRect(option, index).contains(mouse->position().toPoint())) {
+                quoteClicked(index);
+                return true;
+            }
+        }
+        return QStyledItemDelegate::editorEvent(event, model, option, index);
+    }
+
     QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override
     {
         if (index.data(SystemRole).toBool())
@@ -316,8 +354,9 @@ public:
         QFont small = option.font;
         small.setPointSizeF(option.font.pointSizeF() * 0.85);
         const QFontMetrics smallMetrics(small);
-        const QRect bubble(mine ? option.rect.right() - 14 - l.width : option.rect.left() + 14, option.rect.top() + 4,
-                           l.width, l.height);
+        const QRect bubble = bubbleRect(option, index, l);
+        if (option.state & QStyle::State_Selected)
+            p->fillRect(option.rect, m_theme->itemSelected); // chosen to copy
         QPainterPath path;
         path.addRoundedRect(bubble, 16, 16);
         p->fillPath(path, mine ? m_theme->accent : m_theme->pathBg);
@@ -493,9 +532,29 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
     connect(m_safety, &QToolButton::clicked, this, &MainWindow::showSafetyNumber);
     m_messages = new QListWidget(chat);
     m_messages->setObjectName(QStringLiteral("messageList"));
-    m_messages->setItemDelegate(new BubbleDelegate(&m_theme, m_messages));
-    m_messages->setSelectionMode(QAbstractItemView::NoSelection);
-    m_messages->setFocusPolicy(Qt::NoFocus);
+    auto *bubbles = new BubbleDelegate(&m_theme, m_messages);
+    m_messages->setItemDelegate(bubbles);
+    // Chosen with a click (Ctrl/Shift for more, Ctrl+A all) to copy with Ctrl+C.
+    m_messages->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    m_messages->setFocusPolicy(Qt::ClickFocus);
+    m_messages->installEventFilter(this);
+    bubbles->quoteClicked = [this](const QModelIndex &index) {
+        // After the click is over: going there rebuilds the list under it.
+        m_quoteClicked = true;
+        const qint64 reply = index.data(IdRole).toLongLong();
+        QTimer::singleShot(0, this, [this, reply] {
+            m_quoteClicked = false;
+            jumpToQuote(reply);
+        });
+    };
+    m_flashTimer.setSingleShot(true);
+    m_flashTimer.setInterval(1500);
+    connect(&m_flashTimer, &QTimer::timeout, this, [this] {
+        QListWidgetItem *item = messageItem(m_flash);
+        if (item && m_flash != currentFindMatch())
+            item->setData(HighlightRole, false);
+        m_flash = 0;
+    });
     m_messages->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     m_messages->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_messages->setResizeMode(QListView::Adjust);
@@ -505,6 +564,16 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
         QListWidgetItem *item = m_messages->itemAt(pos);
         if (!item)
             return;
+        // On one of several chosen: copy them all.
+        if (item->isSelected() && m_messages->selectedItems().size() > 1) {
+            QMenu menu;
+            QAction *copy = menu.addAction(tr("Copy %n Messages", nullptr, int(m_messages->selectedItems().size())), this,
+                                           &MainWindow::copySelectedMessages);
+            copy->setShortcut(QKeySequence::Copy); // shown; the list's own key does it
+            copy->setObjectName(QStringLiteral("copyMessagesAction"));
+            menu.exec(m_messages->viewport()->mapToGlobal(pos));
+            return;
+        }
         std::unique_ptr<QMenu> menu(messageMenu(item->data(IdRole).toLongLong()));
         if (menu && !menu->isEmpty())
             menu->exec(m_messages->viewport()->mapToGlobal(pos));
@@ -720,6 +789,8 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
             QTimer::singleShot(0, this, &MainWindow::markCurrentRead);
     });
     connect(m_messages, &QListWidget::itemClicked, this, [this](QListWidgetItem *item) {
+        if (m_quoteClicked || QGuiApplication::keyboardModifiers() & (Qt::ControlModifier | Qt::ShiftModifier))
+            return; // going to the quoted one, or choosing several
         const qint64 id = item->data(AttachmentRole).toLongLong();
         const ChatStore::StoredAttachment a = m_store->attachment(id);
         if (id == 0 || a.file.isEmpty())
@@ -937,6 +1008,8 @@ void MainWindow::openConversation(qint64 id)
     if (id != m_current) {
         cancelReply(); // a reply belongs to its conversation
         m_messageLimit = DefaultMessageLimit;
+        m_flash = 0;
+        m_flashTimer.stop();
         stopRecording(false); // a recording belongs to its conversation
         m_player.stop();
         if (m_findBar && m_findBar->isVisible()) {
@@ -1194,6 +1267,11 @@ void MainWindow::showSafetyNumber()
 
 void MainWindow::reloadMessages()
 {
+    // What was chosen stays chosen (a message arriving rebuilds the list).
+    QSet<qint64> chosen;
+    for (const QListWidgetItem *item : m_messages->selectedItems())
+        chosen.insert(item->data(IdRole).toLongLong());
+    QListWidgetItem *flashItem = nullptr;
     m_messages->clear();
     const bool group = m_store->conversation(m_current).kind == QLatin1String("group");
     const qint64 match = currentFindMatch();
@@ -1207,6 +1285,12 @@ void MainWindow::reloadMessages()
             item->setData(HighlightRole, true);
             matchItem = item;
         }
+        if (m.id == m_flash) {
+            item->setData(HighlightRole, true);
+            flashItem = item;
+        }
+        if (chosen.contains(m.id))
+            item->setSelected(true);
         item->setData(OutgoingRole, m.outgoing());
         item->setData(TimeRole, QLocale().toString(m.sentAt.toLocalTime().time(), QLocale::ShortFormat));
         item->setData(StatusRole, m.status);
@@ -1257,13 +1341,80 @@ void MainWindow::reloadMessages()
             item->setToolTip(item->toolTip().isEmpty() ? tip : item->toolTip() + QLatin1Char('\n') + tip);
         }
     }
-    // Searching: the match stays in view; otherwise the newest.
-    if (matchItem) {
+    // Gone to a quoted one, or searching: it stays in view; otherwise the newest.
+    if (flashItem || matchItem) {
         m_messages->doItemsLayout(); // the heights first, or it scrolls to the wrong place
-        m_messages->scrollToItem(matchItem, QAbstractItemView::PositionAtCenter);
+        m_messages->scrollToItem(flashItem ? flashItem : matchItem, QAbstractItemView::PositionAtCenter);
     }
     else
         m_messages->scrollToBottom();
+}
+
+QListWidgetItem *MainWindow::messageItem(qint64 message) const
+{
+    for (int i = 0; message != 0 && i < m_messages->count(); ++i) {
+        if (m_messages->item(i)->data(IdRole).toLongLong() == message)
+            return m_messages->item(i);
+    }
+    return nullptr;
+}
+
+bool MainWindow::jumpToQuote(qint64 reply)
+{
+    const ChatStore::Message m = m_store->message(reply);
+    const qint64 target = m.conversation == m_current && m.isReply() ? m_store->messageByUid(m_current, m.quoteUid) : 0;
+    if (target == 0 || m_store->message(target).deleted) {
+        showNotice(tr("The message this answers is no longer here."));
+        return false;
+    }
+    if (!messageItem(target))
+        m_messageLimit = qMax(m_messageLimit, m_store->messageCount(m_current)); // older than the list holds
+    m_flash = target;
+    reloadMessages();
+    m_flashTimer.start();
+    return true;
+}
+
+QString MainWindow::copyText(const ChatStore::Message &m) const
+{
+    if (m.deleted || m.system)
+        return {};
+    const QList<ChatStore::StoredAttachment> files = m_store->attachments(m.id);
+    QString file;
+    if (!files.isEmpty())
+        file = files.first().voice ? tr("🎤 Voice message") : QStringLiteral("📎 ") + files.first().name;
+    if (m.body.isEmpty())
+        return file;
+    return file.isEmpty() ? m.body : file + QLatin1Char('\n') + m.body;
+}
+
+QString MainWindow::selectedMessagesText() const
+{
+    QList<QListWidgetItem *> items = m_messages->selectedItems();
+    std::sort(items.begin(), items.end(),
+              [this](QListWidgetItem *a, QListWidgetItem *b) { return m_messages->row(a) < m_messages->row(b); });
+    QList<ChatStore::Message> chosen;
+    for (const QListWidgetItem *item : items) {
+        const ChatStore::Message m = m_store->message(item->data(IdRole).toLongLong());
+        if (!copyText(m).isEmpty())
+            chosen << m;
+    }
+    if (chosen.size() == 1)
+        return copyText(chosen.first());
+    QStringList lines;
+    for (const ChatStore::Message &m : chosen) {
+        const QString who = m.outgoing() ? tr("You") : m_messenger ? m_messenger->displayName(m.author) : m.author;
+        lines << QStringLiteral("[%1] %2: %3")
+                     .arg(QLocale().toString(m.sentAt.toLocalTime(), QLocale::ShortFormat), who, copyText(m));
+    }
+    return lines.join(QLatin1Char('\n'));
+}
+
+void MainWindow::copySelectedMessages()
+{
+    const QString text = selectedMessagesText();
+    if (!text.isEmpty())
+        QGuiApplication::clipboard()->setText(text);
 }
 
 void MainWindow::showFind()
@@ -1673,6 +1824,27 @@ void MainWindow::send()
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
+    // The messages: Ctrl+C copies the chosen ones, Esc lets go of them, and
+    // typing goes on in the field.
+    if (watched == m_messages && event->type() == QEvent::KeyPress) {
+        auto *key = static_cast<QKeyEvent *>(event);
+        if (key->matches(QKeySequence::Copy)) {
+            copySelectedMessages();
+            return true;
+        }
+        if (key->key() == Qt::Key_Escape) {
+            m_messages->clearSelection();
+            m_compose->setFocus();
+            return true;
+        }
+        if (!key->text().isEmpty() && key->text().at(0).isPrint()
+            && !(key->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier)) && m_compose->isEnabled()
+            && m_composer->isVisible()) {
+            m_compose->setFocus();
+            QCoreApplication::sendEvent(m_compose, event);
+            return true;
+        }
+    }
     // In the find field: Enter older, Shift+Enter newer, Esc closes.
     if (watched == m_findField && event->type() == QEvent::KeyPress) {
         auto *key = static_cast<QKeyEvent *>(event);
