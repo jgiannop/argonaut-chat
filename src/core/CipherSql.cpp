@@ -7,6 +7,7 @@
 #include <QSqlRecord>
 #include <QVariant>
 
+#include <sodium.h>
 #include <sqlite3.h>
 
 namespace {
@@ -275,6 +276,13 @@ QString password(const QByteArray &key)
     return QStringLiteral("x'") + QString::fromLatin1(key.toHex()) + QLatin1Char('\'');
 }
 
+void wipe(QString &text)
+{
+    if (!text.isEmpty())
+        sodium_memzero(text.data(), size_t(text.size()) * sizeof(QChar)); // data() copies first only if shared
+    text.clear();
+}
+
 bool isPlainSqlite(const QString &file)
 {
     QFile f(file);
@@ -384,10 +392,16 @@ bool CipherSqlDriver::open(const QString &db, const QString &, const QString &pa
         return false;
     }
     sqlite3_busy_timeout(m_db, 5000);
-    const QByteArray keyPragma = QStringLiteral("PRAGMA key = \"%1\";").arg(password).toUtf8();
+    // An encrypted history: SQLCipher locks the memory it takes (so no page
+    // read from the file, and not the key, goes to swap) and wipes it when
+    // done. It holds for the whole process, and costs a little speed.
+    if (!password.isEmpty())
+        run("PRAGMA cipher_memory_security = ON;", QStringLiteral("Unable to secure the memory"));
+    QByteArray keyPragma = QStringLiteral("PRAGMA key = \"%1\";").arg(password).toUtf8();
     // With the key (or none), the file must read: a wrong key reads as rubbish.
-    if ((!password.isEmpty() && !run(keyPragma.constData(), QStringLiteral("Unable to set the key")))
-        || !run("SELECT count(*) FROM sqlite_master;", QStringLiteral("Wrong key, or not a database"))) {
+    const bool keyed = password.isEmpty() || run(keyPragma.constData(), QStringLiteral("Unable to set the key"));
+    sodium_memzero(keyPragma.data(), size_t(keyPragma.size()));
+    if (!keyed || !run("SELECT count(*) FROM sqlite_master;", QStringLiteral("Wrong key, or not a database"))) {
         sqlite3_close_v2(m_db);
         m_db = nullptr;
         setOpenError(true);

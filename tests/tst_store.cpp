@@ -166,6 +166,11 @@ private slots:
             ChatStore store(file, key);
             QVERIFY2(store.isOpen(), qPrintable(store.error()));
             QVERIFY(store.isEncrypted());
+            // SQLCipher locks and wipes its memory (the pages read, the key).
+            QSqlQuery memory(store.database());
+            QVERIFY(memory.exec(QStringLiteral("PRAGMA cipher_memory_security")));
+            QVERIFY(memory.next());
+            QCOMPARE(memory.value(0).toInt(), 1);
             store.addMessage(store.noteToSelf(), QStringLiteral("the secret text"));
             KeyStore keys(&store);
             const KeyStore::Account account{QStringLiteral("alice"), 1, QUrl(QStringLiteral("wss://x")),

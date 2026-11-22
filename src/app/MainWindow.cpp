@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 
 #include "Dialogs.h"
+#include "ImageViewer.h"
 #include "Messenger.h"
 #include "Notifications.h"
 #include "TrayIcon.h"
@@ -55,6 +56,43 @@
 #include <memory>
 
 namespace {
+
+// The composer's 📎 and 🎤, drawn (an emoji font is not everywhere): 24 × 24,
+// in the theme's dim colour, sharp at any scale.
+QIcon composerIcon(bool microphone, const QColor &color, qreal ratio)
+{
+    QPixmap pixmap(QSize(24, 24) * ratio);
+    pixmap.setDevicePixelRatio(ratio);
+    pixmap.fill(Qt::transparent);
+    QPainter p(&pixmap);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setPen(QPen(color, 1.8, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.setBrush(Qt::NoBrush);
+    if (microphone) {
+        p.drawRoundedRect(QRectF(9, 3, 6, 11), 3, 3);
+        QPainterPath cup;
+        cup.moveTo(6, 11);
+        cup.arcTo(QRectF(6, 5, 12, 12), 180, 180);
+        p.drawPath(cup);
+        p.drawLine(QPointF(12, 17), QPointF(12, 20.5));
+        p.drawLine(QPointF(9, 20.5), QPointF(15, 20.5));
+    } else {
+        // A paper clip: drawn upright, then turned.
+        p.translate(12, 12);
+        p.rotate(40);
+        p.translate(-12, -12);
+        QPainterPath clip;
+        clip.moveTo(15.5, 7.5);
+        clip.lineTo(15.5, 16);
+        clip.arcTo(QRectF(8.5, 12.5, 7, 7), 0, -180);
+        clip.lineTo(8.5, 6);
+        clip.arcTo(QRectF(8.5, 3.75, 4.5, 4.5), 180, -180);
+        clip.lineTo(13, 15);
+        p.drawPath(clip);
+    }
+    p.end();
+    return QIcon(pixmap);
+}
 
 enum Role {
     IdRole = Qt::UserRole + 1,
@@ -914,7 +952,7 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
     m_send->setEnabled(false);
     m_attach = new QToolButton(composer);
     m_attach->setObjectName(QStringLiteral("attachButton"));
-    m_attach->setText(QStringLiteral("📎"));
+    m_attach->setIconSize(QSize(24, 24));
     m_attach->setToolTip(tr("Attach files (up to 25 MB each), encrypted; you can paste or drop them here too"));
     m_attach->setCursor(Qt::PointingHandCursor);
     m_attach->setEnabled(m_messenger != nullptr);
@@ -926,11 +964,12 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
     });
     m_voiceButton = new QToolButton(composer);
     m_voiceButton->setObjectName(QStringLiteral("voiceButton"));
-    m_voiceButton->setText(QStringLiteral("🎤"));
+    m_voiceButton->setIconSize(QSize(24, 24));
     m_voiceButton->setToolTip(tr("Record a voice message (up to %1 minutes), encrypted").arg(Voice::MaxSeconds / 60));
     m_voiceButton->setCursor(Qt::PointingHandCursor);
     m_voiceButton->setEnabled(m_messenger != nullptr);
     connect(m_voiceButton, &QToolButton::clicked, this, &MainWindow::startRecording);
+    updateComposerIcons();
     // While recording: in place of the reply bar, the time, Cancel and Send.
     m_recordBar = new QWidget(composer);
     m_recordBar->setObjectName(QStringLiteral("recordBar"));
@@ -1124,6 +1163,7 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
         updateHeader();
     });
     connect(m_store, &ChatStore::messagesChanged, this, [this](qint64 conversation) {
+        closeGoneViewers(); // deleted, expired, or the conversation gone
         if (conversation != m_current)
             return;
         reloadMessages();
@@ -1142,10 +1182,9 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
             toggleVoice(id); // saved from its menu
             return;
         }
-        const QString folder = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
-        const QString path = QFileDialog::getSaveFileName(this, tr("Save"), folder + QLatin1Char('/') + a.name);
-        if (!path.isEmpty())
-            saveAttachment(id, path);
+        if (!item->data(ImageRole).isNull() && viewImage(id))
+            return; // a picture: seen in its window (saved from there or the menu)
+        askToSave(id, this);
     });
     if (m_messenger) {
         connect(m_messenger, &Messenger::attachmentProgress, this, [this](qint64 id, qint64 done, qint64 total) {
@@ -1853,7 +1892,9 @@ void MainWindow::reloadMessages()
                 if (!preview.isNull())
                     item->setData(ImageRole, preview);
                 item->setData(FileRole, fileLine(a, !preview.isNull()));
-                item->setToolTip(a.file.isEmpty() ? QString() : tr("Click to save %1").arg(a.name));
+                item->setToolTip(a.file.isEmpty() ? QString()
+                                 : preview.isNull()  ? tr("Click to save %1").arg(a.name)
+                                                     : tr("Click to view %1").arg(a.name));
             }
         }
         const QList<ChatStore::Reaction> reactions = m_store->reactions(m.id);
@@ -2498,12 +2539,8 @@ QMenu *MainWindow::messageMenu(qint64 message)
     const QList<ChatStore::StoredAttachment> files = m_store->attachments(message);
     if (!files.isEmpty() && !files.first().file.isEmpty()) {
         const ChatStore::StoredAttachment a = files.first();
-        menu->addAction(a.voice ? tr("Save Voice Message…") : tr("Save As…"), this, [this, a] {
-            const QString folder = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
-            const QString path = QFileDialog::getSaveFileName(this, tr("Save"), folder + QLatin1Char('/') + a.name);
-            if (!path.isEmpty())
-                saveAttachment(a.id, path);
-        })->setObjectName(QStringLiteral("saveAttachmentAction"));
+        menu->addAction(a.voice ? tr("Save Voice Message…") : tr("Save As…"), this, [this, a] { askToSave(a.id, this); })
+            ->setObjectName(QStringLiteral("saveAttachmentAction"));
     }
     menu->addSeparator();
     menu->addAction(tr("Delete for Me…"), this, [this, message] { deleteMessage(message, false, true); })
@@ -2581,6 +2618,75 @@ void MainWindow::cancelReply()
     m_editing = 0;
     if (m_replyBar)
         m_replyBar->hide();
+}
+
+void MainWindow::askToSave(qint64 attachment, QWidget *parent)
+{
+    const ChatStore::StoredAttachment a = m_store->attachment(attachment);
+    if (a.file.isEmpty())
+        return;
+    const QString folder = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+    const QString path = QFileDialog::getSaveFileName(parent, tr("Save"), folder + QLatin1Char('/') + a.name);
+    if (!path.isEmpty())
+        saveAttachment(attachment, path);
+}
+
+ImageViewer *MainWindow::viewImage(qint64 attachment)
+{
+    for (const QPointer<ImageViewer> &open : std::as_const(m_viewers)) {
+        if (open && open->attachment() == attachment) {
+            open->show();
+            open->raise();
+            open->activateWindow();
+            return open;
+        }
+    }
+    const ChatStore::StoredAttachment a = m_store->attachment(attachment);
+    if (!m_messenger || a.file.isEmpty() || !a.type.startsWith(QLatin1String("image/")))
+        return nullptr;
+    // Decrypted in memory only, and read like any stranger's file.
+    QImage image;
+    if (const auto data = m_messenger->attachmentData(attachment))
+        image.loadFromData(*data);
+    if (image.isNull()) {
+        showNotice(tr("This picture cannot be shown."));
+        return nullptr;
+    }
+    auto *viewer = new ImageViewer(image, a.name, attachment, this);
+    connect(viewer, &ImageViewer::saveRequested, this, [this, viewer](qint64 id) { askToSave(id, viewer); });
+    m_viewers.removeAll(nullptr);
+    m_viewers.append(viewer);
+    viewer->show();
+    viewer->raise();
+    viewer->activateWindow();
+    return viewer;
+}
+
+QList<ImageViewer *> MainWindow::imageViewers() const
+{
+    QList<ImageViewer *> open;
+    for (const QPointer<ImageViewer> &viewer : m_viewers) {
+        if (viewer)
+            open.append(viewer);
+    }
+    return open;
+}
+
+void MainWindow::closeGoneViewers()
+{
+    for (ImageViewer *viewer : imageViewers()) {
+        if (m_store->attachment(viewer->attachment()).file.isEmpty())
+            viewer->close();
+    }
+}
+
+void MainWindow::updateComposerIcons()
+{
+    if (!m_attach || !m_voiceButton)
+        return;
+    const qreal ratio = devicePixelRatioF();
+    m_attach->setIcon(composerIcon(false, m_theme.dimFg, ratio));
+    m_voiceButton->setIcon(composerIcon(true, m_theme.dimFg, ratio));
 }
 
 bool MainWindow::saveAttachment(qint64 attachment, const QString &path)
@@ -2871,6 +2977,8 @@ void MainWindow::lockNow()
         if (dialog->isVisible())
             dialog->reject();
     }
+    for (ImageViewer *viewer : imageViewers())
+        viewer->close();
     stopRecording(false);
     if (m_messenger && m_current != 0)
         m_messenger->setTyping(m_current, false);
@@ -3135,6 +3243,7 @@ void MainWindow::applyTheme()
     m_themeId = theme.id;
     m_theme = theme;
     setStyleSheet(styleSheetFor(theme));
+    updateComposerIcons();
     m_conversations->viewport()->update();
     m_messages->viewport()->update();
 }

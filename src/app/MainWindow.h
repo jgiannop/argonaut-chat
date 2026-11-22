@@ -7,12 +7,14 @@
 
 #include <QHash>
 #include <QMainWindow>
+#include <QPointer>
 #include <QElapsedTimer>
 #include <QTimer>
 #include <QPixmap>
 
 class Messenger;
 class TrayIcon;
+class ImageViewer;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -77,6 +79,10 @@ public:
     QWidget *attachBar() const { return m_attachBar; }
     // An attachment, decrypted, into `path` (a click on it asks where).
     bool saveAttachment(qint64 attachment, const QString &path);
+    // A picture in its own window (decrypted in memory); null if it is not
+    // here or not a picture. One window per picture.
+    ImageViewer *viewImage(qint64 attachment);
+    QList<ImageViewer *> imageViewers() const;
     // Finds them on the server and opens the conversation (New Chat).
     void startChatWith(const QString &username);
     void showSignUp();
@@ -235,6 +241,10 @@ private:
     TrayIcon *m_tray = nullptr;
     QToolButton *m_attach = nullptr;
     QHash<qint64, QPixmap> m_previews; // attachment -> its picture, decrypted in memory
+    QList<QPointer<ImageViewer>> m_viewers;
+    void closeGoneViewers();
+    void askToSave(qint64 attachment, QWidget *parent);
+    void updateComposerIcons();
     QHash<qint64, int> m_progress;     // attachment -> percent up or down
     QHash<QString, QPixmap> m_avatars; // username -> their picture, small
     QAction *m_profileAction = nullptr;

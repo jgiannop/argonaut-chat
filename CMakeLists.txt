@@ -103,6 +103,7 @@ if(NOT CHAT_SERVER_ONLY)
 qt_add_library(chat_app STATIC
     src/app/DatabaseKey.cpp src/app/DatabaseKey.h
     src/app/Dialogs.cpp src/app/Dialogs.h
+    src/app/ImageViewer.cpp src/app/ImageViewer.h
     src/app/MainWindow.cpp src/app/MainWindow.h
     src/app/Notifications.cpp src/app/Notifications.h
     src/app/SingleInstance.cpp src/app/SingleInstance.h
@@ -182,7 +183,8 @@ history kept only on this computer, encrypted with SQLCipher, its key in the des
     set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
     set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
     set(CPACK_DEBIAN_PACKAGE_DEPENDS "qt6-qpa-plugins")
-    set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "qt6-wayland, gnome-keyring | kwalletmanager")
+    # The emoji font: reactions and a few marks (📌 🔕 ⏱) are emoji.
+    set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "qt6-wayland, gnome-keyring | kwalletmanager, fonts-noto-color-emoji")
     include(CPack)
 endif()
 

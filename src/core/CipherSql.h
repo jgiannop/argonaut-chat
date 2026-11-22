@@ -28,6 +28,8 @@ constexpr int KeySize = 32;
 void registerDriver();
 // The password for a key: x'…' in hex. Empty if the key is not 32 bytes.
 QString password(const QByteArray &key);
+// Zeroes a password's characters, then empties it.
+void wipe(QString &text);
 // The file starts as plain SQLite does ("SQLite format 3").
 bool isPlainSqlite(const QString &file);
 // Encrypts a plain SQLite file in place with `key` (sqlcipher_export).

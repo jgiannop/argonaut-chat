@@ -8,8 +8,8 @@ QWidget#sidebar { background: @sidebar; border-right: 1px solid @border; }
 QLabel#sidebarTitle { color: @fg; font-weight: bold; font-size: 15px; padding: 10px 12px 4px 12px; }
 QLabel#connectionState { color: @dimFg; font-size: 12px; padding: 0 12px 4px 12px; }
 QLabel#notice { color: @fg; background: @pathBg; border-radius: 8px; padding: 6px 8px; margin: 2px 8px 4px 8px; }
-QToolButton#attachButton { background: transparent; border: none; border-radius: 18px; padding: 6px; font-size: 18px; }
-QToolButton#attachButton:hover { background: @hover; }
+QToolButton#attachButton, QToolButton#voiceButton { background: transparent; border: none; border-radius: 18px; padding: 6px; }
+QToolButton#attachButton:hover, QToolButton#voiceButton:hover { background: @hover; }
 QToolButton#safetyNumberButton { color: @fg; background: @pathBg; border: none; border-radius: 8px; padding: 5px 10px; }
 QToolButton#safetyNumberButton:hover { background: @hover; }
 QLineEdit#searchField { background: @pathBg; border: none; border-radius: 8px; padding: 6px 8px; margin: 4px 8px 8px 8px; color: @fg; }

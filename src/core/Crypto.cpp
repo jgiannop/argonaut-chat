@@ -2,6 +2,8 @@
 
 #include <sodium.h>
 
+#include <cstring>
+
 namespace Crypto {
 
 namespace {
@@ -37,6 +39,38 @@ void wipe(QByteArray &array)
     if (!array.isEmpty())
         sodium_memzero(array.data(), size_t(array.size()));
     array.clear();
+}
+
+SecretBytes SecretBytes::allocate(int size)
+{
+    SecretBytes out;
+    if (size <= 0 || !init())
+        return out;
+    auto *memory = static_cast<unsigned char *>(sodium_malloc(size_t(size)));
+    if (!memory)
+        return out;
+    sodium_memzero(memory, size_t(size));
+    // sodium_malloc locks the memory if it can and goes on if not: ask again
+    // to know (locking twice is harmless).
+    out.m_locked = sodium_mlock(memory, size_t(size)) == 0;
+    out.m_data = std::shared_ptr<unsigned char>(memory, [](unsigned char *p) { sodium_free(p); }); // wipes
+    out.m_size = size;
+    return out;
+}
+
+SecretBytes::SecretBytes(const QByteArray &bytes)
+{
+    *this = make(int(bytes.size()), [&bytes](unsigned char *out) {
+        memcpy(out, bytes.constData(), size_t(bytes.size()));
+        return true;
+    });
+}
+
+QByteArray SecretBytes::toByteArray() const
+{
+    if (isEmpty())
+        return {};
+    return QByteArray(reinterpret_cast<const char *>(data()), m_size);
 }
 
 QByteArray sha512(const QByteArray &data)
@@ -116,9 +150,12 @@ IdentityKeyPair IdentityKeyPair::generate()
 {
     init();
     IdentityKeyPair pair;
-    pair.m_public = QByteArray(crypto_sign_PUBLICKEYBYTES, Qt::Uninitialized);
-    pair.m_secret = QByteArray(crypto_sign_SECRETKEYBYTES, Qt::Uninitialized);
-    crypto_sign_keypair(bytes(pair.m_public), bytes(pair.m_secret));
+    QByteArray pub(crypto_sign_PUBLICKEYBYTES, Qt::Uninitialized);
+    pair.m_secret = SecretBytes::make(crypto_sign_SECRETKEYBYTES, [&pub](unsigned char *secret) {
+        return crypto_sign_keypair(bytes(pub), secret) == 0;
+    });
+    if (!pair.m_secret.isEmpty())
+        pair.m_public = pub;
     return pair;
 }
 
@@ -129,16 +166,17 @@ IdentityKeyPair IdentityKeyPair::fromSecretKey(const QByteArray &secretKey)
     if (secretKey.size() != crypto_sign_SECRETKEYBYTES)
         return pair;
     // Made again from its seed: it must give the same key, or it is not one.
-    QByteArray seed(crypto_sign_SEEDBYTES, Qt::Uninitialized);
-    crypto_sign_ed25519_sk_to_seed(bytes(seed), bytes(secretKey));
-    QByteArray pub(crypto_sign_PUBLICKEYBYTES, Qt::Uninitialized);
-    QByteArray secret(crypto_sign_SECRETKEYBYTES, Qt::Uninitialized);
-    crypto_sign_seed_keypair(bytes(pub), bytes(secret), bytes(seed));
-    wipe(seed);
-    if (sodium_memcmp(secret.constData(), secretKey.constData(), size_t(secret.size())) != 0) {
-        wipe(secret);
+    const SecretBytes seed = SecretBytes::make(crypto_sign_SEEDBYTES, [&secretKey](unsigned char *out) {
+        return crypto_sign_ed25519_sk_to_seed(out, bytes(secretKey)) == 0;
+    });
+    if (seed.isEmpty())
         return pair;
-    }
+    QByteArray pub(crypto_sign_PUBLICKEYBYTES, Qt::Uninitialized);
+    const SecretBytes secret = SecretBytes::make(crypto_sign_SECRETKEYBYTES, [&pub, &seed](unsigned char *out) {
+        return crypto_sign_seed_keypair(bytes(pub), out, seed.data()) == 0;
+    });
+    if (secret.isEmpty() || sodium_memcmp(secret.data(), secretKey.constData(), size_t(secret.size())) != 0)
+        return pair;
     pair.m_public = pub;
     pair.m_secret = secret;
     return pair;
@@ -149,7 +187,7 @@ QByteArray IdentityKeyPair::sign(const QByteArray &message) const
     if (!isValid())
         return {};
     QByteArray signature(crypto_sign_BYTES, Qt::Uninitialized);
-    crypto_sign_detached(bytes(signature), nullptr, bytes(message), quint64(message.size()), bytes(m_secret));
+    crypto_sign_detached(bytes(signature), nullptr, bytes(message), quint64(message.size()), m_secret.data());
     return signature;
 }
 
@@ -158,7 +196,7 @@ QByteArray IdentityKeyPair::dhSecretKey() const
     if (!isValid())
         return {};
     QByteArray out(crypto_scalarmult_curve25519_BYTES, Qt::Uninitialized);
-    crypto_sign_ed25519_sk_to_curve25519(bytes(out), bytes(m_secret));
+    crypto_sign_ed25519_sk_to_curve25519(bytes(out), m_secret.data());
     return out;
 }
 

@@ -75,7 +75,9 @@ std::optional<KeyStore::Account> KeyStore::account() const
     account.username = q.value(0).toString();
     account.device = q.value(1).toUInt();
     account.server = QUrl(q.value(2).toString());
-    account.identity = Crypto::IdentityKeyPair::fromSecretKey(q.value(3).toByteArray());
+    QByteArray secret = q.value(3).toByteArray();
+    account.identity = Crypto::IdentityKeyPair::fromSecretKey(secret);
+    Crypto::wipe(secret); // the identity keeps its own, locked copy
     account.registered = q.value(4).toBool();
     if (!account.identity.isValid())
         return std::nullopt;
@@ -91,9 +93,13 @@ bool KeyStore::saveAccount(const Account &account)
     q.addBindValue(account.username);
     q.addBindValue(qint64(account.device));
     q.addBindValue(account.server.toString());
-    q.addBindValue(account.identity.secretKey());
+    QByteArray secret = account.identity.secretKey();
+    q.addBindValue(secret);
     q.addBindValue(account.registered ? 1 : 0);
-    return q.exec();
+    const bool saved = q.exec();
+    q = QSqlQuery(); // lets go of the bound copy, so the wipe reaches the bytes
+    Crypto::wipe(secret);
+    return saved;
 }
 
 bool KeyStore::setRegistered()

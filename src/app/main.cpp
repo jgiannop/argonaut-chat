@@ -1,5 +1,6 @@
 #include "AppLock.h"
 #include "ChatStore.h"
+#include "Crypto.h"
 #include "CipherSql.h"
 #include "DatabaseKey.h"
 #include "KeyStore.h"
@@ -51,12 +52,13 @@ int main(int argc, char **argv)
     // key nothing opens and nothing is changed.
     const QFileInfo info(file);
     const bool encryptedHistory = info.exists() && info.size() > 0 && !CipherSql::isPlainSqlite(file);
-    const DatabaseKey::Result key = DatabaseKey::load(!encryptedHistory);
+    DatabaseKey::Result key = DatabaseKey::load(!encryptedHistory);
     if (key.key.isEmpty()) {
         QMessageBox::critical(nullptr, QObject::tr("Argonaut Chat"), key.error);
         return 1;
     }
     ChatStore store(file, key.key);
+    Crypto::wipe(key.key); // SQLCipher keeps its own, in locked memory
     if (!store.isOpen()) {
         QMessageBox::critical(nullptr, QObject::tr("Argonaut Chat"),
                               QObject::tr("Your history could not be opened: %1").arg(store.error()));

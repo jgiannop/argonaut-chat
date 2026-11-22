@@ -51,8 +51,13 @@ ChatStore::ChatStore(const QString &file, const QByteArray &key, QObject *parent
     }
     m_db = QSqlDatabase::addDatabase(CipherSql::DriverName, m_connection);
     m_db.setDatabaseName(path);
-    m_db.setPassword(CipherSql::password(key));
-    if (!m_db.open()) {
+    QString password = CipherSql::password(key);
+    m_db.setPassword(password);
+    const bool opened = m_db.open();
+    // SQLCipher keeps the key in its own locked memory: no other copy stays.
+    m_db.setPassword(QString());
+    CipherSql::wipe(password);
+    if (!opened) {
         m_error = m_db.lastError().text();
         return;
     }

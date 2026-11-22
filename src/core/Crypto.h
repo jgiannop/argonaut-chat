@@ -3,6 +3,7 @@
 #include <QByteArray>
 #include <QString>
 
+#include <memory>
 #include <optional>
 
 // The few primitives the Signal Protocol's design needs, every one from
@@ -15,8 +16,9 @@
 //     24.04's, has no HKDF of its own)
 //   - XChaCha20-Poly1305 (IETF) to encrypt each message
 //
-// Memory: QByteArray copies are not wiped; wipe() clears the temporaries we
-// own. Locked, wiped memory for the long-term keys comes with the keyring.
+// Memory: the identity secret, which lives as long as the program, is kept in
+// SecretBytes (locked, out of core dumps, wiped). QByteArray copies are not
+// wiped by themselves; wipe() clears the temporaries we own.
 namespace Crypto {
 
 constexpr int KeySize = 32;       // X25519 keys, Ed25519 public keys, chain keys
@@ -30,6 +32,40 @@ bool init();
 QByteArray randomBytes(int count);
 // Zeroes the bytes, then empties the array.
 void wipe(QByteArray &bytes);
+
+// Bytes in libsodium's guarded memory (sodium_malloc): locked so they are
+// never written to swap, left out of core dumps, between guard pages, and
+// wiped when the last copy goes. Copies share the same memory; nothing
+// changes it once made.
+class SecretBytes
+{
+public:
+    SecretBytes() = default;
+    // A copy of `bytes` (the caller wipes its own).
+    explicit SecretBytes(const QByteArray &bytes);
+    // `size` zero bytes for `fill` to write into; empty if it fails.
+    template<typename Fill> static SecretBytes make(int size, Fill fill)
+    {
+        SecretBytes out = allocate(size);
+        if (out.m_size > 0 && !fill(out.m_data.get()))
+            return {};
+        return out;
+    }
+
+    bool isEmpty() const { return m_size == 0; }
+    int size() const { return m_size; }
+    const unsigned char *data() const { return m_data.get(); }
+    // A copy in ordinary memory, for saving or sending: wipe it afterwards.
+    QByteArray toByteArray() const;
+    // Whether the memory is locked (false where the system refused).
+    bool isLocked() const { return m_locked; }
+
+private:
+    static SecretBytes allocate(int size);
+    std::shared_ptr<unsigned char> m_data;
+    int m_size = 0;
+    bool m_locked = false;
+};
 
 QByteArray sha512(const QByteArray &data);
 QByteArray sha256(const QByteArray &data);
@@ -62,7 +98,9 @@ public:
 
     bool isValid() const { return m_public.size() == KeySize; }
     QByteArray publicKey() const { return m_public; } // Ed25519, 32 bytes
-    QByteArray secretKey() const { return m_secret; } // 64 bytes: to keep, never to send
+    // 64 bytes: to keep, never to send. A copy in ordinary memory: wipe it.
+    QByteArray secretKey() const { return m_secret.toByteArray(); }
+    bool isSecretLocked() const { return m_secret.isLocked(); }
     QByteArray sign(const QByteArray &message) const;
     // The same key as X25519, for X3DH.
     QByteArray dhSecretKey() const;
@@ -70,7 +108,7 @@ public:
 
 private:
     QByteArray m_public;
-    QByteArray m_secret;
+    SecretBytes m_secret;
 };
 
 bool verify(const QByteArray &identityKey, const QByteArray &message, const QByteArray &signature);

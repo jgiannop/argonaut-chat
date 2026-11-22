@@ -2,6 +2,7 @@
 #include "ChatStore.h"
 #include "Dialogs.h"
 #include "KeyStore.h"
+#include "ImageViewer.h"
 #include "MainWindow.h"
 #include "Notifications.h"
 #include "Messenger.h"
@@ -1317,6 +1318,41 @@ private slots:
         QFile original(photo), copy(saved);
         QVERIFY(original.open(QIODevice::ReadOnly) && copy.open(QIODevice::ReadOnly));
         QCOMPARE(copy.readAll(), original.readAll());
+
+        // A click shows it in its own window, at its own size (it fits), once.
+        QListWidgetItem *pictureItem = window.messages()->item(1);
+        const QRect row = window.messages()->visualItemRect(pictureItem);
+        QTest::mouseClick(window.messages()->viewport(), Qt::LeftButton, {}, QPoint(row.left() + 60, row.center().y()));
+        QTRY_COMPARE(window.imageViewers().size(), 1);
+        ImageViewer *viewer = window.imageViewers().first();
+        QCOMPARE(viewer->attachment(), attachment);
+        QVERIFY(viewer->isWindow());
+        QVERIFY(viewer->isFitted());
+        QCOMPARE(viewer->zoom(), 1.0);
+        QCOMPARE(window.viewImage(attachment), viewer);
+        QCOMPARE(window.imageViewers().size(), 1);
+        QTest::keyClick(viewer, Qt::Key_Plus);
+        QVERIFY(!viewer->isFitted());
+        QCOMPARE(viewer->zoom(), 1.25);
+        viewer->resize(240, 200); // smaller than the picture: fitted, it shrinks
+        QTest::keyClick(viewer, Qt::Key_0);
+        QTRY_VERIFY(viewer->zoom() < 1.0);
+        QTest::keyClick(viewer, Qt::Key_1);
+        QCOMPARE(viewer->zoom(), 1.0);
+        QTest::keyClick(viewer, Qt::Key_Escape);
+        QTRY_VERIFY(window.imageViewers().isEmpty());
+        // A message deleted takes its window with it.
+        QVERIFY(window.viewImage(attachment));
+        // Locking hides it too.
+        QVERIFY(window.viewImage(attachment));
+        QVERIFY(window.appLock()->set(QString(), QStringLiteral("open sesame"), 0));
+        window.lockNow();
+        QVERIFY(window.isLocked());
+        QTRY_VERIFY(window.imageViewers().isEmpty());
+        QVERIFY(window.unlock(QStringLiteral("open sesame")));
+        store.deleteMessage(store.attachment(attachment).message);
+        QTRY_VERIFY(window.imageViewers().isEmpty());
+        QVERIFY(!window.viewImage(attachment));
         if (qEnvironmentVariableIsSet("CHAT_TEST_GRAB")) {
             window.resize(1000, 640);
             QTest::qWait(200);

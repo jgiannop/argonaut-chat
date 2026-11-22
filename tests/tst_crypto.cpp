@@ -147,6 +147,27 @@ private slots:
         QVERIFY(!Crypto::IdentityKeyPair::fromSecretKey("short").isValid());
     }
 
+    void secretsInLockedMemory()
+    {
+        const QByteArray bytes = Crypto::randomBytes(64);
+        const Crypto::SecretBytes secret(bytes);
+        QCOMPARE(secret.size(), 64);
+        QVERIFY(secret.isLocked());
+        QCOMPARE(secret.toByteArray(), bytes);
+        // Copies share the one locked place.
+        const Crypto::SecretBytes copy = secret;
+        QCOMPARE(copy.data(), secret.data());
+        QVERIFY(Crypto::SecretBytes().isEmpty());
+        QVERIFY(Crypto::SecretBytes(QByteArray()).isEmpty());
+        QVERIFY(Crypto::SecretBytes::make(8, [](unsigned char *) { return false; }).isEmpty());
+
+        // The identity's secret lives there, made or read back.
+        const auto identity = Crypto::IdentityKeyPair::generate();
+        QVERIFY(identity.isSecretLocked());
+        QVERIFY(Crypto::IdentityKeyPair::fromSecretKey(identity.secretKey()).isSecretLocked());
+        QVERIFY(!Crypto::IdentityKeyPair().isSecretLocked());
+    }
+
     void aeadDetectsChanges()
     {
         const QByteArray key = Crypto::randomBytes(32);
