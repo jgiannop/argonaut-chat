@@ -266,6 +266,19 @@ public:
     int profileSentVersion(const QString &username) const;
     void setProfileSent(const QString &username, int version);
 
+    // The app lock (AppLock): its passphrase's hash, the idle minutes before
+    // it locks (0: only by hand), and wrong tries so far, in the encrypted
+    // database so nobody can turn it off by editing a settings file.
+    struct AppLockState
+    {
+        QString hash; // empty: no lock
+        int idleMinutes = 0;
+        int failures = 0;
+        qint64 waitUntil = 0; // ms: no try before then
+    };
+    AppLockState appLock() const;
+    void setAppLock(const AppLockState &state); // an empty hash removes it
+
     // The open database, for KeyStore (the same file).
     QSqlDatabase database() const { return m_db; }
 

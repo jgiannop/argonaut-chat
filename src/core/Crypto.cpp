@@ -247,4 +247,27 @@ std::optional<QByteArray> open(const QByteArray &key, const QByteArray &nonce, c
     return out;
 }
 
+QString hashPassphrase(const QString &passphrase)
+{
+    if (!init())
+        return {};
+    QByteArray utf8 = passphrase.toUtf8();
+    char out[crypto_pwhash_STRBYTES];
+    const int result = crypto_pwhash_str(out, utf8.constData(), quint64(utf8.size()),
+                                         crypto_pwhash_OPSLIMIT_INTERACTIVE, crypto_pwhash_MEMLIMIT_INTERACTIVE);
+    wipe(utf8);
+    return result == 0 ? QString::fromLatin1(out) : QString();
+}
+
+bool verifyPassphrase(const QString &hash, const QString &passphrase)
+{
+    const QByteArray stored = hash.toLatin1();
+    if (!init() || stored.isEmpty() || stored.size() >= crypto_pwhash_STRBYTES)
+        return false;
+    QByteArray utf8 = passphrase.toUtf8();
+    const bool ok = crypto_pwhash_str_verify(stored.constData(), utf8.constData(), quint64(utf8.size())) == 0;
+    wipe(utf8);
+    return ok;
+}
+
 } // namespace Crypto

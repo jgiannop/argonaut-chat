@@ -1,4 +1,5 @@
 #include "Dialogs.h"
+#include "AppLock.h"
 
 #include "ChatStore.h"
 #include "Messenger.h"
@@ -7,6 +8,7 @@
 
 #include <QBuffer>
 #include <QClipboard>
+#include <QComboBox>
 #include <QGuiApplication>
 #include <QDialogButtonBox>
 #include <QFileDialog>
@@ -594,4 +596,87 @@ void DevicesDialog::removeSelected(bool ask)
         dialog->m_message->setText(ok ? tr("Removed.") : error);
         dialog->reload();
     });
+}
+
+AppLockDialog::AppLockDialog(AppLock *lock, QWidget *parent)
+    : QDialog(parent)
+    , m_lock(lock)
+{
+    const bool on = lock->isSet();
+    setWindowTitle(tr("App Lock"));
+    auto *layout = new QVBoxLayout(this);
+    auto *intro = new QLabel(tr("Hides your chats behind a passphrase when you are away: at start, with "
+                                "File › Lock Now (Ctrl+L), and after the time below without a key or click. "
+                                "Messages still arrive; notifications then show no names or text.\n\n"
+                                "It guards against someone at this computer, not against whoever can use "
+                                "your account on it. Forgotten: start argonaut-chat --forget-app-lock."),
+                             this);
+    intro->setWordWrap(true);
+    layout->addWidget(intro);
+    auto *form = new QFormLayout;
+    auto passwordField = [this](const QString &name) {
+        auto *field = new QLineEdit(this);
+        field->setObjectName(name);
+        field->setEchoMode(QLineEdit::Password);
+        return field;
+    };
+    m_current = passwordField(QStringLiteral("currentPassphrase"));
+    m_new = passwordField(QStringLiteral("newPassphrase"));
+    m_repeat = passwordField(QStringLiteral("repeatPassphrase"));
+    if (on)
+        form->addRow(tr("Current passphrase:"), m_current);
+    else
+        m_current->hide();
+    form->addRow(on ? tr("New passphrase (optional):") : tr("Passphrase:"), m_new);
+    form->addRow(tr("Again:"), m_repeat);
+    m_idle = new QComboBox(this);
+    m_idle->setObjectName(QStringLiteral("idleBox"));
+    for (const int minutes : {1, 5, 15, 30, 60})
+        m_idle->addItem(tr("After %n minute(s)", nullptr, minutes), minutes);
+    m_idle->addItem(tr("Only when I lock it"), 0);
+    const int index = m_idle->findData(on ? lock->idleMinutes() : 5);
+    m_idle->setCurrentIndex(index >= 0 ? index : 1);
+    form->addRow(tr("Lock:"), m_idle);
+    layout->addLayout(form);
+    m_error = new QLabel(this);
+    m_error->setObjectName(QStringLiteral("appLockError"));
+    m_error->setWordWrap(true);
+    layout->addWidget(m_error);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, this);
+    m_ok = buttons->addButton(on ? tr("Save") : tr("Turn On"), QDialogButtonBox::AcceptRole);
+    m_ok->setObjectName(QStringLiteral("appLockOk"));
+    m_ok->setDefault(true);
+    m_turnOff = buttons->addButton(tr("Turn Off"), QDialogButtonBox::DestructiveRole);
+    m_turnOff->setObjectName(QStringLiteral("appLockOff"));
+    m_turnOff->setVisible(on);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    connect(m_ok, &QPushButton::clicked, this, &AppLockDialog::save);
+    connect(m_turnOff, &QPushButton::clicked, this, [this] {
+        QString error;
+        if (m_lock->turnOff(m_current->text(), &error))
+            accept();
+        else
+            m_error->setText(error);
+    });
+    (on ? m_current : m_new)->setFocus();
+    resize(440, sizeHint().height());
+}
+
+void AppLockDialog::save()
+{
+    const int minutes = m_idle->currentData().toInt();
+    if (m_new->text() != m_repeat->text()) {
+        m_error->setText(tr("The two passphrases are not the same."));
+        return;
+    }
+    QString error;
+    const bool ok = m_lock->isSet() && m_new->text().isEmpty()
+                        ? m_lock->setIdleMinutes(m_current->text(), minutes, &error)
+                        : m_lock->set(m_current->text(), m_new->text(), minutes, &error);
+    if (!ok) {
+        m_error->setText(error);
+        return;
+    }
+    accept();
 }

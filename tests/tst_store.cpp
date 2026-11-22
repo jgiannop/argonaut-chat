@@ -1,4 +1,6 @@
+#include "AppLock.h"
 #include "ChatStore.h"
+#include "Crypto.h"
 #include "CipherSql.h"
 #include "KeyStore.h"
 #include "TestSupport.h"
@@ -224,6 +226,82 @@ private slots:
     }
 
     // Mute, archive and pin, as Signal's.
+    // The app lock: an Argon2id hash only, wrong tries slowed, kept across restarts.
+    void appLock()
+    {
+        const QString file = TestSupport::home() + QStringLiteral("/lock.sqlite");
+        qint64 clock = 1'000'000;
+        {
+            ChatStore store(file);
+            AppLock lock(&store);
+            lock.setClock([&clock] { return clock; });
+            QVERIFY(!lock.isSet());
+            QVERIFY(lock.check(QStringLiteral("anything"))); // no lock: nothing to check
+            QString error;
+            QVERIFY(!lock.set(QString(), QStringLiteral("short"), 5, &error));
+            QVERIFY(error.contains(QString::number(AppLock::MinLength)));
+            QVERIFY(lock.set(QString(), QStringLiteral("correct horse"), 5));
+            QVERIFY(lock.isSet());
+            QCOMPARE(lock.idleMinutes(), 5);
+            // Kept as a hash, never as it is.
+            const QString hash = store.appLock().hash;
+            QVERIFY(hash.startsWith(QStringLiteral("$argon2id$")));
+            QVERIFY(!hash.contains(QStringLiteral("correct horse")));
+            QVERIFY(Crypto::verifyPassphrase(hash, QStringLiteral("correct horse")));
+            QVERIFY(!Crypto::verifyPassphrase(hash, QStringLiteral("correct horsE")));
+            QVERIFY(!Crypto::verifyPassphrase(QStringLiteral("rubbish"), QStringLiteral("correct horse")));
+            QVERIFY(Crypto::hashPassphrase(QStringLiteral("correct horse")) != hash); // salted
+
+            QVERIFY(lock.check(QStringLiteral("correct horse")));
+            // Wrong ones: four free, the fifth makes the next one wait.
+            for (int i = 1; i < AppLock::MaxFreeTries; ++i) {
+                QVERIFY(!lock.check(QStringLiteral("wrong"), &error));
+                QCOMPARE(error, QStringLiteral("Wrong passphrase."));
+                QCOMPARE(lock.waitMs(), 0);
+            }
+            QVERIFY(!lock.check(QStringLiteral("wrong"), &error));
+            QCOMPARE(lock.waitMs(), AppLock::FirstWaitMs);
+            QVERIFY(error.contains(QStringLiteral("30")));
+            // Even the right one waits.
+            QVERIFY(!lock.check(QStringLiteral("correct horse"), &error));
+            QVERIFY(error.contains(QStringLiteral("wait")));
+        }
+        {
+            // A restart forgets nothing.
+            ChatStore store(file);
+            AppLock lock(&store);
+            lock.setClock([&clock] { return clock; });
+            QCOMPARE(lock.waitMs(), AppLock::FirstWaitMs);
+            clock += AppLock::FirstWaitMs;
+            QVERIFY(!lock.check(QStringLiteral("wrong")));
+            QCOMPARE(lock.waitMs(), 2 * AppLock::FirstWaitMs); // doubling
+            for (int i = 0; i < 10; ++i) {
+                clock += lock.waitMs();
+                QVERIFY(!lock.check(QStringLiteral("wrong")));
+            }
+            QCOMPARE(lock.waitMs(), AppLock::MaxWaitMs); // at most
+            clock += lock.waitMs();
+            QVERIFY(lock.check(QStringLiteral("correct horse")));
+            QCOMPARE(store.appLock().failures, 0);
+
+            // Changing it, the idle time, turning it off: only with it.
+            QString error;
+            QVERIFY(!lock.set(QStringLiteral("wrong"), QStringLiteral("new passphrase"), 1, &error));
+            QVERIFY(lock.set(QStringLiteral("correct horse"), QStringLiteral("new passphrase"), 1));
+            QVERIFY(!lock.check(QStringLiteral("correct horse")));
+            QVERIFY(lock.check(QStringLiteral("new passphrase")));
+            QVERIFY(lock.setIdleMinutes(QStringLiteral("new passphrase"), 0));
+            QCOMPARE(lock.idleMinutes(), 0);
+            QVERIFY(!lock.turnOff(QStringLiteral("wrong")));
+            QVERIFY(lock.isSet());
+            QVERIFY(lock.turnOff(QStringLiteral("new passphrase")));
+            QVERIFY(!lock.isSet());
+            QVERIFY(lock.set(QString(), QStringLiteral("again again"), 5));
+            lock.forget(); // --forget-app-lock
+            QVERIFY(!lock.isSet());
+        }
+    }
+
     void muteArchivePin()
     {
         ChatStore store(TestSupport::home() + QStringLiteral("/pins.sqlite"));

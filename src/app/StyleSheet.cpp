@@ -38,6 +38,10 @@ QToolButton#archivedButton { color: @dimFg; padding: 6px 12px; text-align: left;
 QToolButton#archivedButton:hover { color: @fg; }
 QWidget#attachChip { background: @pathBg; border: 1px solid @border; border-radius: 8px; }
 QLabel#recordLabel { color: #e01b24; font-weight: bold; }
+QWidget#lockScreen { background: @window; }
+QLabel#lockTitle { color: @fg; font-size: 16pt; font-weight: bold; padding: 8px; }
+QLabel#lockMessage { color: #e01b24; padding: 6px; }
+QLineEdit#lockField { background: @pathBg; border: 1px solid @border; border-radius: 8px; padding: 6px 10px; color: @fg; }
 QWidget#findBar { background: @window; border-bottom: 1px solid @border; }
 QLineEdit#findField { background: @pathBg; border: none; border-radius: 8px; padding: 5px 8px; color: @fg; }
 QLabel#findCount { color: @dimFg; padding: 0 6px; }

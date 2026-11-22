@@ -1,5 +1,6 @@
 #pragma once
 
+#include "AppLock.h"
 #include "ChatStore.h"
 #include "Theme.h"
 #include "VoiceAudio.h"
@@ -20,6 +21,7 @@ class QMenu;
 class QToolButton;
 class QPlainTextEdit;
 class QPushButton;
+class QStackedWidget;
 
 // Signal's layout: the conversations at the left (newest first, with the
 // last message and the unread count), the chosen one at the right, its
@@ -73,6 +75,18 @@ public:
     // Finds them on the server and opens the conversation (New Chat).
     void startChatWith(const QString &username);
     void showSignUp();
+
+    // The app lock (File › App Lock…, Lock Now Ctrl+L): the chats hidden
+    // behind a passphrase field, at start, when asked, and after the idle
+    // minutes; menus and shortcuts off meanwhile (Quit stays), nothing marked
+    // read, notifications without names or text. Messages still arrive.
+    bool isLocked() const { return m_locked; }
+    void lockNow();
+    bool unlock(const QString &passphrase); // false: the lock screen says why
+    AppLock *appLock() { return &m_appLock; }
+    QWidget *lockScreen() const { return m_lockScreen; }
+    QAction *lockAction() const { return m_lockAction; }
+    void setIdleLockMsForTests(int ms) { m_idleLockMsForTests = ms; restartIdleLock(); }
 
     TrayIcon *tray() const { return m_tray; }
     // The tray's number: unread messages, a request counting as one.
@@ -193,6 +207,19 @@ private:
 
     ChatStore *m_store;
     Messenger *m_messenger;
+    AppLock m_appLock;
+    bool m_locked = false;
+    QStackedWidget *m_stack = nullptr;
+    QWidget *m_lockScreen = nullptr;
+    QLineEdit *m_lockField = nullptr;
+    QLabel *m_lockMessage = nullptr;
+    QAction *m_lockAction = nullptr;
+    QAction *m_quitAction = nullptr;
+    QTimer m_idleLock;
+    int m_idleLockMsForTests = 0;
+    void restartIdleLock();
+    void updateLockAction();
+    void showAppLockSettings();
     QLabel *m_connection = nullptr;
     QLabel *m_notice = nullptr;
     QToolButton *m_safety = nullptr;

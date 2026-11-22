@@ -188,6 +188,12 @@ void ChatStore::createTables()
                           " avatar BLOB,"
                           " pending_avatar TEXT NOT NULL DEFAULT '',"
                           " updated INTEGER NOT NULL)"));
+    q.exec(QStringLiteral("CREATE TABLE IF NOT EXISTS app_lock ("
+                          " id INTEGER PRIMARY KEY CHECK (id = 1),"
+                          " hash TEXT NOT NULL,"
+                          " idle_minutes INTEGER NOT NULL DEFAULT 0,"
+                          " failures INTEGER NOT NULL DEFAULT 0,"
+                          " wait_until INTEGER NOT NULL DEFAULT 0)"));
     q.exec(QStringLiteral("CREATE TABLE IF NOT EXISTS profile_sent ("
                           " username TEXT PRIMARY KEY,"
                           " version INTEGER NOT NULL)"));
@@ -437,6 +443,35 @@ void ChatStore::deleteConversation(qint64 conversation)
     m_db.commit();
     emit messagesChanged(conversation);
     emit conversationsChanged();
+}
+
+ChatStore::AppLockState ChatStore::appLock() const
+{
+    AppLockState state;
+    QSqlQuery q(m_db);
+    if (q.exec(QStringLiteral("SELECT hash, idle_minutes, failures, wait_until FROM app_lock WHERE id = 1")) && q.next()) {
+        state.hash = q.value(0).toString();
+        state.idleMinutes = q.value(1).toInt();
+        state.failures = q.value(2).toInt();
+        state.waitUntil = q.value(3).toLongLong();
+    }
+    return state;
+}
+
+void ChatStore::setAppLock(const AppLockState &state)
+{
+    QSqlQuery q(m_db);
+    if (state.hash.isEmpty()) {
+        q.exec(QStringLiteral("DELETE FROM app_lock"));
+        return;
+    }
+    q.prepare(QStringLiteral("INSERT OR REPLACE INTO app_lock (id, hash, idle_minutes, failures, wait_until)"
+                             " VALUES (1, ?, ?, ?, ?)"));
+    q.addBindValue(state.hash);
+    q.addBindValue(state.idleMinutes);
+    q.addBindValue(state.failures);
+    q.addBindValue(state.waitUntil);
+    q.exec();
 }
 
 void ChatStore::block(const QString &username)

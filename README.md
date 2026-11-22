@@ -48,6 +48,10 @@ program: [docs/how-signal-works.md](docs/how-signal-works.md).
   you then don't see others' either.
 - **@mentions in groups**: type @ and pick a member; a mention of you
   notifies even in a muted group.
+- **App lock** (File › App Lock…): your chats hidden behind a passphrase at
+  start, with Ctrl+L, and after some idle minutes; notifications then show
+  no names or text. It guards against someone at your computer while you
+  are away. Forgotten: `argonaut-chat --forget-app-lock`.
 - **Groups** of up to 50 (File › New Group…): kept by their members, each
   message encrypted for each member; the server cannot tell a group exists.
   Its creator adds and removes people; anyone can leave.
@@ -114,8 +118,8 @@ In this order (agreed 2026-11-22):
    mlkem-native (`third_party/mlkem-native`); existing conversations keep
    working. New conversations need both sides on 0.3 or later, and the
    server updated first.
-3. **Locking the app**: after some idle minutes or on demand, the window
-   hides the chats until a passphrase is typed.
+3. **Locking the app** (done, not released yet): after some idle minutes
+   or on demand, the window hides the chats until a passphrase is typed.
 
 Later: voice and video calls, moving history to a new linked computer,
 smaller voice messages (Opus).

@@ -11,6 +11,7 @@
 #include <QApplication>
 #include <QBuffer>
 #include <QClipboard>
+#include <QComboBox>
 #include <QMimeData>
 #include <QUrl>
 #include <QDir>
@@ -27,6 +28,7 @@
 
 #include <memory>
 #include <QPlainTextEdit>
+#include <QMenuBar>
 #include <QTest>
 
 class TestMainWindow : public QObject
@@ -311,6 +313,114 @@ private slots:
         QVERIFY(!later.readReceipts());
         again.readReceiptsAction()->setChecked(true);
         QVERIFY(later.readReceipts());
+    }
+
+    // The app lock: set in its dialog; at start, by hand and when idle the
+    // chats are hidden until the passphrase; menus and shortcuts off meanwhile.
+    void appLock()
+    {
+        ChatStore store(TestSupport::home() + QStringLiteral("/applock.sqlite"));
+        KeyStore keys(&store);
+        Messenger messenger(&store, &keys);
+        const qint64 anna = store.addConversation(QStringLiteral("direct"), QStringLiteral("anna"), QStringLiteral("anna"));
+        store.setAccepted(anna);
+        store.addMessage(anna, QStringLiteral("secret plans"), QStringLiteral("anna"));
+        {
+            MainWindow window(&store, &messenger);
+            window.show();
+            QVERIFY(QTest::qWaitForWindowExposed(&window));
+            QVERIFY(!window.isLocked());
+            QVERIFY(!window.lockAction()->isEnabled()); // no lock yet
+            window.lockNow();
+            QVERIFY(!window.isLocked());
+
+            // Turned on in its dialog: the two must match, and be long enough.
+            AppLockDialog dialog(window.appLock(), &window);
+            QVERIFY(dialog.currentField()->isHidden());
+            QVERIFY(dialog.turnOffButton()->isHidden());
+            dialog.newField()->setText(QStringLiteral("open sesame"));
+            dialog.repeatField()->setText(QStringLiteral("open sesamE"));
+            dialog.okButton()->click();
+            QVERIFY(dialog.errorLabel()->text().contains(QStringLiteral("not the same")));
+            dialog.repeatField()->setText(QStringLiteral("open sesame"));
+            dialog.idleBox()->setCurrentIndex(dialog.idleBox()->findData(15));
+            dialog.okButton()->click();
+            QCOMPARE(dialog.result(), int(QDialog::Accepted));
+            QVERIFY(window.appLock()->isSet());
+            QCOMPARE(window.appLock()->idleMinutes(), 15);
+        }
+        // Started again: locked at once, nothing of the chats showing.
+        MainWindow window(&store, &messenger);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QVERIFY(window.isLocked());
+        QVERIFY(window.lockScreen()->isVisible());
+        QVERIFY(!window.conversations()->isVisible());
+        QVERIFY(!window.messages()->isVisible());
+        QVERIFY(!window.menuBar()->isVisible());
+        QVERIFY(window.lockAction()->isEnabled());
+        // Nothing marked read while locked; notifications without who or what.
+        window.openConversation(anna);
+        QCOMPARE(store.conversation(anna).unread, 1);
+        QSignalSpy notified(&window, &MainWindow::notified);
+        emit messenger.messageReceived(anna, QStringLiteral("anna"), QStringLiteral("meet at 5"), false, false);
+        QCOMPARE(notified.size(), 1);
+        QCOMPARE(notified.at(0).at(1).toString(), QStringLiteral("Argonaut Chat"));
+        QCOMPARE(notified.at(0).at(2).toString(), QStringLiteral("New message"));
+        // Shortcuts do nothing (Ctrl+F would open the find bar).
+        QTest::keyClick(&window, Qt::Key_F, Qt::ControlModifier);
+        QVERIFY(window.findBar()->isHidden());
+        if (qEnvironmentVariableIsSet("CHAT_TEST_GRAB")) {
+            window.resize(1000, 640);
+            QTest::qWait(200);
+            window.grab().save(qEnvironmentVariable("CHAT_TEST_GRAB"));
+        }
+
+        // A wrong passphrase: still locked, and it says so; then the right one.
+        auto *field = window.lockScreen()->findChild<QLineEdit *>(QStringLiteral("lockField"));
+        auto *message = window.lockScreen()->findChild<QLabel *>(QStringLiteral("lockMessage"));
+        QVERIFY(field && message);
+        field->setText(QStringLiteral("wrong"));
+        QTest::keyClick(field, Qt::Key_Return);
+        QVERIFY(window.isLocked());
+        QCOMPARE(message->text(), QStringLiteral("Wrong passphrase."));
+        QVERIFY(field->text().isEmpty());
+        field->setText(QStringLiteral("open sesame"));
+        QTest::keyClick(field, Qt::Key_Return);
+        QVERIFY(!window.isLocked());
+        QVERIFY(window.conversations()->isVisible());
+        QVERIFY(window.menuBar()->isVisible());
+        QTRY_COMPARE(store.conversation(anna).unread, 0); // seen now
+
+        // Ctrl+L locks; a dialog open then closes.
+        window.activateWindow();
+        QTRY_VERIFY(window.isActiveWindow());
+        QTest::keyClick(window.composeField(), Qt::Key_L, Qt::ControlModifier);
+        QVERIFY(window.isLocked());
+        QVERIFY(window.unlock(QStringLiteral("open sesame")));
+        auto *dialog = new AppLockDialog(window.appLock(), &window);
+        dialog->show();
+        window.lockNow();
+        QVERIFY(!dialog->isVisible());
+        QVERIFY(window.unlock(QStringLiteral("open sesame")));
+
+        // Idle: locked after the time without a key or click; a key starts it again.
+        window.setIdleLockMsForTests(400);
+        QTest::qWait(250);
+        QTest::keyClick(window.composeField(), Qt::Key_A);
+        QTest::qWait(250);
+        QVERIFY(!window.isLocked());
+        QTRY_VERIFY_WITH_TIMEOUT(window.isLocked(), 2000);
+        QVERIFY(window.unlock(QStringLiteral("open sesame")));
+
+        // Turned off in the dialog, with the passphrase only.
+        AppLockDialog off(window.appLock(), &window);
+        QVERIFY(off.currentField()->isVisible() || !off.currentField()->isHidden());
+        off.turnOffButton()->click();
+        QVERIFY(window.appLock()->isSet()); // no passphrase given
+        off.currentField()->setText(QStringLiteral("open sesame"));
+        off.turnOffButton()->click();
+        QVERIFY(!window.appLock()->isSet());
     }
 
     // @mentions in a group: "@" lists the members, one picked is sent as a mention.

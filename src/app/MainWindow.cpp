@@ -37,6 +37,7 @@
 #include <QPushButton>
 #include <QScrollBar>
 #include <QSplitter>
+#include <QStackedWidget>
 #include <QStyledItemDelegate>
 #include <QRegularExpression>
 #include <QTextBlock>
@@ -623,6 +624,7 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
     : QMainWindow(parent)
     , m_store(store)
     , m_messenger(messenger)
+    , m_appLock(store)
     , m_theme(currentTheme())
 {
     setWindowTitle(tr("Argonaut Chat"));
@@ -957,7 +959,48 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
     split->addWidget(chat);
     split->setStretchFactor(1, 1);
     split->setSizes({300, 700});
-    setCentralWidget(split);
+    // The app lock: in place of everything while locked.
+    m_lockScreen = new QWidget(this);
+    m_lockScreen->setObjectName(QStringLiteral("lockScreen"));
+    auto *lockLayout = new QVBoxLayout(m_lockScreen);
+    lockLayout->addStretch(2);
+    auto *lockIcon = new QLabel(m_lockScreen);
+    lockIcon->setPixmap(applicationIcon().pixmap(96, 96));
+    lockIcon->setAlignment(Qt::AlignCenter);
+    lockLayout->addWidget(lockIcon);
+    auto *lockTitle = new QLabel(tr("Argonaut Chat is locked"), m_lockScreen);
+    lockTitle->setObjectName(QStringLiteral("lockTitle"));
+    lockTitle->setAlignment(Qt::AlignCenter);
+    lockLayout->addWidget(lockTitle);
+    auto *lockRow = new QHBoxLayout;
+    lockRow->addStretch();
+    m_lockField = new QLineEdit(m_lockScreen);
+    m_lockField->setObjectName(QStringLiteral("lockField"));
+    m_lockField->setEchoMode(QLineEdit::Password);
+    m_lockField->setPlaceholderText(tr("Passphrase"));
+    m_lockField->setFixedWidth(260);
+    auto *unlockButton = new QPushButton(tr("Unlock"), m_lockScreen);
+    unlockButton->setObjectName(QStringLiteral("unlockButton"));
+    unlockButton->setDefault(true);
+    lockRow->addWidget(m_lockField);
+    lockRow->addWidget(unlockButton);
+    lockRow->addStretch();
+    lockLayout->addLayout(lockRow);
+    m_lockMessage = new QLabel(m_lockScreen);
+    m_lockMessage->setObjectName(QStringLiteral("lockMessage"));
+    m_lockMessage->setAlignment(Qt::AlignCenter);
+    lockLayout->addWidget(m_lockMessage);
+    lockLayout->addStretch(3);
+    auto tryUnlock = [this] { unlock(m_lockField->text()); };
+    connect(m_lockField, &QLineEdit::returnPressed, this, tryUnlock);
+    connect(unlockButton, &QPushButton::clicked, this, tryUnlock);
+    m_stack = new QStackedWidget(this);
+    m_stack->addWidget(split);
+    m_stack->addWidget(m_lockScreen);
+    setCentralWidget(m_stack);
+    m_idleLock.setSingleShot(true);
+    connect(&m_idleLock, &QTimer::timeout, this, &MainWindow::lockNow);
+    qApp->installEventFilter(this); // any key or click restarts the idle time
 
     connect(m_send, &QPushButton::clicked, this, &MainWindow::send);
     connect(m_compose, &QPlainTextEdit::cursorPositionChanged, this, &MainWindow::updateMentionList);
@@ -1079,6 +1122,8 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
     updateUnread();
     if (m_conversations->count() > 0)
         m_conversations->setCurrentRow(0);
+    updateLockAction();
+    lockNow(); // locked from the start, when there is a lock
 }
 
 void MainWindow::buildMenus()
@@ -1113,8 +1158,13 @@ void MainWindow::buildMenus()
         dialog.exec();
     });
     file->addSeparator();
+    file->addAction(tr("App Lock…"), this, &MainWindow::showAppLockSettings)->setObjectName(QStringLiteral("appLockAction"));
+    m_lockAction = file->addAction(tr("Lock Now"), this, &MainWindow::lockNow);
+    m_lockAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_L));
+    file->addSeparator();
     QAction *quit = file->addAction(tr("Quit"), this, &MainWindow::quit);
     quit->setShortcut(QKeySequence::Quit);
+    m_quitAction = quit;
 
     QMenu *conversation = menuBar()->addMenu(tr("&Conversation"));
     QAction *find = conversation->addAction(tr("Find in Conversation…"), this, &MainWindow::showFind);
@@ -1411,8 +1461,8 @@ void MainWindow::openConversation(qint64 id)
 
 void MainWindow::markCurrentRead()
 {
-    if (m_current == 0)
-        return;
+    if (m_current == 0 || m_locked)
+        return; // locked: nobody sees it
     if (m_messenger)
         m_messenger->markRead(m_current);
     else
@@ -2472,6 +2522,22 @@ void MainWindow::send()
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
+    // The app lock: someone at the keyboard or the mouse restarts the idle
+    // time; while locked, no shortcut works but Quit.
+    switch (event->type()) {
+    case QEvent::KeyPress:
+    case QEvent::MouseButtonPress:
+    case QEvent::Wheel:
+        if (!m_locked && m_idleLock.isActive())
+            m_idleLock.start();
+        break;
+    case QEvent::Shortcut:
+        if (m_locked && watched != m_quitAction)
+            return true;
+        break;
+    default:
+        break;
+    }
     // Files or a picture dropped on the conversation: to send, as on the field.
     if (m_messages && watched == m_messages->viewport()) {
         if (event->type() == QEvent::DragEnter || event->type() == QEvent::DragMove) {
@@ -2563,6 +2629,77 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
         }
     }
     return QMainWindow::eventFilter(watched, event);
+}
+
+void MainWindow::updateLockAction()
+{
+    m_lockAction->setEnabled(m_appLock.isSet());
+    restartIdleLock();
+}
+
+void MainWindow::restartIdleLock()
+{
+    const int minutes = m_appLock.isSet() ? m_appLock.idleMinutes() : 0;
+    const int ms = m_idleLockMsForTests > 0 ? m_idleLockMsForTests : minutes * 60 * 1000;
+    if (m_locked || !m_appLock.isSet() || ms <= 0)
+        m_idleLock.stop();
+    else
+        m_idleLock.start(ms);
+}
+
+void MainWindow::lockNow()
+{
+    if (m_locked || !m_appLock.isSet())
+        return;
+    m_locked = true;
+    m_idleLock.stop();
+    // Nothing of the chats left showing: open menus and dialogs close, a
+    // recording is cancelled.
+    while (QWidget *popup = QApplication::activePopupWidget())
+        popup->close();
+    for (QDialog *dialog : findChildren<QDialog *>()) {
+        if (dialog->isVisible())
+            dialog->reject();
+    }
+    stopRecording(false);
+    if (m_messenger && m_current != 0)
+        m_messenger->setTyping(m_current, false);
+    m_stack->setCurrentWidget(m_lockScreen);
+    menuBar()->hide(); // nothing to open while locked (Ctrl+Q and the tray still quit)
+    m_lockField->clear();
+    m_lockMessage->clear();
+    m_lockField->setFocus();
+}
+
+bool MainWindow::unlock(const QString &passphrase)
+{
+    if (!m_locked)
+        return true;
+    QString error;
+    const bool ok = m_appLock.check(passphrase, &error);
+    m_lockField->clear();
+    if (!ok) {
+        m_lockMessage->setText(error);
+        return false;
+    }
+    m_locked = false;
+    m_lockMessage->clear();
+    m_stack->setCurrentIndex(0);
+    menuBar()->show();
+    restartIdleLock();
+    if (isActiveWindow())
+        markCurrentRead(); // what came meanwhile is seen now
+    m_compose->setFocus();
+    return true;
+}
+
+void MainWindow::showAppLockSettings()
+{
+    if (m_locked)
+        return;
+    AppLockDialog dialog(&m_appLock, this);
+    dialog.exec();
+    updateLockAction();
 }
 
 QString MainWindow::mentionLabel(const QString &username, const QStringList &members) const
@@ -2694,8 +2831,8 @@ QList<Protocol::Mention> MainWindow::composedMentions(const QString &text) const
 
 void MainWindow::notify(qint64 conversation, const QString &from, const QString &text, bool request, bool mentionsMe)
 {
-    // In front of them already: nothing to say.
-    if (isActiveWindow() && !isMinimized() && conversation == m_current)
+    // In front of them already: nothing to say (unless locked: then nobody sees it).
+    if (isActiveWindow() && !isMinimized() && conversation == m_current && !m_locked)
         return;
     // Their chosen name; for a request, with the username too (anyone can choose any name).
     if (m_store->conversation(conversation).isMuted() && !mentionsMe)
@@ -2705,7 +2842,11 @@ void MainWindow::notify(qint64 conversation, const QString &from, const QString 
     const ChatStore::Conversation c = m_store->conversation(conversation);
     if (c.kind == QLatin1String("group"))
         shownName = QStringLiteral("%1 · %2").arg(c.title, shownName);
-    const auto shown = Notifications::make(Notifications::saved(), shownName, text, request);
+    // Locked: who wrote and what stay hidden, whatever the setting.
+    Notifications::Content content = Notifications::saved();
+    if (m_locked && content != Notifications::Content::Off)
+        content = Notifications::Content::Nothing;
+    const auto shown = Notifications::make(content, shownName, text, request);
     if (!shown)
         return;
     m_lastNotified = conversation;

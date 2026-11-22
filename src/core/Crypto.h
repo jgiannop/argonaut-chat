@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QString>
 
 #include <optional>
 
@@ -89,5 +90,11 @@ QByteArray seal(const QByteArray &key, const QByteArray &nonce, const QByteArray
 // Nothing if the ciphertext or the associated data were changed.
 std::optional<QByteArray> open(const QByteArray &key, const QByteArray &nonce, const QByteArray &ciphertext,
                                const QByteArray &associatedData);
+
+// Passphrases (the app lock): libsodium's Argon2id with its "interactive"
+// limits (64 MiB, a fraction of a second), salted, in its own text form
+// ("$argon2id$v=19$m=…"). Never the passphrase itself.
+QString hashPassphrase(const QString &passphrase); // empty if it could not be made
+bool verifyPassphrase(const QString &hash, const QString &passphrase);
 
 } // namespace Crypto

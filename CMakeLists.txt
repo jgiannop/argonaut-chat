@@ -78,6 +78,7 @@ set_target_properties(chat_mlkem PROPERTIES C_STANDARD 99 POSITION_INDEPENDENT_C
 
 # The messenger's engine: no widgets, so all of it can be tested headless.
 qt_add_library(chat_core STATIC
+    src/core/AppLock.cpp src/core/AppLock.h
     src/core/Attachment.cpp src/core/Attachment.h
     src/core/ChatClient.cpp src/core/ChatClient.h
     src/core/ChatStore.cpp src/core/ChatStore.h

@@ -2,7 +2,9 @@
 
 #include <QDialog>
 
+class AppLock;
 class Messenger;
+class QComboBox;
 class QDialogButtonBox;
 class QImage;
 class QLabel;
@@ -174,4 +176,34 @@ private:
     Messenger *m_messenger;
     QListWidget *m_list = nullptr;
     QPushButton *m_unblock = nullptr;
+};
+
+// File › App Lock…: a passphrase (twice) and the idle time to turn it on;
+// once on, the current passphrase to change either or to turn it off.
+class AppLockDialog : public QDialog
+{
+    Q_OBJECT
+
+public:
+    explicit AppLockDialog(AppLock *lock, QWidget *parent = nullptr);
+
+    QLineEdit *currentField() const { return m_current; }
+    QLineEdit *newField() const { return m_new; }
+    QLineEdit *repeatField() const { return m_repeat; }
+    QComboBox *idleBox() const { return m_idle; }
+    QLabel *errorLabel() const { return m_error; }
+    QPushButton *okButton() const { return m_ok; }
+    QPushButton *turnOffButton() const { return m_turnOff; }
+
+private:
+    void save();
+
+    AppLock *m_lock;
+    QLineEdit *m_current = nullptr;
+    QLineEdit *m_new = nullptr;
+    QLineEdit *m_repeat = nullptr;
+    QComboBox *m_idle = nullptr;
+    QLabel *m_error = nullptr;
+    QPushButton *m_ok = nullptr;
+    QPushButton *m_turnOff = nullptr;
 };

@@ -1,3 +1,4 @@
+#include "AppLock.h"
 #include "ChatStore.h"
 #include "CipherSql.h"
 #include "DatabaseKey.h"
@@ -16,6 +17,7 @@
 int main(int argc, char **argv)
 {
     // Asked before anything starts (an install's check).
+    bool forgetAppLock = false;
     for (int i = 1; i < argc; ++i) {
         const QByteArray arg(argv[i]);
         if (arg == "--version") {
@@ -23,9 +25,12 @@ int main(int argc, char **argv)
             return 0;
         }
         if (arg == "--help") {
-            std::printf("Usage: argonaut-chat\nA private messenger in C++ and Qt, from the makers of Argonaut.\n");
+            std::printf("Usage: argonaut-chat [--forget-app-lock]\nA private messenger in C++ and Qt, from the makers of "
+                        "Argonaut.\n\n  --forget-app-lock  turn the app lock off (a forgotten passphrase)\n");
             return 0;
         }
+        if (arg == "--forget-app-lock")
+            forgetAppLock = true;
     }
     QApplication app(argc, argv);
     QApplication::setOrganizationName(QStringLiteral("Argonaut"));
@@ -56,6 +61,11 @@ int main(int argc, char **argv)
         QMessageBox::critical(nullptr, QObject::tr("Argonaut Chat"),
                               QObject::tr("Your history could not be opened: %1").arg(store.error()));
         return 1;
+    }
+    if (forgetAppLock) {
+        // Whoever can run this can read the database too: the lock never guarded against them.
+        AppLock(&store).forget();
+        std::printf("The app lock is off.\n");
     }
     KeyStore keys(&store);
     Messenger messenger(&store, &keys);
