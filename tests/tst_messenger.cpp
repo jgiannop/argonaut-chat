@@ -10,6 +10,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QSignalSpy>
+#include <QSqlQuery>
 #include <QTemporaryDir>
 #include <QTest>
 
@@ -352,6 +353,49 @@ private slots:
         QVERIFY(restart());
         QTRY_COMPARE_WITH_TIMEOUT(serverKey(), 9999u, kWait);
         QTRY_VERIFY_WITH_TIMEOUT(bob.keys->signedPreKeys().last().uploaded, kWait);
+    }
+
+    // PQXDH is required: someone still without KEM prekeys (a version before)
+    // can't be written to until they update; their app makes them at once.
+    void upgradingToPqxdh()
+    {
+        Device alice(file("alice"));
+        Device bob(file("bob"));
+        QVERIFY(signUp(alice, "alice"));
+        QVERIFY(signUp(bob, "bob"));
+        // Bob as on 0.2.1: no KEM prekeys, here or on the server.
+        bob.messenger->stop();
+        QSqlQuery q(bob.store->database());
+        QVERIFY(q.exec("UPDATE signed_prekeys SET kem_public = NULL, kem_secret = NULL, kem_signature = NULL"));
+        QVERIFY(!bob.keys->latestSignedPreKey()->hasKem());
+        Protocol::PublicSignedPreKey old = Protocol::publicPart(*bob.keys->latestSignedPreKey());
+        QVERIFY(old.kemKey.isEmpty());
+        QVERIFY(m_serverStore->setSignedPreKey("bob", 1, old));
+        while (m_serverStore->takeBundle("bob", 1)->oneTimePreKeyId) {
+        } // his one-time ones used up
+
+        // Alice is told why, and nothing is started (no X3DH instead).
+        QString error;
+        QCOMPARE(startConversation(alice, "bob", &error), 0);
+        QVERIFY2(error.contains("older version"), qPrintable(error));
+        QVERIFY(!alice.keys->session("bob", 1));
+
+        // Bob's app updated: on sign-in a new signed prekey, with its KEM prekey.
+        bob.messenger->start();
+        QTRY_COMPARE_WITH_TIMEOUT(bob.messenger->state(), Messenger::State::Online, kWait);
+        QTRY_VERIFY_WITH_TIMEOUT(!m_serverStore->takeBundle("bob", 1, false)->signedKemKey.isEmpty(), kWait);
+        QTRY_VERIFY_WITH_TIMEOUT(bob.keys->signedPreKeys().last().uploaded, kWait);
+        QVERIFY(bob.keys->latestSignedPreKey()->hasKem());
+        // Now it starts, with the last-resort KEM prekey (no one-time ones left), and works.
+        const qint64 toBob = startConversation(alice, "bob", &error);
+        QVERIFY2(toBob > 0, qPrintable(error));
+        alice.messenger->send(toBob, "post-quantum hello");
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("alice") > 0, kWait);
+        const qint64 toAlice = bob.store->directConversation("alice");
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(toAlice), QString("post-quantum hello"), kWait);
+        bob.messenger->acceptRequest(toAlice);
+        bob.messenger->send(toAlice, "hello back");
+        QTRY_COMPARE_WITH_TIMEOUT(alice.last(toBob), QString("hello back"), kWait);
     }
 
     void files()

@@ -321,7 +321,7 @@ QJsonObject ChatServer::registerAccount(QWebSocket *socket, Client &client, cons
         || !signature)
         return signInFailed(socket, client, QStringLiteral("bad-request"), QStringLiteral("Malformed keys."));
     if (!Crypto::verify(*identityKey, Protocol::authMessage(nonce, username, 1), *signature)
-        || !Crypto::verify(*identityKey, signedPreKey->key, signedPreKey->signature))
+        || !Protocol::verifyPreKeys(*identityKey, signedPreKey, *oneTimePreKeys))
         return signInFailed(socket, client, QStringLiteral("denied"), QStringLiteral("A signature does not match."));
     if (!m_store->createAccount(username, *identityKey, *signedPreKey))
         return fail(QStringLiteral("taken"), QStringLiteral("That username is taken."));
@@ -476,14 +476,14 @@ QJsonObject ChatServer::prekeys(const Client &client, const QJsonObject &request
         signedPreKey = Protocol::signedPreKeyFromJson(signedValue);
         if (!signedPreKey)
             return badRequest(QStringLiteral("Malformed signed prekey."));
-        const QByteArray identityKey = m_store->identityKey(client.username, client.device);
-        if (!Crypto::verify(identityKey, signedPreKey->key, signedPreKey->signature))
-            return fail(QStringLiteral("denied"), QStringLiteral("The signature does not match."));
     }
     const auto oneTime =
         Protocol::oneTimePreKeysFromJson(oneTimeValue.isUndefined() ? QJsonValue(QJsonArray()) : oneTimeValue);
     if (!oneTime)
         return badRequest(QStringLiteral("Malformed one-time prekeys."));
+    // Every signature (the KEM prekeys' too) by this device's identity key.
+    if (!Protocol::verifyPreKeys(m_store->identityKey(client.username, client.device), signedPreKey, *oneTime))
+        return fail(QStringLiteral("denied"), QStringLiteral("The signature does not match."));
     if (signedPreKey)
         m_store->setSignedPreKey(client.username, client.device, *signedPreKey);
     if (!oneTime->isEmpty())
@@ -599,7 +599,7 @@ QJsonObject ChatServer::addDevice(QWebSocket *socket, Client &client, const QJso
     const QList<quint32> devices = m_store->devices(username);
     if (devices.isEmpty() || m_store->identityKey(username, devices.first()) != *identityKey
         || !Crypto::verify(*identityKey, Protocol::authMessage(nonce, username, 0), *signature)
-        || !Crypto::verify(*identityKey, signedPreKey->key, signedPreKey->signature))
+        || !Protocol::verifyPreKeys(*identityKey, signedPreKey, *oneTimePreKeys))
         return signInFailed(socket, client, QStringLiteral("denied"), QStringLiteral("Linking refused."));
     if (devices.size() >= MaxDevices)
         return fail(QStringLiteral("too-many-devices"),

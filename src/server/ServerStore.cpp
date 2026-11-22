@@ -89,6 +89,20 @@ void ServerStore::createTables()
                           " key BLOB NOT NULL,"
                           " PRIMARY KEY (username, device, id),"
                           " FOREIGN KEY (username, device) REFERENCES devices(username, device) ON DELETE CASCADE)"));
+    // Added with PQXDH: the KEM prekeys (NULL for devices on a version before).
+    const auto addColumns = [this](const QString &table, const QStringList &added) {
+        QStringList columns;
+        QSqlQuery info(m_db);
+        info.exec(QStringLiteral("PRAGMA table_info(%1)").arg(table));
+        while (info.next())
+            columns << info.value(1).toString();
+        for (const QString &column : added) {
+            if (!columns.contains(column))
+                QSqlQuery(m_db).exec(QStringLiteral("ALTER TABLE %1 ADD COLUMN %2 BLOB").arg(table, column));
+        }
+    };
+    addColumns(QStringLiteral("devices"), {QStringLiteral("signed_kem_key"), QStringLiteral("signed_kem_signature")});
+    addColumns(QStringLiteral("one_time_prekeys"), {QStringLiteral("kem_key"), QStringLiteral("kem_signature")});
     q.exec(QStringLiteral("CREATE TABLE IF NOT EXISTS queue ("
                           " id INTEGER PRIMARY KEY AUTOINCREMENT,"
                           " to_user TEXT NOT NULL,"
@@ -225,13 +239,16 @@ bool ServerStore::createAccount(const QString &username, const QByteArray &ident
         return false;
     }
     q.prepare(QStringLiteral("INSERT INTO devices (username, device, identity_key, signed_prekey_id, signed_prekey,"
-                             " signed_prekey_signature, created) VALUES (?, 1, ?, ?, ?, ?, ?)"));
+                             " signed_prekey_signature, created, signed_kem_key, signed_kem_signature)"
+                             " VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)"));
     q.addBindValue(username);
     q.addBindValue(identityKey);
     q.addBindValue(qint64(signedPreKey.id));
     q.addBindValue(signedPreKey.key);
     q.addBindValue(signedPreKey.signature);
     q.addBindValue(now);
+    q.addBindValue(signedPreKey.kemKey);
+    q.addBindValue(signedPreKey.kemSignature);
     if (!q.exec()) {
         m_db.rollback();
         return false;
@@ -265,11 +282,13 @@ QByteArray ServerStore::identityKey(const QString &username, quint32 device) con
 bool ServerStore::setSignedPreKey(const QString &username, quint32 device, const Protocol::PublicSignedPreKey &key)
 {
     QSqlQuery q(m_db);
-    q.prepare(QStringLiteral("UPDATE devices SET signed_prekey_id = ?, signed_prekey = ?, signed_prekey_signature = ?"
-                             " WHERE username = ? AND device = ?"));
+    q.prepare(QStringLiteral("UPDATE devices SET signed_prekey_id = ?, signed_prekey = ?, signed_prekey_signature = ?,"
+                             " signed_kem_key = ?, signed_kem_signature = ? WHERE username = ? AND device = ?"));
     q.addBindValue(qint64(key.id));
     q.addBindValue(key.key);
     q.addBindValue(key.signature);
+    q.addBindValue(key.kemKey);
+    q.addBindValue(key.kemSignature);
     q.addBindValue(username);
     q.addBindValue(qint64(device));
     return q.exec() && q.numRowsAffected() == 1;
@@ -281,12 +300,15 @@ bool ServerStore::addOneTimePreKeys(const QString &username, quint32 device,
     if (!m_db.transaction())
         return false;
     QSqlQuery q(m_db);
-    q.prepare(QStringLiteral("INSERT OR REPLACE INTO one_time_prekeys (username, device, id, key) VALUES (?, ?, ?, ?)"));
+    q.prepare(QStringLiteral("INSERT OR REPLACE INTO one_time_prekeys (username, device, id, key, kem_key, kem_signature)"
+                             " VALUES (?, ?, ?, ?, ?, ?)"));
     for (const Protocol::PublicOneTimePreKey &key : keys) {
         q.bindValue(0, username);
         q.bindValue(1, qint64(device));
         q.bindValue(2, qint64(key.id));
         q.bindValue(3, key.key);
+        q.bindValue(4, key.kemKey);
+        q.bindValue(5, key.kemSignature);
         if (!q.exec()) {
             m_db.rollback();
             return false;
@@ -320,8 +342,8 @@ int ServerStore::oneTimePreKeyCount(const QString &username, quint32 device) con
 std::optional<X3dh::PreKeyBundle> ServerStore::takeBundle(const QString &username, quint32 device, bool withOneTime)
 {
     QSqlQuery q(m_db);
-    q.prepare(QStringLiteral("SELECT identity_key, signed_prekey_id, signed_prekey, signed_prekey_signature"
-                             " FROM devices WHERE username = ? AND device = ?"));
+    q.prepare(QStringLiteral("SELECT identity_key, signed_prekey_id, signed_prekey, signed_prekey_signature,"
+                             " signed_kem_key, signed_kem_signature FROM devices WHERE username = ? AND device = ?"));
     q.addBindValue(username);
     q.addBindValue(qint64(device));
     if (!q.exec() || !q.next())
@@ -331,15 +353,19 @@ std::optional<X3dh::PreKeyBundle> ServerStore::takeBundle(const QString &usernam
     bundle.signedPreKeyId = q.value(1).toUInt();
     bundle.signedPreKey = q.value(2).toByteArray();
     bundle.signature = q.value(3).toByteArray();
+    bundle.signedKemKey = q.value(4).toByteArray();
+    bundle.signedKemSignature = q.value(5).toByteArray();
 
-    q.prepare(QStringLiteral("SELECT rowid, id, key FROM one_time_prekeys WHERE username = ? AND device = ?"
-                             " ORDER BY rowid LIMIT 1"));
+    q.prepare(QStringLiteral("SELECT rowid, id, key, kem_key, kem_signature FROM one_time_prekeys"
+                             " WHERE username = ? AND device = ? ORDER BY rowid LIMIT 1"));
     q.addBindValue(username);
     q.addBindValue(qint64(device));
     if (withOneTime && q.exec() && q.next()) {
         const qint64 rowid = q.value(0).toLongLong();
         bundle.oneTimePreKeyId = q.value(1).toUInt();
         bundle.oneTimePreKey = q.value(2).toByteArray();
+        bundle.oneTimeKemKey = q.value(3).toByteArray();
+        bundle.oneTimeKemSignature = q.value(4).toByteArray();
         QSqlQuery del(m_db);
         del.prepare(QStringLiteral("DELETE FROM one_time_prekeys WHERE rowid = ?"));
         del.addBindValue(rowid);
@@ -431,7 +457,8 @@ quint32 ServerStore::addDevice(const QString &username, const QByteArray &identi
         return 0;
     const quint32 device = q.value(0).toUInt();
     q.prepare(QStringLiteral("INSERT INTO devices (username, device, identity_key, signed_prekey_id, signed_prekey,"
-                             " signed_prekey_signature, created) VALUES (?, ?, ?, ?, ?, ?, ?)"));
+                             " signed_prekey_signature, created, signed_kem_key, signed_kem_signature)"
+                             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"));
     q.addBindValue(username);
     q.addBindValue(qint64(device));
     q.addBindValue(identityKey);
@@ -439,6 +466,8 @@ quint32 ServerStore::addDevice(const QString &username, const QByteArray &identi
     q.addBindValue(signedPreKey.key);
     q.addBindValue(signedPreKey.signature);
     q.addBindValue(QDateTime::currentMSecsSinceEpoch());
+    q.addBindValue(signedPreKey.kemKey);
+    q.addBindValue(signedPreKey.kemSignature);
     return q.exec() ? device : 0;
 }
 

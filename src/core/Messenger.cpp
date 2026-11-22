@@ -87,7 +87,7 @@ void Messenger::signUp(const QUrl &server, const QString &username, const Done &
         return;
     }
     const X3dh::SignedPreKey signedPreKey = X3dh::makeSignedPreKey(account.identity, m_keys->takePreKeyIds(1));
-    m_signUpPreKeys = X3dh::makeOneTimePreKeys(m_keys->takePreKeyIds(PreKeyBatch), PreKeyBatch);
+    m_signUpPreKeys = X3dh::makeOneTimePreKeys(account.identity, m_keys->takePreKeyIds(PreKeyBatch), PreKeyBatch);
     m_keys->addSignedPreKey(signedPreKey, now(), true); // sent with the sign-up
     m_keys->addOneTimePreKeys(m_signUpPreKeys);
     m_account = account;
@@ -246,7 +246,8 @@ void Messenger::replenishPreKeys()
 {
     if (m_state != State::Online || m_replenishing || m_serverPreKeys >= PreKeyLowWater)
         return;
-    const QList<X3dh::OneTimePreKey> keys = X3dh::makeOneTimePreKeys(m_keys->takePreKeyIds(PreKeyBatch), PreKeyBatch);
+    const QList<X3dh::OneTimePreKey> keys =
+        X3dh::makeOneTimePreKeys(m_account->identity, m_keys->takePreKeyIds(PreKeyBatch), PreKeyBatch);
     m_keys->addOneTimePreKeys(keys);
     m_replenishing = true;
     m_client.uploadPreKeys({}, Protocol::publicParts(keys), [this](const ChatClient::Result &result) {
@@ -280,9 +281,12 @@ void Messenger::rotateSignedPreKey()
             m_keys->removeSignedPreKey(keys.at(i).id);
     }
 
-    // The newest: made if it is time, uploaded if the server does not have it yet.
+    // The newest: made if it is time (or it is from before PQXDH: no KEM
+    // prekey, so nobody could start a conversation with this device),
+    // uploaded if the server does not have it yet.
     std::optional<X3dh::SignedPreKey> latest = m_keys->latestSignedPreKey();
-    const bool due = keys.isEmpty() || time - keys.last().created >= SignedPreKeyLifetimeMs;
+    const bool due = keys.isEmpty() || time - keys.last().created >= SignedPreKeyLifetimeMs || !latest
+                     || !latest->hasKem();
     if (latest && !due && keys.last().uploaded)
         return;
     if (!latest || due) {
@@ -368,7 +372,12 @@ void Messenger::fetchSessions(const QString &to, const Done &done)
             QString error;
             const auto session = Session::initiate(m_account->identity, bundle.bundle, &error);
             if (!session) {
-                done(false, tr("Their keys are not right (%1).").arg(error));
+                // No KEM prekey: a version before PQXDH, which is required (no X3DH fallback).
+                done(false, error == QLatin1String(X3dh::NoKemError)
+                                ? tr("%1 has an older version of Argonaut Chat. New conversations now start with "
+                                     "post-quantum encryption: ask them to update it.")
+                                      .arg(to)
+                                : tr("Their keys are not right (%1).").arg(error));
                 return;
             }
             m_keys->saveSession(to, bundle.device, *session);
@@ -1879,7 +1888,8 @@ void Messenger::onProvision(const QByteArray &sealed)
     KeyStore::Account account{name, 0, m_account->server, identity, false};
     m_keys->saveAccount(account);
     const X3dh::SignedPreKey signedPreKey = X3dh::makeSignedPreKey(identity, m_keys->takePreKeyIds(1));
-    const QList<X3dh::OneTimePreKey> preKeys = X3dh::makeOneTimePreKeys(m_keys->takePreKeyIds(PreKeyBatch), PreKeyBatch);
+    const QList<X3dh::OneTimePreKey> preKeys =
+        X3dh::makeOneTimePreKeys(identity, m_keys->takePreKeyIds(PreKeyBatch), PreKeyBatch);
     m_keys->addSignedPreKey(signedPreKey, now(), true);
     m_keys->addOneTimePreKeys(preKeys);
     m_account = account;

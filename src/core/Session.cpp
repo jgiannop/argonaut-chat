@@ -5,7 +5,8 @@
 
 namespace {
 
-constexpr quint32 kSerialMagic = 0x41535331; // "ASS1"
+constexpr quint32 kSerialMagic = 0x41535332;   // "ASS2": with PQXDH's ciphertext
+constexpr quint32 kSerialMagicV1 = 0x41535331; // "ASS1": before PQXDH
 
 } // namespace
 
@@ -24,6 +25,8 @@ std::optional<Session> Session::initiate(const Crypto::IdentityKeyPair &me, cons
     session.m_localIdentity = me.publicKey();
     session.m_signedPreKeyId = start->signedPreKeyId;
     session.m_oneTimePreKeyId = start->oneTimePreKeyId;
+    session.m_kemCiphertext = start->kemCiphertext;
+    session.m_kemLastResort = start->kemLastResort;
     if (!session.isValid())
         return std::nullopt;
     return session;
@@ -34,7 +37,8 @@ std::optional<Session::Accepted> Session::accept(const Crypto::IdentityKeyPair &
                                                  const SignedPreKeyLookup &signedPreKey,
                                                  const OneTimePreKeyLookup &oneTimePreKey)
 {
-    if (!message.preKey || !signedPreKey)
+    // PQXDH only: an X3DH start (an older version, or someone stripping the KEM) is refused.
+    if (!message.isPqxdh() || !signedPreKey)
         return std::nullopt;
     const std::optional<X3dh::SignedPreKey> signedKey = signedPreKey(message.signedPreKeyId);
     if (!signedKey)
@@ -48,8 +52,14 @@ std::optional<Session::Accepted> Session::accept(const Crypto::IdentityKeyPair &
         if (!oneTimeKey)
             return std::nullopt;
     }
-    const auto answer =
-        X3dh::respond(me, *signedKey, oneTimeKey ? &*oneTimeKey : nullptr, message.identityKey, message.baseKey);
+    // The KEM prekey it names: the one-time prekey's, or the signed prekey's last-resort one.
+    if (!message.kemLastResort && !oneTimeKey)
+        return std::nullopt;
+    const MlKem::KeyPair &kem = message.kemLastResort ? signedKey->kemPair : oneTimeKey->kemPair;
+    if (!kem.isValid())
+        return std::nullopt;
+    const auto answer = X3dh::respond(me, *signedKey, oneTimeKey ? &*oneTimeKey : nullptr, kem.secretKey,
+                                      message.kemCiphertext, message.identityKey, message.baseKey);
     if (!answer)
         return std::nullopt;
 
@@ -80,6 +90,8 @@ QByteArray Session::encrypt(const QByteArray &plaintext)
         message.baseKey = m_baseKey;
         message.signedPreKeyId = m_signedPreKeyId;
         message.oneTimePreKeyId = m_oneTimePreKeyId;
+        message.kemCiphertext = m_kemCiphertext;
+        message.kemLastResort = m_kemLastResort;
     }
     return Protocol::encodeCipherMessage(message);
 }
@@ -105,7 +117,8 @@ QByteArray Session::serialize() const
     QDataStream out(&data, QIODevice::WriteOnly);
     out.setVersion(QDataStream::Qt_6_4);
     out << kSerialMagic << m_ratchet.serialize() << m_remoteIdentity << m_baseKey << m_pendingPreKey
-        << m_localIdentity << m_signedPreKeyId << bool(m_oneTimePreKeyId) << m_oneTimePreKeyId.value_or(0);
+        << m_localIdentity << m_signedPreKeyId << bool(m_oneTimePreKeyId) << m_oneTimePreKeyId.value_or(0)
+        << m_kemCiphertext << m_kemLastResort;
     return data;
 }
 
@@ -119,11 +132,14 @@ Session Session::deserialize(const QByteArray &data)
     quint32 oneTimeId = 0;
     Session session;
     in >> magic;
-    if (magic != kSerialMagic)
+    if (magic != kSerialMagic && magic != kSerialMagicV1)
         return {};
     in >> ratchet >> session.m_remoteIdentity >> session.m_baseKey >> session.m_pendingPreKey
         >> session.m_localIdentity >> session.m_signedPreKeyId >> hasOneTime >> oneTimeId;
-    if (in.status() != QDataStream::Ok || !in.atEnd())
+    if (magic == kSerialMagic)
+        in >> session.m_kemCiphertext >> session.m_kemLastResort;
+    if (in.status() != QDataStream::Ok || !in.atEnd()
+        || (!session.m_kemCiphertext.isEmpty() && session.m_kemCiphertext.size() != MlKem::CiphertextSize))
         return {};
     session.m_ratchet = RatchetSession::deserialize(ratchet);
     if (hasOneTime)

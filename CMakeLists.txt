@@ -64,6 +64,18 @@ qt_standard_project_setup()
 
 include(GNUInstallDirs)
 
+# ML-KEM-1024 for PQXDH: mlkem-native, copied unchanged into third_party
+# (its README says which release), one C file, randomness from libsodium.
+enable_language(C)
+add_library(chat_mlkem STATIC
+    third_party/mlkem-native/mlkem/mlkem_native.c
+    src/core/mlkem_randombytes.c
+)
+target_include_directories(chat_mlkem PUBLIC third_party/mlkem-native/mlkem third_party/mlkem-native)
+target_compile_definitions(chat_mlkem PUBLIC MLK_CONFIG_FILE="chat_mlkem_config.h")
+target_link_libraries(chat_mlkem PRIVATE chat_sodium)
+set_target_properties(chat_mlkem PROPERTIES C_STANDARD 99 POSITION_INDEPENDENT_CODE ON)
+
 # The messenger's engine: no widgets, so all of it can be tested headless.
 qt_add_library(chat_core STATIC
     src/core/Attachment.cpp src/core/Attachment.h
@@ -73,6 +85,7 @@ qt_add_library(chat_core STATIC
     src/core/Crypto.cpp src/core/Crypto.h
     src/core/KeyStore.cpp src/core/KeyStore.h
     src/core/Messenger.cpp src/core/Messenger.h
+    src/core/MlKem.cpp src/core/MlKem.h
     src/core/Protocol.cpp src/core/Protocol.h
     src/core/RatchetSession.cpp src/core/RatchetSession.h
     src/core/SafetyNumber.cpp src/core/SafetyNumber.h
@@ -81,7 +94,7 @@ qt_add_library(chat_core STATIC
     src/core/X3dh.cpp src/core/X3dh.h
 )
 target_include_directories(chat_core PUBLIC src/core)
-target_link_libraries(chat_core PUBLIC Qt6::Core Qt6::Network Qt6::Sql Qt6::WebSockets PRIVATE chat_sodium chat_sqlcipher)
+target_link_libraries(chat_core PUBLIC Qt6::Core Qt6::Network Qt6::Sql Qt6::WebSockets PRIVATE chat_sodium chat_sqlcipher chat_mlkem)
 target_compile_definitions(chat_core PUBLIC CHAT_VERSION="${PROJECT_VERSION}")
 
 if(NOT CHAT_SERVER_ONLY)

@@ -16,7 +16,11 @@ namespace {
 
 constexpr char kMessage = 1;
 constexpr char kPreKeyMessage = 2;
+constexpr char kPqxdhPreKeyMessage = 3;
 constexpr int kPreKeyHeaderSize = 1 + 32 + 32 + 4 + 1 + 4;
+constexpr int kPqxdhHeaderSize = kPreKeyHeaderSize + 1 + MlKem::CiphertextSize;
+constexpr char kKemOneTime = 1;
+constexpr char kKemLastResort = 2;
 // Envelope times and sent times: up to the year 9999.
 constexpr qint64 kMaxTime = 253402300799999;
 
@@ -83,22 +87,79 @@ using Json::base64;
 
 PublicSignedPreKey publicPart(const X3dh::SignedPreKey &key)
 {
-    return {key.id, key.pair.publicKey, key.signature};
+    PublicSignedPreKey out{key.id, key.pair.publicKey, key.signature, {}, {}};
+    if (key.hasKem()) {
+        out.kemKey = key.kemPair.publicKey;
+        out.kemSignature = key.kemSignature;
+    }
+    return out;
 }
 
 QList<PublicOneTimePreKey> publicParts(const QList<X3dh::OneTimePreKey> &keys)
 {
     QList<PublicOneTimePreKey> out;
-    for (const X3dh::OneTimePreKey &key : keys)
-        out.append({key.id, key.pair.publicKey});
+    for (const X3dh::OneTimePreKey &key : keys) {
+        PublicOneTimePreKey part{key.id, key.pair.publicKey, {}, {}};
+        if (key.hasKem()) {
+            part.kemKey = key.kemPair.publicKey;
+            part.kemSignature = key.kemSignature;
+        }
+        out.append(part);
+    }
     return out;
 }
 
+bool verifyPreKeys(const QByteArray &identityKey, const std::optional<PublicSignedPreKey> &signedPreKey,
+                   const QList<PublicOneTimePreKey> &oneTimePreKeys)
+{
+    if (signedPreKey
+        && (!Crypto::verify(identityKey, signedPreKey->key, signedPreKey->signature)
+            || (!signedPreKey->kemKey.isEmpty()
+                && !Crypto::verify(identityKey, X3dh::kemSigned(signedPreKey->kemKey), signedPreKey->kemSignature))))
+        return false;
+    for (const PublicOneTimePreKey &key : oneTimePreKeys) {
+        if (!key.kemKey.isEmpty() && !Crypto::verify(identityKey, X3dh::kemSigned(key.kemKey), key.kemSignature))
+            return false;
+    }
+    return true;
+}
+
+namespace {
+
+// A KEM prekey and its signature into `object`, if there is one.
+void insertKem(QJsonObject &object, const QByteArray &kemKey, const QByteArray &kemSignature)
+{
+    if (kemKey.isEmpty())
+        return;
+    object.insert(QStringLiteral("kemKey"), base64(kemKey));
+    object.insert(QStringLiteral("kemSignature"), base64(kemSignature));
+}
+
+// Both or neither, of the right sizes. False: malformed.
+bool readKem(const QJsonObject &object, QByteArray *kemKey, QByteArray *kemSignature)
+{
+    const QJsonValue key = object.value(QStringLiteral("kemKey"));
+    const QJsonValue signature = object.value(QStringLiteral("kemSignature"));
+    if (key.isUndefined() && signature.isUndefined())
+        return true;
+    const auto k = Json::bytes(key, MlKem::PublicKeySize);
+    const auto s = Json::bytes(signature, Crypto::SignatureSize);
+    if (!k || !s)
+        return false;
+    *kemKey = *k;
+    *kemSignature = *s;
+    return true;
+}
+
+} // namespace
+
 QJsonObject signedPreKeyToJson(const PublicSignedPreKey &key)
 {
-    return {{QStringLiteral("id"), double(key.id)},
-            {QStringLiteral("key"), base64(key.key)},
-            {QStringLiteral("signature"), base64(key.signature)}};
+    QJsonObject out{{QStringLiteral("id"), double(key.id)},
+                    {QStringLiteral("key"), base64(key.key)},
+                    {QStringLiteral("signature"), base64(key.signature)}};
+    insertKem(out, key.kemKey, key.kemSignature);
+    return out;
 }
 
 std::optional<PublicSignedPreKey> signedPreKeyFromJson(const QJsonValue &json)
@@ -111,14 +172,20 @@ std::optional<PublicSignedPreKey> signedPreKeyFromJson(const QJsonValue &json)
     const auto signature = Json::bytes(object.value(QStringLiteral("signature")), Crypto::SignatureSize);
     if (!id || !key || !signature)
         return std::nullopt;
-    return PublicSignedPreKey{*id, *key, *signature};
+    PublicSignedPreKey out{*id, *key, *signature, {}, {}};
+    if (!readKem(object, &out.kemKey, &out.kemSignature))
+        return std::nullopt;
+    return out;
 }
 
 QJsonArray oneTimePreKeysToJson(const QList<PublicOneTimePreKey> &keys)
 {
     QJsonArray out;
-    for (const PublicOneTimePreKey &key : keys)
-        out.append(QJsonObject{{QStringLiteral("id"), double(key.id)}, {QStringLiteral("key"), base64(key.key)}});
+    for (const PublicOneTimePreKey &key : keys) {
+        QJsonObject item{{QStringLiteral("id"), double(key.id)}, {QStringLiteral("key"), base64(key.key)}};
+        insertKem(item, key.kemKey, key.kemSignature);
+        out.append(item);
+    }
     return out;
 }
 
@@ -136,7 +203,10 @@ std::optional<QList<PublicOneTimePreKey>> oneTimePreKeysFromJson(const QJsonValu
             if (other.id == *id)
                 return std::nullopt;
         }
-        keys.append({*id, *key});
+        PublicOneTimePreKey part{*id, *key, {}, {}};
+        if (!readKem(item.toObject(), &part.kemKey, &part.kemSignature))
+            return std::nullopt;
+        keys.append(part);
     }
     return keys;
 }
@@ -815,12 +885,21 @@ QByteArray encodeCipherMessage(const CipherMessage &message)
     } else {
         if (message.identityKey.size() != Crypto::KeySize || message.baseKey.size() != Crypto::KeySize)
             return {};
-        out += kPreKeyMessage;
+        const bool pqxdh = !message.kemCiphertext.isEmpty();
+        if (pqxdh
+            && (message.kemCiphertext.size() != MlKem::CiphertextSize
+                || (!message.kemLastResort && !message.oneTimePreKeyId)))
+            return {};
+        out += pqxdh ? kPqxdhPreKeyMessage : kPreKeyMessage;
         out += message.identityKey;
         out += message.baseKey;
         appendUint32(out, message.signedPreKeyId);
         out += char(message.oneTimePreKeyId ? 1 : 0);
         appendUint32(out, message.oneTimePreKeyId.value_or(0));
+        if (pqxdh) {
+            out += message.kemLastResort ? kKemLastResort : kKemOneTime;
+            out += message.kemCiphertext;
+        }
     }
     out += message.ratchetMessage;
     if (out.size() > MaxCipherMessageBytes)
@@ -837,7 +916,8 @@ std::optional<CipherMessage> decodeCipherMessage(const QByteArray &data)
         message.ratchetMessage = data.mid(1);
         return message;
     }
-    if (data.at(0) != kPreKeyMessage || data.size() <= kPreKeyHeaderSize)
+    const bool pqxdh = data.at(0) == kPqxdhPreKeyMessage;
+    if ((data.at(0) != kPreKeyMessage && !pqxdh) || data.size() <= (pqxdh ? kPqxdhHeaderSize : kPreKeyHeaderSize))
         return std::nullopt;
     const char *p = data.constData() + 1;
     message.preKey = true;
@@ -850,7 +930,17 @@ std::optional<CipherMessage> decodeCipherMessage(const QByteArray &data)
         message.oneTimePreKeyId = oneTimeId;
     else if (hasOneTime != 0 || oneTimeId != 0)
         return std::nullopt;
-    message.ratchetMessage = data.mid(kPreKeyHeaderSize);
+    if (!pqxdh) {
+        message.ratchetMessage = data.mid(kPreKeyHeaderSize);
+        return message;
+    }
+    // Which KEM prekey: the one-time prekey's (there must be one), or the last-resort one.
+    const char kem = data.at(kPreKeyHeaderSize);
+    if ((kem != kKemOneTime && kem != kKemLastResort) || (kem == kKemOneTime && !message.oneTimePreKeyId))
+        return std::nullopt;
+    message.kemLastResort = kem == kKemLastResort;
+    message.kemCiphertext = data.mid(kPreKeyHeaderSize + 1, MlKem::CiphertextSize);
+    message.ratchetMessage = data.mid(kPqxdhHeaderSize);
     return message;
 }
 
@@ -863,10 +953,16 @@ QJsonObject bundleToJson(const X3dh::PreKeyBundle &bundle)
                      {QStringLiteral("key"), base64(bundle.signedPreKey)},
                      {QStringLiteral("signature"), base64(bundle.signature)}}},
     };
+    if (!bundle.signedKemKey.isEmpty()) {
+        QJsonObject signedKey = json.value(QStringLiteral("signedPreKey")).toObject();
+        insertKem(signedKey, bundle.signedKemKey, bundle.signedKemSignature);
+        json.insert(QStringLiteral("signedPreKey"), signedKey);
+    }
     if (bundle.oneTimePreKeyId) {
-        json.insert(QStringLiteral("oneTimePreKey"),
-                    QJsonObject{{QStringLiteral("id"), double(*bundle.oneTimePreKeyId)},
-                                {QStringLiteral("key"), base64(bundle.oneTimePreKey)}});
+        QJsonObject oneTime{{QStringLiteral("id"), double(*bundle.oneTimePreKeyId)},
+                            {QStringLiteral("key"), base64(bundle.oneTimePreKey)}};
+        insertKem(oneTime, bundle.oneTimeKemKey, bundle.oneTimeKemSignature);
+        json.insert(QStringLiteral("oneTimePreKey"), oneTime);
     }
     return json;
 }
@@ -879,7 +975,8 @@ std::optional<X3dh::PreKeyBundle> bundleFromJson(const QJsonObject &json)
     const auto signedId = Json::uint32(signedKey.value(QStringLiteral("id")));
     const auto signedPub = Json::bytes(signedKey.value(QStringLiteral("key")), Crypto::KeySize);
     const auto signature = Json::bytes(signedKey.value(QStringLiteral("signature")), Crypto::SignatureSize);
-    if (!identity || !signedId || !signedPub || !signature)
+    if (!identity || !signedId || !signedPub || !signature
+        || !readKem(signedKey, &bundle.signedKemKey, &bundle.signedKemSignature))
         return std::nullopt;
     bundle.identityKey = *identity;
     bundle.signedPreKeyId = *signedId;
@@ -892,7 +989,7 @@ std::optional<X3dh::PreKeyBundle> bundleFromJson(const QJsonObject &json)
             return std::nullopt;
         const auto id = Json::uint32(oneTime.toObject().value(QStringLiteral("id")));
         const auto key = Json::bytes(oneTime.toObject().value(QStringLiteral("key")), Crypto::KeySize);
-        if (!id || !key)
+        if (!id || !key || !readKem(oneTime.toObject(), &bundle.oneTimeKemKey, &bundle.oneTimeKemSignature))
             return std::nullopt;
         bundle.oneTimePreKeyId = *id;
         bundle.oneTimePreKey = *key;

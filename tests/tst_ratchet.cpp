@@ -13,17 +13,17 @@ struct Pair
     RatchetSession bob;
 };
 
-// Alice and Bob through X3DH, as they will be through the server.
+// Alice and Bob through PQXDH, as they will be through the server.
 Pair start()
 {
     const auto aliceId = Crypto::IdentityKeyPair::generate();
     const auto bobId = Crypto::IdentityKeyPair::generate();
     const X3dh::SignedPreKey signedPreKey = X3dh::makeSignedPreKey(bobId, 1);
-    const X3dh::OneTimePreKey oneTime = X3dh::makeOneTimePreKeys(1, 1).first();
-    const X3dh::PreKeyBundle bundle{bobId.publicKey(),   1, signedPreKey.pair.publicKey, signedPreKey.signature, 1,
-                                    oneTime.pair.publicKey};
+    const X3dh::OneTimePreKey oneTime = X3dh::makeOneTimePreKeys(bobId, 1, 1).first();
+    const X3dh::PreKeyBundle bundle = X3dh::bundleFor(bobId.publicKey(), signedPreKey, &oneTime);
     const auto init = X3dh::initiate(aliceId, bundle);
-    const auto answer = X3dh::respond(bobId, signedPreKey, &oneTime, aliceId.publicKey(), init->ephemeralKey);
+    const auto answer = X3dh::respond(bobId, signedPreKey, &oneTime, oneTime.kemPair.secretKey, init->kemCiphertext,
+                                      aliceId.publicKey(), init->ephemeralKey);
     return {RatchetSession::forInitiator(init->sharedKey, init->remoteRatchetKey, init->associatedData),
             RatchetSession::forResponder(answer->sharedKey, signedPreKey.pair, answer->associatedData)};
 }

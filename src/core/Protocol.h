@@ -160,9 +160,13 @@ std::optional<Content> decodeContent(const QByteArray &padded);
 QByteArray pad(const QByteArray &data);
 std::optional<QByteArray> unpad(const QByteArray &padded);
 
-// Layer 2. On the wire: kind (1 byte: 1 message, 2 prekey message), for a
-// prekey message identity key (32) | base key (32) | signed prekey id (4) |
-// has one-time prekey (1) | one-time prekey id (4), then the ratchet message.
+// Layer 2. On the wire: kind (1 byte: 1 message, 2 X3DH prekey message,
+// 3 PQXDH prekey message), for a prekey message identity key (32) | base
+// key (32) | signed prekey id (4) | has one-time prekey (1) | one-time
+// prekey id (4), for PQXDH then which KEM prekey (1: the one-time
+// prekey's, 2: the signed prekey's last-resort one) | KEM ciphertext
+// (1568), then the ratchet message. Kind 2 only starts nothing any more
+// (PQXDH is required); it is still read for sessions begun before.
 struct CipherMessage
 {
     bool preKey = false;
@@ -170,7 +174,10 @@ struct CipherMessage
     QByteArray baseKey;     // the sender's X3DH ephemeral key
     quint32 signedPreKeyId = 0;
     std::optional<quint32> oneTimePreKeyId;
-    QByteArray ratchetMessage; // RatchetSession::encrypt's output
+    QByteArray kemCiphertext;   // PQXDH's CT (empty: an X3DH prekey message)
+    bool kemLastResort = false; // CT is for the signed prekey's KEM key
+    QByteArray ratchetMessage;  // RatchetSession::encrypt's output
+    bool isPqxdh() const { return preKey && !kemCiphertext.isEmpty(); }
 };
 
 QByteArray encodeCipherMessage(const CipherMessage &message);
@@ -189,19 +196,28 @@ std::optional<quint32> uint32(const QJsonValue &value);
 QString base64(const QByteArray &bytes);
 } // namespace Json
 
-// Prekeys as they are uploaded: the public halves only.
+// Prekeys as they are uploaded: the public halves only, each with its KEM
+// prekey (PQXDH; empty from a version before it) signed by the identity key.
 struct PublicSignedPreKey
 {
     quint32 id = 0;
     QByteArray key;
     QByteArray signature;
+    QByteArray kemKey;
+    QByteArray kemSignature;
 };
 
 struct PublicOneTimePreKey
 {
     quint32 id = 0;
     QByteArray key;
+    QByteArray kemKey;
+    QByteArray kemSignature;
 };
+
+// Every signature checks out against `identityKey` (the KEM prekeys' too).
+bool verifyPreKeys(const QByteArray &identityKey, const std::optional<PublicSignedPreKey> &signedPreKey,
+                   const QList<PublicOneTimePreKey> &oneTimePreKeys);
 
 constexpr int MaxOneTimePreKeysPerUpload = 100;
 

@@ -16,17 +16,11 @@ struct Bob
 {
     Crypto::IdentityKeyPair identity = Crypto::IdentityKeyPair::generate();
     X3dh::SignedPreKey signedPreKey = X3dh::makeSignedPreKey(identity, 1);
-    QList<X3dh::OneTimePreKey> oneTime = X3dh::makeOneTimePreKeys(10, 3);
+    QList<X3dh::OneTimePreKey> oneTime = X3dh::makeOneTimePreKeys(identity, 10, 3);
 
     X3dh::PreKeyBundle bundle(bool withOneTime = true) const
     {
-        X3dh::PreKeyBundle b{identity.publicKey(), signedPreKey.id, signedPreKey.pair.publicKey,
-                             signedPreKey.signature, {}, {}};
-        if (withOneTime) {
-            b.oneTimePreKeyId = oneTime.first().id;
-            b.oneTimePreKey = oneTime.first().pair.publicKey;
-        }
-        return b;
+        return X3dh::bundleFor(identity.publicKey(), signedPreKey, withOneTime ? &oneTime.first() : nullptr);
     }
     Session::SignedPreKeyLookup signedLookup() const
     {
@@ -461,6 +455,41 @@ private slots:
         CipherMessage badKey = first;
         badKey.identityKey = "short";
         QVERIFY(encodeCipherMessage(badKey).isEmpty());
+
+        // PQXDH's (kind 3): the KEM ciphertext, and which KEM prekey.
+        CipherMessage pq = first;
+        pq.oneTimePreKeyId = 77;
+        pq.kemCiphertext = Crypto::randomBytes(MlKem::CiphertextSize);
+        for (bool lastResort : {false, true}) {
+            pq.kemLastResort = lastResort;
+            const QByteArray bytes = encodeCipherMessage(pq);
+            QCOMPARE(bytes.at(0), char(3));
+            back = decodeCipherMessage(bytes);
+            QVERIFY(back && back->isPqxdh());
+            QCOMPARE(back->kemCiphertext, pq.kemCiphertext);
+            QCOMPARE(back->kemLastResort, lastResort);
+            QCOMPARE(back->oneTimePreKeyId, pq.oneTimePreKeyId);
+            QCOMPARE(back->ratchetMessage, pq.ratchetMessage);
+        }
+        QVERIFY(!decodeCipherMessage(encodeCipherMessage(first))->isPqxdh()); // kind 2 still reads
+        // The one-time prekey's KEM prekey needs a one-time prekey.
+        CipherMessage noOneTime = pq;
+        noOneTime.kemLastResort = false;
+        noOneTime.oneTimePreKeyId.reset();
+        QVERIFY(encodeCipherMessage(noOneTime).isEmpty());
+        noOneTime.kemLastResort = true;
+        QByteArray pqWire = encodeCipherMessage(noOneTime);
+        QVERIFY(decodeCipherMessage(pqWire));
+        pqWire[1 + 32 + 32 + 4 + 1 + 4] = 1; // claims the one-time prekey's KEM prekey, with none
+        QVERIFY(!decodeCipherMessage(pqWire));
+        pqWire[1 + 32 + 32 + 4 + 1 + 4] = 3; // neither 1 nor 2
+        QVERIFY(!decodeCipherMessage(pqWire));
+        pq.kemLastResort = true;
+        pqWire = encodeCipherMessage(pq);
+        QVERIFY(!decodeCipherMessage(pqWire.left(1 + 32 + 32 + 4 + 1 + 4 + 1 + MlKem::CiphertextSize))); // no ratchet message
+        QVERIFY(!decodeCipherMessage(pqWire.left(500)));
+        pq.kemCiphertext.chop(1);
+        QVERIFY(encodeCipherMessage(pq).isEmpty());
     }
 
     void bundlesAndEnvelopes()
@@ -478,7 +507,46 @@ private slots:
             QCOMPARE(back->signature, bundle.signature);
             QCOMPARE(back->oneTimePreKeyId, bundle.oneTimePreKeyId);
             QCOMPARE(back->oneTimePreKey, bundle.oneTimePreKey);
+            QCOMPARE(back->signedKemKey, bundle.signedKemKey);
+            QCOMPARE(back->signedKemSignature, bundle.signedKemSignature);
+            QCOMPARE(back->oneTimeKemKey, bundle.oneTimeKemKey);
+            QCOMPARE(back->oneTimeKemSignature, bundle.oneTimeKemSignature);
+            QCOMPARE(back->oneTimeKemKey.isEmpty(), !withOneTime);
         }
+        // A KEM prekey: both halves, of the right sizes, or neither.
+        for (const char *field : {"signedPreKey", "oneTimePreKey"}) {
+            QJsonObject json = bundleToJson(bob.bundle());
+            QJsonObject key = json.value(field).toObject();
+            key.remove("kemSignature");
+            json.insert(field, key);
+            QVERIFY2(!bundleFromJson(json), field);
+            key.insert("kemSignature", QString::fromLatin1(QByteArray(64, 's').toBase64()));
+            key.insert("kemKey", QString::fromLatin1(QByteArray(32, 'k').toBase64()));
+            json.insert(field, key);
+            QVERIFY2(!bundleFromJson(json), field);
+            key.remove("kemKey");
+            key.remove("kemSignature");
+            json.insert(field, key);
+            QVERIFY2(bundleFromJson(json), field); // none: a version before PQXDH (refused later, by initiate)
+        }
+        // Uploads: the same, and every signature checked.
+        const PublicSignedPreKey signedPart = publicPart(bob.signedPreKey);
+        const QList<PublicOneTimePreKey> oneTimeParts = publicParts(bob.oneTime);
+        const auto signedBack = signedPreKeyFromJson(signedPreKeyToJson(signedPart));
+        const auto oneTimeBack = oneTimePreKeysFromJson(oneTimePreKeysToJson(oneTimeParts));
+        QVERIFY(signedBack && oneTimeBack);
+        QCOMPARE(signedBack->kemKey, bob.signedPreKey.kemPair.publicKey);
+        QCOMPARE(oneTimeBack->size(), 3);
+        QCOMPARE(oneTimeBack->last().kemKey, bob.oneTime.last().kemPair.publicKey);
+        QVERIFY(verifyPreKeys(bob.identity.publicKey(), *signedBack, *oneTimeBack));
+        QVERIFY(!verifyPreKeys(Crypto::IdentityKeyPair::generate().publicKey(), *signedBack, {}));
+        QVERIFY(!verifyPreKeys(Crypto::IdentityKeyPair::generate().publicKey(), std::nullopt, *oneTimeBack));
+        PublicSignedPreKey forged = *signedBack;
+        forged.kemKey = MlKem::KeyPair::generate().publicKey;
+        QVERIFY(!verifyPreKeys(bob.identity.publicKey(), forged, {}));
+        QList<PublicOneTimePreKey> forgedOneTime = *oneTimeBack;
+        forgedOneTime[1].kemSignature = forgedOneTime[0].kemSignature;
+        QVERIFY(!verifyPreKeys(bob.identity.publicKey(), std::nullopt, forgedOneTime));
         QJsonObject bad = bundleToJson(bob.bundle());
         bad.insert("identityKey", "not base64!");
         QVERIFY(!bundleFromJson(bad));
@@ -521,8 +589,9 @@ private slots:
 
         const QByteArray first = alice->encrypt(encodeContent(Content::text("first")));
         const QByteArray second = alice->encrypt(encodeContent(Content::text("second")));
-        QVERIFY(decodeCipherMessage(first)->preKey);
-        QVERIFY(decodeCipherMessage(second)->preKey);
+        QVERIFY(decodeCipherMessage(first)->isPqxdh());
+        QVERIFY(decodeCipherMessage(second)->isPqxdh());
+        QVERIFY(!decodeCipherMessage(second)->kemLastResort); // the one-time prekey's KEM prekey
 
         // The second arrives first: it starts the session.
         auto accepted = Session::accept(bob.identity, *decodeCipherMessage(second), bob.signedLookup(),
@@ -556,6 +625,15 @@ private slots:
         QCOMPARE(decodeContent(decryptedBy(aliceAgain, bobAgain.encrypt(encodeContent(Content::text("ok")))))->body,
                  QString("ok"));
         QVERIFY(!Session::deserialize("rubbish").isValid());
+        // A session kept before PQXDH ("ASS1", no KEM fields) still loads.
+        QByteArray old = bobAgain.serialize();
+        QVERIFY(old.endsWith(QByteArray::fromHex("ffffffff00")) || old.endsWith(QByteArray::fromHex("0000000000")));
+        old.chop(5); // the empty ciphertext and the flag
+        old.replace(0, 4, QByteArray("ASS1"));
+        Session bobOld = Session::deserialize(old);
+        QVERIFY(bobOld.isValid());
+        QCOMPARE(decodeContent(decryptedBy(bobOld, aliceAgain.encrypt(encodeContent(Content::text("still")))))->body,
+                 QString("still"));
     }
 
     void sessionsFromStrangers()
@@ -580,6 +658,30 @@ private slots:
         CipherMessage plain = first;
         plain.preKey = false;
         QVERIFY(!Session::accept(bob.identity, plain, bob.signedLookup(), bob.oneTimeLookup()));
+        // Without its KEM ciphertext (an X3DH start: a version before, or a downgrade): refused.
+        CipherMessage x3dh = first;
+        x3dh.kemCiphertext.clear();
+        QVERIFY(!x3dh.isPqxdh());
+        QVERIFY(!Session::accept(bob.identity, *decodeCipherMessage(encodeCipherMessage(x3dh)), bob.signedLookup(),
+                                 bob.oneTimeLookup()));
+        // A changed ciphertext, or the other KEM prekey named: another secret, nothing decrypts.
+        CipherMessage changed = first;
+        changed.kemCiphertext[10] = char(changed.kemCiphertext.at(10) ^ 1);
+        QVERIFY(!Session::accept(bob.identity, changed, bob.signedLookup(), bob.oneTimeLookup()));
+        CipherMessage otherKem = first;
+        otherKem.kemLastResort = true;
+        QVERIFY(!Session::accept(bob.identity, otherKem, bob.signedLookup(), bob.oneTimeLookup()));
+        // A signed prekey from before PQXDH (no KEM prekey) cannot be the last resort.
+        Bob old;
+        auto toOld = Session::initiate(aliceId, old.bundle(false));
+        const auto lastResort = *decodeCipherMessage(toOld->encrypt("hi"));
+        QVERIFY(lastResort.kemLastResort);
+        X3dh::SignedPreKey withoutKem = old.signedPreKey;
+        withoutKem.kemPair = {};
+        QVERIFY(!Session::accept(old.identity, lastResort,
+                                 [&](quint32) { return std::optional<X3dh::SignedPreKey>(withoutKem); },
+                                 old.oneTimeLookup()));
+        QVERIFY(Session::accept(old.identity, lastResort, old.signedLookup(), old.oneTimeLookup()));
 
         auto accepted = Session::accept(bob.identity, first, bob.signedLookup(), bob.oneTimeLookup());
         QVERIFY(accepted);

@@ -40,6 +40,17 @@ void KeyStore::createTables()
                           " id INTEGER PRIMARY KEY,"
                           " public_key BLOB NOT NULL,"
                           " secret_key BLOB NOT NULL)"));
+    // Added with PQXDH: each prekey's KEM prekey (NULL in keys made before).
+    for (const char *table : {"signed_prekeys", "one_time_prekeys"}) {
+        QStringList columns;
+        q.exec(QStringLiteral("PRAGMA table_info(%1)").arg(QLatin1String(table)));
+        while (q.next())
+            columns << q.value(1).toString();
+        for (const char *column : {"kem_public", "kem_secret", "kem_signature"}) {
+            if (!columns.contains(QLatin1String(column)))
+                q.exec(QStringLiteral("ALTER TABLE %1 ADD COLUMN %2 BLOB").arg(QLatin1String(table), QLatin1String(column)));
+        }
+    }
     q.exec(QStringLiteral("CREATE TABLE IF NOT EXISTS sessions ("
                           " username TEXT NOT NULL,"
                           " device INTEGER NOT NULL,"
@@ -102,13 +113,16 @@ bool KeyStore::addSignedPreKey(const X3dh::SignedPreKey &key, qint64 created, bo
 {
     QSqlQuery q(m_db);
     q.prepare(QStringLiteral("INSERT OR REPLACE INTO signed_prekeys (id, public_key, secret_key, signature, created,"
-                             " uploaded) VALUES (?, ?, ?, ?, ?, ?)"));
+                             " uploaded, kem_public, kem_secret, kem_signature) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"));
     q.addBindValue(qint64(key.id));
     q.addBindValue(key.pair.publicKey);
     q.addBindValue(key.pair.secretKey);
     q.addBindValue(key.signature);
     q.addBindValue(created >= 0 ? created : QDateTime::currentMSecsSinceEpoch());
     q.addBindValue(uploaded ? 1 : 0);
+    q.addBindValue(key.kemPair.publicKey);
+    q.addBindValue(key.kemPair.secretKey);
+    q.addBindValue(key.kemSignature);
     return q.exec();
 }
 
@@ -149,8 +163,13 @@ std::optional<X3dh::SignedPreKey> signedFrom(QSqlQuery &q)
     key.pair.publicKey = q.value(1).toByteArray();
     key.pair.secretKey = q.value(2).toByteArray();
     key.signature = q.value(3).toByteArray();
+    key.kemPair.publicKey = q.value(4).toByteArray();
+    key.kemPair.secretKey = q.value(5).toByteArray();
+    key.kemSignature = q.value(6).toByteArray();
     if (!key.pair.isValid())
         return std::nullopt;
+    if (!key.kemPair.isValid())
+        key.kemPair = {}; // one from before PQXDH
     return key;
 }
 
@@ -159,7 +178,7 @@ std::optional<X3dh::SignedPreKey> signedFrom(QSqlQuery &q)
 std::optional<X3dh::SignedPreKey> KeyStore::signedPreKey(quint32 id) const
 {
     QSqlQuery q(m_db);
-    q.prepare(QStringLiteral("SELECT id, public_key, secret_key, signature FROM signed_prekeys WHERE id = ?"));
+    q.prepare(QStringLiteral("SELECT id, public_key, secret_key, signature, kem_public, kem_secret, kem_signature FROM signed_prekeys WHERE id = ?"));
     q.addBindValue(qint64(id));
     return signedFrom(q);
 }
@@ -167,7 +186,7 @@ std::optional<X3dh::SignedPreKey> KeyStore::signedPreKey(quint32 id) const
 std::optional<X3dh::SignedPreKey> KeyStore::latestSignedPreKey() const
 {
     QSqlQuery q(m_db);
-    q.prepare(QStringLiteral("SELECT id, public_key, secret_key, signature FROM signed_prekeys"
+    q.prepare(QStringLiteral("SELECT id, public_key, secret_key, signature, kem_public, kem_secret, kem_signature FROM signed_prekeys"
                              " ORDER BY created DESC, id DESC LIMIT 1"));
     return signedFrom(q);
 }
@@ -177,11 +196,15 @@ bool KeyStore::addOneTimePreKeys(const QList<X3dh::OneTimePreKey> &keys)
     if (!m_db.transaction())
         return false;
     QSqlQuery q(m_db);
-    q.prepare(QStringLiteral("INSERT OR REPLACE INTO one_time_prekeys (id, public_key, secret_key) VALUES (?, ?, ?)"));
+    q.prepare(QStringLiteral("INSERT OR REPLACE INTO one_time_prekeys (id, public_key, secret_key, kem_public, kem_secret,"
+                             " kem_signature) VALUES (?, ?, ?, ?, ?, ?)"));
     for (const X3dh::OneTimePreKey &key : keys) {
         q.bindValue(0, qint64(key.id));
         q.bindValue(1, key.pair.publicKey);
         q.bindValue(2, key.pair.secretKey);
+        q.bindValue(3, key.kemPair.publicKey);
+        q.bindValue(4, key.kemPair.secretKey);
+        q.bindValue(5, key.kemSignature);
         if (!q.exec()) {
             m_db.rollback();
             return false;
@@ -193,7 +216,8 @@ bool KeyStore::addOneTimePreKeys(const QList<X3dh::OneTimePreKey> &keys)
 std::optional<X3dh::OneTimePreKey> KeyStore::oneTimePreKey(quint32 id) const
 {
     QSqlQuery q(m_db);
-    q.prepare(QStringLiteral("SELECT public_key, secret_key FROM one_time_prekeys WHERE id = ?"));
+    q.prepare(QStringLiteral("SELECT public_key, secret_key, kem_public, kem_secret, kem_signature FROM one_time_prekeys"
+                             " WHERE id = ?"));
     q.addBindValue(qint64(id));
     if (!q.exec() || !q.next())
         return std::nullopt;
@@ -201,8 +225,13 @@ std::optional<X3dh::OneTimePreKey> KeyStore::oneTimePreKey(quint32 id) const
     key.id = id;
     key.pair.publicKey = q.value(0).toByteArray();
     key.pair.secretKey = q.value(1).toByteArray();
+    key.kemPair.publicKey = q.value(2).toByteArray();
+    key.kemPair.secretKey = q.value(3).toByteArray();
+    key.kemSignature = q.value(4).toByteArray();
     if (!key.pair.isValid())
         return std::nullopt;
+    if (!key.kemPair.isValid())
+        key.kemPair = {}; // one from before PQXDH
     return key;
 }
 

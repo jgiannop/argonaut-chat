@@ -19,6 +19,8 @@ endfunction()
 
 chat_test(store)
 chat_test(crypto)
+# NIST's ML-KEM-1024 test vectors (some of ACVP's), for mlkem-native.
+qt_add_resources(tst_crypto "acvp" PREFIX "/" FILES data/mlkem1024-acvp.json)
 chat_test(ratchet)
 chat_test(protocol)
 chat_test(attachment)

@@ -6,16 +6,17 @@
 #include <functional>
 #include <optional>
 
-// One encrypted conversation with one device of another person: X3DH to start
-// it, the Double Ratchet for every message, Protocol::CipherMessage on the
-// wire.
+// One encrypted conversation with one device of another person: PQXDH to
+// start it, the Double Ratchet for every message, Protocol::CipherMessage on
+// the wire.
 //
 // Alice: initiate() from Bob's bundle, then encrypt(). Until Bob first
 // answers, her messages are prekey messages (each carries the X3DH header, so
 // any of them can start the session for Bob, whichever arrives first).
 //
 // Bob: a prekey message from someone he has no session with goes to accept(),
-// which finds his prekeys through the lookups. The caller deletes the
+// which finds his prekeys through the lookups; only a PQXDH one starts a
+// session (an X3DH one, from a version before, is refused: no downgrade). The caller deletes the
 // one-time prekey it used, and checks remoteIdentityKey() against the
 // identity it knew for that person (a change means a new safety number).
 // Later prekey messages of the same start decrypt with decrypt().
@@ -58,6 +59,8 @@ private:
     QByteArray m_localIdentity;
     quint32 m_signedPreKeyId = 0;
     std::optional<quint32> m_oneTimePreKeyId;
+    QByteArray m_kemCiphertext; // empty: a session started by X3DH, before PQXDH
+    bool m_kemLastResort = false;
 };
 
 struct Session::Accepted

@@ -2,8 +2,8 @@
 
 How messages travel, layer by layer. The code is `src/core/Protocol.{h,cpp}`
 and `src/core/Session.{h,cpp}`; the cryptography under it is in
-`Crypto`, `X3dh` and `RatchetSession` (Signal's design: see
-[how-signal-works.md](how-signal-works.md)).
+`Crypto`, `MlKem`, `X3dh` (PQXDH) and `RatchetSession` (Signal's design:
+see [how-signal-works.md](how-signal-works.md)).
 
 Everything a device receives, from the server or from another person, is
 data from a stranger: every decoder checks sizes, types and ranges and
@@ -228,18 +228,46 @@ The padded Content encrypted by the sender's `Session` for one device:
 | kind | bytes |
 |---|---|
 | `1` message | `0x01` · ratchet message |
-| `2` prekey message | `0x02` · identity key (32) · base key (32) · signed prekey id (4, big endian) · has one-time prekey (1: 0 or 1) · one-time prekey id (4; 0 when none) · ratchet message |
+| `3` PQXDH prekey message | `0x03` · identity key (32) · base key (32) · signed prekey id (4, big endian) · has one-time prekey (1: 0 or 1) · one-time prekey id (4; 0 when none) · KEM prekey (1: `1` the one-time prekey's, only with one; `2` the signed prekey's last-resort one) · ML-KEM-1024 ciphertext (1568) · ratchet message |
+| `2` X3DH prekey message | the same up to the one-time prekey id, then the ratchet message: from versions before 0.3; read only for a session that already exists, never to start one |
 
 The **ratchet message** (`RatchetSession`): version `0x01` · ratchet public
 key (32) · previous chain's length (4) · number in this chain (4) · the
 XChaCha20-Poly1305 ciphertext with its 16-byte tag. Its associated data is
 both identity keys (Alice's, then Bob's) and the header.
 
-Alice sends **prekey messages** until Bob first answers: each carries the X3DH
-header, so whichever arrives first starts the session for Bob. Bob deletes
-the one-time prekey it used, so the same start cannot be replayed. If the
-sender's identity key is not the one Bob knew for that username, the app must
-say so (a new safety number) before showing the message as trusted.
+Alice sends **prekey messages** until Bob first answers: each carries the
+PQXDH header, so whichever arrives first starts the session for Bob. Bob
+deletes the one-time prekey it used (and its KEM prekey with it), so the
+same start cannot be replayed. If the sender's identity key is not the one
+Bob knew for that username, the app must say so (a new safety number)
+before showing the message as trusted.
+
+### PQXDH
+
+As Signal's PQXDH (signal.org/docs/specifications/pqxdh), with ML-KEM-1024
+(FIPS 203, from mlkem-native: `third_party/mlkem-native`):
+
+```
+DH1 = DH(IK_A, SPK_B)   DH2 = DH(EK_A, IK_B)   DH3 = DH(EK_A, SPK_B)   DH4 = DH(EK_A, OPK_B)?
+(CT, SS) = ML-KEM-1024.Encaps(PQPK_B)
+SK = HKDF-SHA-256(salt = 32 zero bytes, F · DH1 · DH2 · DH3 [· DH4] · SS,
+                  info = "ArgonautChat_CURVE25519_SHA-256_ML-KEM-1024"),  F = 32 × 0xFF
+AD = IK_A · IK_B
+```
+
+`PQPK_B` is the one-time prekey's KEM prekey when the bundle has one, else
+the last-resort KEM prekey that goes with the signed prekey (same id,
+replaced with it). Every KEM prekey is signed by the identity key, over
+`0x08` · its 1568 bytes (Signal's EncodeKEM); Alice checks the signature
+and FIPS 203's input check, and Bob, with his, decapsulates (a changed
+ciphertext gives another secret: nothing decrypts).
+
+**PQXDH is required.** A bundle without a KEM prekey (a device on a version
+before 0.3, or a server leaving it out) starts nothing: the app says the
+other person needs to update. A kind `2` start is refused the same way, so
+neither a server nor an old version can make a conversation start without
+the post-quantum part. Sessions begun before keep working.
 
 ## Layer 3: the server's JSON
 
@@ -249,12 +277,17 @@ A **prekey bundle** (what the server gives for a device):
 
 ```json
 {"identityKey":"…",
- "signedPreKey":{"id":1, "key":"…", "signature":"…"},
- "oneTimePreKey":{"id":10, "key":"…"}}
+ "signedPreKey":{"id":1, "key":"…", "signature":"…", "kemKey":"…", "kemSignature":"…"},
+ "oneTimePreKey":{"id":10, "key":"…", "kemKey":"…", "kemSignature":"…"}}
 ```
 
-`oneTimePreKey` is missing when the server has run out; X3DH then goes
-without it. The client checks the signature before use.
+`oneTimePreKey` is missing when the server has run out; PQXDH then goes
+without it, with the signed prekey's last-resort KEM key. `kemKey` (1568
+bytes) and `kemSignature` (64) come together or not at all (not at all:
+a version before 0.3). The client checks every signature before use.
+Uploads (`register`, `link`, `prekeys`) carry the same fields; the server
+checks each signature, the KEM prekeys' too, and refuses the whole upload
+if one fails.
 
 An **envelope** (a message as the server hands it over):
 
@@ -329,7 +362,7 @@ only the uploader may append, never past the announced size. Per account:
   big endian) · username`. No passwords. A nonce serves one try; after 5
   failed tries the connection is closed, and one that has not signed in
   within 30 seconds too. An unknown account and a wrong key get the same
-  answer. `register` also checks the signed prekey's signature. Signing in
+  answer. `register` also checks the prekeys' signatures. Signing in
   again as the same device closes the older connection.
 - **`send`**: one CipherMessage for each of the recipient's devices, no more,
   no fewer (not for the sending device itself); otherwise `devices` lists
@@ -363,8 +396,9 @@ only the uploader may append, never past the announced size. Per account:
   | prekey uploads | account | 10 | 10 an hour |
   | one-time prekeys handed out | device | 50 | 50 an hour |
 
-  Over the last one, bundles come without a one-time prekey (X3DH works
-  without), so nobody can use up someone's stock. The app keeps rate-limited
+  Over the last one, bundles come without a one-time prekey (PQXDH works
+  without, with the last-resort KEM prekey), so nobody can use up someone's
+  stock. The app keeps rate-limited
   messages in its outbox and sends them after `retryAfter`.
 - **Addresses behind a proxy**: with `--trust-proxy`, a connection from
   loopback (the proxy) counts as the last address in its `X-Forwarded-For`;

@@ -16,7 +16,8 @@ program: [docs/how-signal-works.md](docs/how-signal-works.md).
   is a new line).
 - **Note to Self**, always there.
 - **Chatting with people, encrypted end to end** with the Signal Protocol's
-  design (X3DH and the Double Ratchet, on libsodium): sign up with a
+  design (PQXDH — X3DH with post-quantum ML-KEM-1024 — and the Double
+  Ratchet, on libsodium and mlkem-native): sign up with a
   username (no phone number), start a chat by someone's username, ✓ sent,
   ✓✓ delivered, white ✓✓ read. Messages wait on the server while the other
   person is offline, and in an outbox while you are.
@@ -75,9 +76,8 @@ program: [docs/how-signal-works.md](docs/how-signal-works.md).
 
 ## Not there yet
 
-PQXDH (the
-post-quantum start), calls, Sender Keys for big groups, moving the history
-to a linked computer.
+Calls, Sender Keys for big groups, moving the history to a linked
+computer, Signal's post-quantum ratchet (SPQR).
 
 ## Installing
 
@@ -108,10 +108,12 @@ In this order (agreed 2026-11-22):
 
 1. **Use 0.2.1 for real** with one or two people for a few days, and fix
    what that turns up.
-2. **PQXDH**: the post-quantum start of a conversation that Signal uses
-   (X3DH plus ML-KEM), so that recorded traffic stays safe from a future
-   quantum computer. ML-KEM comes from a reviewed library (libsodium has
-   none); existing conversations keep working.
+2. **PQXDH** (done, not released yet): the post-quantum start of a
+   conversation that Signal uses (X3DH plus ML-KEM-1024), so that recorded
+   traffic stays safe from a future quantum computer. ML-KEM comes from
+   mlkem-native (`third_party/mlkem-native`); existing conversations keep
+   working. New conversations need both sides on 0.3 or later, and the
+   server updated first.
 3. **Locking the app**: after some idle minutes or on demand, the window
    hides the chats until a passphrase is typed.
 
@@ -170,4 +172,5 @@ accepts only `wss://` addresses, except to the same computer.
 
 ## License
 
-GPL-3.0-or-later.
+GPL-3.0-or-later. `third_party/mlkem-native` (ML-KEM) is mlkem-native's,
+under Apache-2.0 OR ISC OR MIT (its `LICENSE`).

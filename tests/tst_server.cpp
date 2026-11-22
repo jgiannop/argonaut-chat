@@ -31,7 +31,7 @@ struct Person
         : name(username)
     {
         signedPreKey = X3dh::makeSignedPreKey(identity, 1);
-        oneTime = X3dh::makeOneTimePreKeys(1, 5);
+        oneTime = X3dh::makeOneTimePreKeys(identity, 1, 5);
         QObject::connect(&client, &ChatClient::envelopeReceived,
                          [this](const Protocol::Envelope &envelope) { inbox.append(envelope); });
     }
@@ -310,7 +310,7 @@ private slots:
         Person bob(QStringLiteral("bob"));
         QVERIFY(join(alice));
         QVERIFY(join(bob));
-        const QByteArray cipher = Protocol::encodeCipherMessage({false, {}, {}, 0, {}, QByteArray(60, 'x')});
+        const QByteArray cipher = Protocol::encodeCipherMessage({false, {}, {}, 0, {}, {}, false, QByteArray(60, 'x')});
 
         // Bob has device 1 only: the server says so.
         ChatClient::Result result = wait([&](auto done) { alice.client.send("bob", {{2, cipher}}, done); });
@@ -366,22 +366,29 @@ private slots:
     {
         Person alice(QStringLiteral("alice"));
         Person bob(QStringLiteral("bob"));
-        bob.oneTime = X3dh::makeOneTimePreKeys(1, 2);
+        bob.oneTime = X3dh::makeOneTimePreKeys(bob.identity, 1, 2);
         QVERIFY(join(alice));
         QVERIFY(join(bob));
 
         // Each fetch takes one; then there are none, and X3DH goes without.
+        // Each with its KEM prekey; the last-resort one always there (PQXDH).
         QList<std::optional<quint32>> ids;
         for (int i = 0; i < 3; ++i) {
             const auto bundles = ChatClient::bundles(wait([&](auto done) { alice.client.fetchKeys("bob", done); }));
             QVERIFY(bundles);
-            ids << bundles->first().bundle.oneTimePreKeyId;
+            const X3dh::PreKeyBundle &b = bundles->first().bundle;
+            ids << b.oneTimePreKeyId;
+            QCOMPARE(b.signedKemKey, bob.signedPreKey.kemPair.publicKey);
+            QCOMPARE(b.signedKemSignature, bob.signedPreKey.kemSignature);
+            if (b.oneTimePreKeyId)
+                QCOMPARE(b.oneTimeKemKey, bob.oneTime.at(int(*b.oneTimePreKeyId) - 1).kemPair.publicKey);
+            QVERIFY(X3dh::initiate(alice.identity, b));
         }
         QVERIFY(ids == (QList<std::optional<quint32>>{1u, 2u, std::nullopt}));
         QCOMPARE(wait([&](auto done) { alice.client.fetchKeys("nobody", done); }).error, QString("not-found"));
 
         // Bob tops them up, and changes his signed prekey.
-        const auto more = X3dh::makeOneTimePreKeys(3, 3);
+        const auto more = X3dh::makeOneTimePreKeys(bob.identity, 3, 3);
         const auto newSigned = X3dh::makeSignedPreKey(bob.identity, 2);
         ChatClient::Result result = wait([&](auto done) {
             bob.client.uploadPreKeys(Protocol::publicPart(newSigned), Protocol::publicParts(more), done);
@@ -395,10 +402,22 @@ private slots:
         const auto forged = X3dh::makeSignedPreKey(Crypto::IdentityKeyPair::generate(), 3);
         result = wait([&](auto done) { bob.client.uploadPreKeys(Protocol::publicPart(forged), {}, done); });
         QCOMPARE(result.error, QString("denied"));
+        // ... and so is a KEM prekey signed by someone else (signed or one-time),
+        // or with the signature of another of Bob's.
+        Protocol::PublicSignedPreKey kemForged = Protocol::publicPart(X3dh::makeSignedPreKey(bob.identity, 4));
+        kemForged.kemKey = forged.kemPair.publicKey;
+        kemForged.kemSignature = forged.kemSignature;
+        result = wait([&](auto done) { bob.client.uploadPreKeys(kemForged, {}, done); });
+        QCOMPARE(result.error, QString("denied"));
+        QList<Protocol::PublicOneTimePreKey> oneTimeForged = Protocol::publicParts(X3dh::makeOneTimePreKeys(bob.identity, 50, 2));
+        oneTimeForged[1].kemSignature = oneTimeForged[0].kemSignature;
+        result = wait([&](auto done) { bob.client.uploadPreKeys({}, oneTimeForged, done); });
+        QCOMPARE(result.error, QString("denied"));
+        QCOMPARE(m_store->oneTimePreKeyCount("bob", 1), 2); // 3, less the fetch above: nothing of it kept
         // Never more than the limit kept.
         for (quint32 first = 100; first < 100 + 3 * Protocol::MaxOneTimePreKeysPerUpload;
              first += Protocol::MaxOneTimePreKeysPerUpload) {
-            const auto batch = X3dh::makeOneTimePreKeys(first, Protocol::MaxOneTimePreKeysPerUpload);
+            const auto batch = X3dh::makeOneTimePreKeys(bob.identity, first, Protocol::MaxOneTimePreKeysPerUpload);
             result = wait([&](auto done) { bob.client.uploadPreKeys({}, Protocol::publicParts(batch), done); });
             QVERIFY(result.ok);
         }
@@ -464,7 +483,7 @@ private slots:
         QCOMPARE(wait([&](auto done) { alice.client.fetchKeys("bob", done); }).error, QString("rate-limited"));
 
         // Sends: a burst of three, then one a second.
-        const QByteArray cipher = Protocol::encodeCipherMessage({false, {}, {}, 0, {}, QByteArray(60, 'x')});
+        const QByteArray cipher = Protocol::encodeCipherMessage({false, {}, {}, 0, {}, {}, false, QByteArray(60, 'x')});
         for (int i = 0; i < 3; ++i)
             QVERIFY(wait([&](auto done) { alice.client.send("bob", {{1, cipher}}, done); }).ok);
         result = wait([&](auto done) { alice.client.send("bob", {{1, cipher}}, done); });
@@ -699,7 +718,7 @@ private slots:
         QCOMPARE(result.error, QString("denied"));
         result = wait([&](auto done) {
             fresh.addDevice("alice", alice.identity, Protocol::publicPart(spk),
-                            Protocol::publicParts(X3dh::makeOneTimePreKeys(500, 3)), done);
+                            Protocol::publicParts(X3dh::makeOneTimePreKeys(alice.identity, 500, 3)), done);
         });
         QVERIFY2(result.ok, qPrintable(result.message));
         QCOMPARE(result.data.value("device").toInt(), 2);
@@ -709,7 +728,7 @@ private slots:
         const auto bundles = ChatClient::bundles(wait([&](auto done) { bob.client.fetchKeys("alice", done); }));
         QCOMPARE(bundles->size(), 2);
         QCOMPARE(bundles->at(1).bundle.identityKey, alice.identity.publicKey()); // one identity
-        const QByteArray cipher = Protocol::encodeCipherMessage({false, {}, {}, 0, {}, QByteArray(60, 'x')});
+        const QByteArray cipher = Protocol::encodeCipherMessage({false, {}, {}, 0, {}, {}, false, QByteArray(60, 'x')});
         result = wait([&](auto done) { bob.client.send("alice", {{1, cipher}}, done); });
         QCOMPARE(result.error, QString("devices"));
         QCOMPARE(result.data.value("devices").toArray(), (QJsonArray{1, 2}));
