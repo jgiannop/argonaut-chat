@@ -9,6 +9,7 @@
 #include <QString>
 #include <QStringList>
 
+#include <limits>
 #include <optional>
 
 // The conversations and their messages, kept on this computer only, as
@@ -39,6 +40,11 @@ public:
         bool request = false; // a message request: someone I have not accepted yet
         bool left = false;    // a group I am no longer in (read only)
         qint64 expireSeconds = 0; // disappearing messages: 0 off
+        // On this computer only, as the owner keeps them (not synced):
+        qint64 mutedUntil = 0; // ms UTC: no notifications or count until then (MutedForever: always)
+        bool archived = false; // out of the list until a message comes (unless muted)
+        int pinned = 0;        // at the top, in this order; 0: not
+        bool isMuted(qint64 nowMs = QDateTime::currentMSecsSinceEpoch()) const { return mutedUntil > nowMs; }
     };
 
     struct Message
@@ -80,6 +86,13 @@ public:
     // `request`: started by them, not accepted by me yet.
     qint64 addConversation(const QString &kind, const QString &title, const QString &peer, bool request = false);
     void setAccepted(qint64 conversation);
+    // Mute, archive, pin (as Signal's). Archiving unpins; pinning unarchives;
+    // at most MaxPinned (false when full).
+    static constexpr qint64 MutedForever = std::numeric_limits<qint64>::max();
+    static constexpr int MaxPinned = 4;
+    void setMutedUntil(qint64 conversation, qint64 untilMs); // 0: not muted
+    void setArchived(qint64 conversation, bool archived);
+    bool setPinned(qint64 conversation, bool pinned);
     // The conversation and all its messages.
     void deleteConversation(qint64 conversation);
     // The direct conversation with this username; 0 if there is none.

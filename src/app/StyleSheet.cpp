@@ -29,6 +29,8 @@ QWidget#replyBar { background: @pathBg; border-left: 3px solid @accent; border-r
 QLabel#replyLabel { color: @dimFg; }
 QWidget#recordBar { background: @pathBg; border-radius: 6px; }
 QWidget#attachBar { background: transparent; }
+QToolButton#archivedButton { color: @dimFg; padding: 6px 12px; text-align: left; border: none; }
+QToolButton#archivedButton:hover { color: @fg; }
 QWidget#attachChip { background: @pathBg; border: 1px solid @border; border-radius: 8px; }
 QLabel#recordLabel { color: #e01b24; font-weight: bold; }
 QWidget#findBar { background: @window; border-bottom: 1px solid @border; }

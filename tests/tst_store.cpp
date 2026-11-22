@@ -223,6 +223,62 @@ private slots:
         QCOMPARE(again.messages(again.noteToSelf()).size(), 2);
     }
 
+    // Mute, archive and pin, as Signal's.
+    void muteArchivePin()
+    {
+        ChatStore store(TestSupport::home() + QStringLiteral("/pins.sqlite"));
+        const QDateTime t0 = QDateTime::currentDateTimeUtc().addSecs(-600);
+        QList<qint64> ids;
+        for (int i = 0; i < 6; ++i) {
+            const QString name = QStringLiteral("p%1").arg(i);
+            ids << store.addConversation(QStringLiteral("direct"), name, name);
+            store.addMessage(ids.last(), QStringLiteral("hi"), QString(), t0.addSecs(i)); // p5 the newest
+        }
+        auto order = [&] {
+            QStringList out;
+            for (const ChatStore::Conversation &c : store.conversations())
+                out << c.peer;
+            return out.join(QLatin1Char(' '));
+        };
+        QCOMPARE(order(), QStringLiteral("p5 p4 p3 p2 p1 p0"));
+        // Pinned on top, in the order pinned; four at most.
+        QVERIFY(store.setPinned(ids[1], true));
+        QVERIFY(store.setPinned(ids[3], true));
+        QCOMPARE(order(), QStringLiteral("p1 p3 p5 p4 p2 p0"));
+        QVERIFY(store.setPinned(ids[0], true));
+        QVERIFY(store.setPinned(ids[2], true));
+        QVERIFY(!store.setPinned(ids[4], true));
+        QCOMPARE(store.conversation(ids[4]).pinned, 0);
+        QVERIFY(store.setPinned(ids[3], false));
+        QCOMPARE(order(), QStringLiteral("p1 p0 p2 p5 p4 p3"));
+
+        // Archiving unpins; pinning brings it back.
+        store.setArchived(ids[1], true);
+        QVERIFY(store.conversation(ids[1]).archived);
+        QCOMPARE(store.conversation(ids[1]).pinned, 0);
+        QVERIFY(store.setPinned(ids[1], true));
+        QVERIFY(!store.conversation(ids[1]).archived);
+
+        // Their message brings an archived one back; mine doesn't; muted, it stays.
+        store.setArchived(ids[5], true);
+        store.addMessage(ids[5], QStringLiteral("mine"));
+        QVERIFY(store.conversation(ids[5]).archived);
+        store.addMessage(ids[5], QStringLiteral("theirs"), QStringLiteral("p5"));
+        QVERIFY(!store.conversation(ids[5]).archived);
+        store.setArchived(ids[5], true);
+        store.setMutedUntil(ids[5], ChatStore::MutedForever);
+        QVERIFY(store.conversation(ids[5]).isMuted());
+        store.addMessage(ids[5], QStringLiteral("again"), QStringLiteral("p5"));
+        QVERIFY(store.conversation(ids[5]).archived);
+        // A mute that has run out is none.
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        store.setMutedUntil(ids[4], now + 3600 * 1000);
+        QVERIFY(store.conversation(ids[4]).isMuted(now));
+        QVERIFY(!store.conversation(ids[4]).isMuted(now + 3601 * 1000));
+        store.setMutedUntil(ids[4], 0);
+        QVERIFY(!store.conversation(ids[4]).isMuted());
+    }
+
     void findMessages()
     {
         ChatStore store(TestSupport::home() + QStringLiteral("/find.sqlite"));

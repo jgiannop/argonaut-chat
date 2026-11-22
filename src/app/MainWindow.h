@@ -112,6 +112,19 @@ public:
     void deleteMessage(qint64 message, bool forEveryone, bool ask);
     // A message's right-click menu (the caller owns it); none for a note.
     QMenu *messageMenu(qint64 message);
+    // Mute, archive, pin (as Signal's; kept on this computer only). Muted: no
+    // notifications, not in the tray's count, a grey count. `seconds` -1:
+    // always, 0: unmute. Archived: under "Archived Chats" until their next
+    // message (unless muted). Pinned: on top, at most ChatStore::MaxPinned
+    // (a notice when full).
+    void muteConversation(qint64 conversation, qint64 seconds);
+    void archiveConversation(qint64 conversation, bool archived);
+    bool pinConversation(qint64 conversation, bool pinned);
+    // A conversation's right-click menu in the list (the caller owns it).
+    QMenu *conversationMenu(qint64 conversation);
+    void showArchived(bool show);
+    bool showingArchived() const { return m_showArchived; }
+    QToolButton *archivedButton() const { return m_archivedButton; }
     // A click on a reply's quote: the message it answers scrolled into view
     // and outlined for a moment (false: it is gone, deleted or never here).
     bool jumpToQuote(qint64 reply);
@@ -172,6 +185,16 @@ private:
     QAction *m_newGroupAction = nullptr;
     QAction *m_devicesAction = nullptr;
     QMenu *m_timerMenu = nullptr;
+    QAction *m_pinAction = nullptr;
+    QMenu *m_muteMenu = nullptr;
+    QAction *m_archiveAction = nullptr;
+    void fillMuteMenu(QMenu *menu, qint64 conversation);
+    void updateChatActions();
+    void applySearch();
+    QLineEdit *m_search = nullptr;
+    QToolButton *m_archivedButton = nullptr;
+    bool m_showArchived = false;
+    QTimer m_muteTimer; // a mute running out: the list again
     QAction *m_membersAction = nullptr;
     QAction *m_leaveAction = nullptr;
     QLabel *m_leftNote = nullptr;

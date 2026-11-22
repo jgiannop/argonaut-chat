@@ -500,6 +500,116 @@ private slots:
         QCOMPARE(window.pendingAttachments(), 0);
     }
 
+    // Mute, archive, pin: the list, the menus, notifications and the count.
+    void muteArchivePin()
+    {
+        ChatStore store(TestSupport::home() + QStringLiteral("/mute.sqlite"));
+        KeyStore keys(&store);
+        Messenger messenger(&store, &keys);
+        const QDateTime t0 = QDateTime::currentDateTimeUtc().addSecs(-60);
+        QHash<QString, qint64> id;
+        int i = 0;
+        for (const QString &name : {QStringLiteral("anna"), QStringLiteral("bob"), QStringLiteral("carl")}) {
+            id[name] = store.addConversation(QStringLiteral("direct"), name, name);
+            store.setAccepted(id[name]);
+            store.addMessage(id[name], QStringLiteral("hello"), name, t0.addSecs(++i)); // carl the newest
+        }
+        MainWindow window(&store, &messenger);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        window.openConversation(store.noteToSelf());
+        QListWidget *list = window.conversations();
+        auto names = [&] {
+            QStringList out;
+            for (int r = 0; r < list->count(); ++r) {
+                const QString peer = list->item(r)->data(Qt::UserRole + 12).toString(); // PeerRole
+                if (!peer.isEmpty())
+                    out << peer; // Note to Self has none
+            }
+            return out.join(QLatin1Char(' '));
+        };
+        const int mutedRole = Qt::UserRole + 23, pinnedRole = Qt::UserRole + 24;
+        QCOMPARE(names(), QStringLiteral("carl bob anna"));
+        QCOMPARE(window.unreadCount(), 3);
+
+        // Pin from the list's menu: on top, marked.
+        std::unique_ptr<QMenu> menu(window.conversationMenu(id["anna"]));
+        menu->findChild<QAction *>(QStringLiteral("pinAction"))->trigger();
+        QVERIFY2(names().startsWith(QStringLiteral("anna carl bob")), qPrintable(names()));
+        QVERIFY(list->item(0)->data(pinnedRole).toBool());
+
+        // Mute bob for an hour: marked, no notification, not counted.
+        menu.reset(window.conversationMenu(id["bob"]));
+        auto *mute = menu->findChild<QMenu *>(QStringLiteral("muteMenu"));
+        QVERIFY(mute);
+        QCOMPARE(mute->actions().size(), 5);
+        mute->actions().first()->trigger();
+        QVERIFY(store.conversation(id["bob"]).isMuted());
+        QVERIFY(store.conversation(id["bob"]).mutedUntil > QDateTime::currentMSecsSinceEpoch() + 3500 * 1000);
+        QCOMPARE(window.unreadCount(), 2);
+        QSignalSpy notified(&window, &MainWindow::notified);
+        emit messenger.messageReceived(id["bob"], QStringLiteral("bob"), QStringLiteral("psst"), false);
+        emit messenger.messageReceived(id["carl"], QStringLiteral("carl"), QStringLiteral("hey"), false);
+        QCOMPARE(notified.size(), 1);
+        QCOMPARE(notified.at(0).at(0).toLongLong(), id["carl"]);
+        for (int r = 0; r < list->count(); ++r)
+            QCOMPARE(list->item(r)->data(mutedRole).toBool(), list->item(r)->data(Qt::UserRole + 12).toString() == QLatin1String("bob"));
+        // Its menu now says Unmute, with until when.
+        menu.reset(window.conversationMenu(id["bob"]));
+        QAction *unmute = menu->findChild<QAction *>(QStringLiteral("unmuteAction"));
+        QVERIFY(unmute);
+        unmute->trigger();
+        QVERIFY(!store.conversation(id["bob"]).isMuted());
+        QCOMPARE(window.unreadCount(), 3);
+        // A mute that runs out shows so by itself.
+        store.setMutedUntil(id["bob"], QDateTime::currentMSecsSinceEpoch() + 300);
+        QTRY_VERIFY_WITH_TIMEOUT(!store.conversation(id["bob"]).isMuted(), 2000);
+        QTRY_VERIFY_WITH_TIMEOUT([&] {
+            for (int r = 0; r < list->count(); ++r)
+                if (list->item(r)->data(mutedRole).toBool())
+                    return false;
+            return true;
+        }(), 3000);
+        // Note to Self has nothing to mute.
+        menu.reset(window.conversationMenu(store.noteToSelf()));
+        QVERIFY(!menu->findChild<QMenu *>(QStringLiteral("muteMenu")));
+
+        // Archive carl: out of the list, under "Archived Chats (1)".
+        window.archiveConversation(id["carl"], true);
+        QVERIFY(!names().contains(QStringLiteral("carl")));
+        QVERIFY(window.archivedButton()->isVisible());
+        QCOMPARE(window.archivedButton()->text(), QStringLiteral("Archived Chats (1)"));
+        window.archivedButton()->click();
+        QVERIFY(window.showingArchived());
+        QCOMPARE(names(), QStringLiteral("carl"));
+        window.archivedButton()->click();
+        QVERIFY(!window.showingArchived());
+        // Their next message brings it back; muted, it would stay.
+        store.addMessage(id["carl"], QStringLiteral("are you there?"), QStringLiteral("carl"));
+        QVERIFY(names().contains(QStringLiteral("carl")));
+        QVERIFY(!window.archivedButton()->isVisible());
+
+        // Four pins at most.
+        for (const QString &name : {QStringLiteral("bob"), QStringLiteral("carl")})
+            QVERIFY(window.pinConversation(id[name], true));
+        QVERIFY(window.pinConversation(store.noteToSelf(), true));
+        const qint64 dora = store.addConversation(QStringLiteral("direct"), QStringLiteral("dora"), QStringLiteral("dora"));
+        store.setAccepted(dora);
+        QVERIFY(!window.pinConversation(dora, true));
+        QVERIFY(window.noticeLabel()->isVisible());
+        QVERIFY(names().startsWith(QStringLiteral("anna bob carl")));
+        if (qEnvironmentVariableIsSet("CHAT_TEST_GRAB")) {
+            window.pinConversation(store.noteToSelf(), false);
+            window.pinConversation(id["carl"], false);
+            window.muteConversation(id["bob"], -1);
+            store.addMessage(id["bob"], QStringLiteral("muted but still here"), QStringLiteral("bob"));
+            window.archiveConversation(dora, true);
+            window.resize(1000, 640);
+            QTest::qWait(200);
+            window.grab().save(qEnvironmentVariable("CHAT_TEST_GRAB"));
+        }
+    }
+
     void findInAConversation()
     {
         ChatStore store(TestSupport::home() + QStringLiteral("/finding.sqlite"));

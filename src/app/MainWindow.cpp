@@ -73,6 +73,8 @@ enum Role {
     EditedRole,      // edited after it was sent
     HighlightRole,   // the search's current match
     VoiceRole,       // a voice message's attachment (plays on a click)
+    MutedRole,       // a conversation's notifications are off
+    PinnedRole,      // a conversation pinned on top
 };
 
 QString shortTime(const QDateTime &when)
@@ -137,7 +139,14 @@ public:
         name.setBold(true);
         const QFontMetrics nameMetrics(name);
         const QFontMetrics plain(option.font);
-        const QString time = index.data(TimeRole).toString();
+        // Pinned, muted: small marks before the time.
+        const bool muted = index.data(MutedRole).toBool();
+        QString time = index.data(TimeRole).toString();
+        if (muted)
+            time = QStringLiteral("🔕 ") + time;
+        if (index.data(PinnedRole).toBool())
+            time = QStringLiteral("📌 ") + time;
+        time = time.trimmed();
         const int timeWidth = plain.horizontalAdvance(time) + 8;
         p->setFont(name);
         p->setPen(m_theme->fg);
@@ -156,7 +165,7 @@ public:
             const QRect badge(text.right() - w, text.bottom() - 19, w, 20);
             QPainterPath pill;
             pill.addRoundedRect(badge, 10, 10);
-            p->fillPath(pill, m_theme->accent);
+            p->fillPath(pill, muted && !request ? m_theme->dimFg : m_theme->accent); // muted: grey
             p->setPen(Qt::white);
             p->drawText(badge, Qt::AlignCenter, count);
             lastWidth -= w + 6;
@@ -520,7 +529,7 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
     sideLayout->setSpacing(0);
     auto *sideTitle = new QLabel(tr("Chats"), sidebar);
     sideTitle->setObjectName(QStringLiteral("sidebarTitle"));
-    auto *search = new QLineEdit(sidebar);
+    auto *search = m_search = new QLineEdit(sidebar);
     search->setObjectName(QStringLiteral("searchField"));
     search->setPlaceholderText(tr("Search"));
     search->setClearButtonEnabled(true);
@@ -538,14 +547,32 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
     sideLayout->addWidget(sideTitle);
     sideLayout->addWidget(m_connection);
     sideLayout->addWidget(m_notice);
+    // "Archived Chats (3)" when there are some; in there, the way back.
+    m_archivedButton = new QToolButton(sidebar);
+    m_archivedButton->setObjectName(QStringLiteral("archivedButton"));
+    m_archivedButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    m_archivedButton->setAutoRaise(true);
+    m_archivedButton->setCursor(Qt::PointingHandCursor);
+    m_archivedButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_archivedButton->hide();
+    connect(m_archivedButton, &QToolButton::clicked, this, [this] { showArchived(!m_showArchived); });
     sideLayout->addWidget(search);
+    sideLayout->addWidget(m_archivedButton);
     sideLayout->addWidget(m_conversations, 1);
-    connect(search, &QLineEdit::textChanged, this, [this](const QString &text) {
-        for (int i = 0; i < m_conversations->count(); ++i) {
-            QListWidgetItem *item = m_conversations->item(i);
-            item->setHidden(!text.isEmpty() && !item->text().contains(text, Qt::CaseInsensitive)
-                             && !item->data(PeerRole).toString().contains(text, Qt::CaseInsensitive));
-        }
+    connect(search, &QLineEdit::textChanged, this, &MainWindow::applySearch);
+    m_conversations->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_conversations, &QWidget::customContextMenuRequested, this, [this](const QPoint &pos) {
+        QListWidgetItem *item = m_conversations->itemAt(pos);
+        if (!item)
+            return;
+        std::unique_ptr<QMenu> menu(conversationMenu(item->data(IdRole).toLongLong()));
+        if (menu && !menu->isEmpty())
+            menu->exec(m_conversations->viewport()->mapToGlobal(pos));
+    });
+    m_muteTimer.setSingleShot(true);
+    connect(&m_muteTimer, &QTimer::timeout, this, [this] {
+        reloadConversations();
+        updateUnread();
     });
 
     // The chosen conversation.
@@ -971,6 +998,16 @@ void MainWindow::buildMenus()
     });
     m_leaveAction = conversation->addAction(tr("Leave Group…"), this, [this] { leaveGroup(true); });
     conversation->addSeparator();
+    m_pinAction = conversation->addAction(tr("Pin Chat"), this, [this] {
+        pinConversation(m_current, m_store->conversation(m_current).pinned == 0);
+    });
+    m_muteMenu = conversation->addMenu(tr("Mute Notifications"));
+    m_archiveAction = conversation->addAction(tr("Archive Chat"), this, [this] {
+        archiveConversation(m_current, !m_store->conversation(m_current).archived);
+    });
+    connect(conversation, &QMenu::aboutToShow, this, &MainWindow::updateChatActions);
+    updateChatActions();
+    conversation->addSeparator();
     m_timerMenu = conversation->addMenu(tr("Disappearing Messages"));
     auto *timers = new QActionGroup(m_timerMenu);
     for (qint64 seconds : {0LL, 30LL, 300LL, 3600LL, 8 * 3600LL, 24 * 3600LL, 7 * 24 * 3600LL, 28 * 24 * 3600LL}) {
@@ -1038,7 +1075,28 @@ void MainWindow::reloadConversations()
     const QSignalBlocker block(m_conversations);
     m_conversations->clear();
     QListWidgetItem *current = nullptr;
-    for (const ChatStore::Conversation &c : m_store->conversations()) {
+    const QList<ChatStore::Conversation> all = m_store->conversations();
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    int archived = 0;
+    qint64 nextUnmute = 0;
+    for (const ChatStore::Conversation &c : all) {
+        archived += c.archived ? 1 : 0;
+        if (c.isMuted(now) && c.mutedUntil != ChatStore::MutedForever && (nextUnmute == 0 || c.mutedUntil < nextUnmute))
+            nextUnmute = c.mutedUntil;
+    }
+    if (m_showArchived && archived == 0)
+        m_showArchived = false; // nothing left in there
+    m_archivedButton->setText(m_showArchived ? tr("←  Archived Chats") : tr("Archived Chats (%1)").arg(archived));
+    m_archivedButton->setToolTip(m_showArchived ? tr("Back to your chats") : QString());
+    m_archivedButton->setVisible(m_showArchived || archived > 0);
+    // When the next mute runs out, the list shows it (a day at most, then again).
+    if (nextUnmute != 0)
+        m_muteTimer.start(int(qBound<qint64>(1000, nextUnmute - now + 500, 24 * 3600 * 1000LL)));
+    else
+        m_muteTimer.stop();
+    for (const ChatStore::Conversation &c : all) {
+        if (c.archived != m_showArchived)
+            continue;
         const bool direct = c.kind == QLatin1String("direct");
         auto *item = new QListWidgetItem(direct && m_messenger ? m_messenger->displayName(c.peer) : c.title,
                                          m_conversations);
@@ -1054,11 +1112,115 @@ void MainWindow::reloadConversations()
         item->setData(TimeRole, c.lastText.isEmpty() ? QString() : shortTime(c.lastActivity));
         item->setData(UnreadRole, c.id == m_current || c.request ? 0 : c.unread);
         item->setData(RequestRole, c.request);
+        item->setData(MutedRole, c.isMuted(now));
+        item->setData(PinnedRole, c.pinned > 0);
         if (c.id == m_current)
             current = item;
     }
     if (current)
         m_conversations->setCurrentItem(current);
+    applySearch();
+}
+
+void MainWindow::applySearch()
+{
+    const QString text = m_search ? m_search->text() : QString();
+    for (int i = 0; i < m_conversations->count(); ++i) {
+        QListWidgetItem *item = m_conversations->item(i);
+        item->setHidden(!text.isEmpty() && !item->text().contains(text, Qt::CaseInsensitive)
+                        && !item->data(PeerRole).toString().contains(text, Qt::CaseInsensitive));
+    }
+}
+
+void MainWindow::showArchived(bool show)
+{
+    m_showArchived = show;
+    reloadConversations();
+}
+
+void MainWindow::muteConversation(qint64 conversation, qint64 seconds)
+{
+    const ChatStore::Conversation c = m_store->conversation(conversation);
+    if (c.id == 0 || c.request || c.kind == QLatin1String("self"))
+        return;
+    m_store->setMutedUntil(conversation, seconds < 0   ? ChatStore::MutedForever
+                                         : seconds == 0 ? 0
+                                                        : QDateTime::currentMSecsSinceEpoch() + seconds * 1000);
+}
+
+void MainWindow::archiveConversation(qint64 conversation, bool archived)
+{
+    const ChatStore::Conversation c = m_store->conversation(conversation);
+    if (c.id == 0 || c.request)
+        return;
+    m_store->setArchived(conversation, archived);
+}
+
+bool MainWindow::pinConversation(qint64 conversation, bool pinned)
+{
+    const ChatStore::Conversation c = m_store->conversation(conversation);
+    if (c.id == 0 || c.request)
+        return false;
+    if (!m_store->setPinned(conversation, pinned)) {
+        showNotice(tr("You can pin up to %1 chats.").arg(ChatStore::MaxPinned));
+        return false;
+    }
+    return true;
+}
+
+void MainWindow::fillMuteMenu(QMenu *menu, qint64 conversation)
+{
+    menu->clear();
+    const ChatStore::Conversation c = m_store->conversation(conversation);
+    if (c.isMuted()) {
+        if (c.mutedUntil != ChatStore::MutedForever) {
+            const QDateTime until = QDateTime::fromMSecsSinceEpoch(c.mutedUntil).toLocalTime();
+            menu->addAction(tr("Muted until %1").arg(QLocale().toString(until, QLocale::ShortFormat)))->setEnabled(false);
+        }
+        menu->addAction(tr("Unmute"), this, [this, conversation] { muteConversation(conversation, 0); })
+            ->setObjectName(QStringLiteral("unmuteAction"));
+        return;
+    }
+    const QList<QPair<QString, qint64>> choices{
+        {tr("For 1 Hour"), 3600}, {tr("For 8 Hours"), 8 * 3600}, {tr("For 1 Day"), 24 * 3600},
+        {tr("For 1 Week"), 7 * 24 * 3600}, {tr("Always"), -1},
+    };
+    for (const auto &[label, seconds] : choices) {
+        QAction *a = menu->addAction(label, this, [this, conversation, seconds = seconds] { muteConversation(conversation, seconds); });
+        a->setData(seconds);
+    }
+}
+
+void MainWindow::updateChatActions()
+{
+    const ChatStore::Conversation c = m_store->conversation(m_current);
+    const bool can = c.id != 0 && !c.request;
+    m_pinAction->setText(c.pinned > 0 ? tr("Unpin Chat") : tr("Pin Chat"));
+    m_pinAction->setEnabled(can);
+    m_archiveAction->setText(c.archived ? tr("Unarchive Chat") : tr("Archive Chat"));
+    m_archiveAction->setEnabled(can);
+    m_muteMenu->setEnabled(can && c.kind != QLatin1String("self"));
+    fillMuteMenu(m_muteMenu, m_current);
+}
+
+QMenu *MainWindow::conversationMenu(qint64 conversation)
+{
+    const ChatStore::Conversation c = m_store->conversation(conversation);
+    if (c.id == 0 || c.request)
+        return nullptr; // a request: answered first, in its bar
+    auto *menu = new QMenu(this);
+    menu->addAction(c.pinned > 0 ? tr("Unpin Chat") : tr("Pin Chat"), this,
+                    [this, conversation, pin = c.pinned == 0] { pinConversation(conversation, pin); })
+        ->setObjectName(QStringLiteral("pinAction"));
+    if (c.kind != QLatin1String("self")) {
+        QMenu *mute = menu->addMenu(tr("Mute Notifications"));
+        mute->setObjectName(QStringLiteral("muteMenu"));
+        fillMuteMenu(mute, conversation);
+    }
+    menu->addAction(c.archived ? tr("Unarchive Chat") : tr("Archive Chat"), this,
+                    [this, conversation, archive = !c.archived] { archiveConversation(conversation, archive); })
+        ->setObjectName(QStringLiteral("archiveAction"));
+    return menu;
 }
 
 void MainWindow::openConversation(qint64 id)
@@ -2129,6 +2291,8 @@ void MainWindow::notify(qint64 conversation, const QString &from, const QString 
     if (isActiveWindow() && !isMinimized() && conversation == m_current)
         return;
     // Their chosen name; for a request, with the username too (anyone can choose any name).
+    if (m_store->conversation(conversation).isMuted())
+        return; // muted: nothing at all
     const QString who = m_messenger ? m_messenger->displayName(from) : from;
     QString shownName = request && who != from ? QStringLiteral("%1 (@%2)").arg(who, from) : who;
     const ChatStore::Conversation c = m_store->conversation(conversation);
@@ -2145,8 +2309,10 @@ void MainWindow::notify(qint64 conversation, const QString &from, const QString 
 int MainWindow::unreadCount() const
 {
     int count = 0;
-    for (const ChatStore::Conversation &c : m_store->conversations())
-        count += c.request ? (c.unread > 0 ? 1 : 0) : c.unread;
+    for (const ChatStore::Conversation &c : m_store->conversations()) {
+        if (!c.isMuted())
+            count += c.request ? (c.unread > 0 ? 1 : 0) : c.unread;
+    }
     return count;
 }
 

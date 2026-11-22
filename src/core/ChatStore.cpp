@@ -149,6 +149,10 @@ void ChatStore::createTables()
     addColumn(QStringLiteral("messages"), QStringLiteral("quote_uid"), QStringLiteral("TEXT NOT NULL DEFAULT ''"));
     addColumn(QStringLiteral("messages"), QStringLiteral("quote_author"), QStringLiteral("TEXT NOT NULL DEFAULT ''"));
     addColumn(QStringLiteral("messages"), QStringLiteral("quote_text"), QStringLiteral("TEXT NOT NULL DEFAULT ''"));
+    // Added with mute, archive and pin.
+    addColumn(QStringLiteral("conversations"), QStringLiteral("muted_until"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
+    addColumn(QStringLiteral("conversations"), QStringLiteral("archived"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
+    addColumn(QStringLiteral("conversations"), QStringLiteral("pinned"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
     q.exec(QStringLiteral("CREATE INDEX IF NOT EXISTS messages_by_expiry ON messages(expires_at)"));
     // Reactions: one per person per message; mine with author ''. A removal
     // of mine stays (emoji '') until it has been sent.
@@ -230,6 +234,7 @@ QList<ChatStore::Conversation> ChatStore::conversations() const
     QList<Conversation> out;
     QSqlQuery q(m_db);
     q.exec(QStringLiteral("SELECT c.id, c.kind, c.title, c.peer, c.last_activity, c.state, c.expire_seconds,"
+                          " c.muted_until, c.archived, c.pinned,"
                           // The newest message: its text, or else its first attachment's name.
                           " (SELECT CASE WHEN m.body = '' THEN COALESCE((SELECT CASE WHEN a.voice = 1 THEN '🎤 Voice message'"
                           "  ELSE '📎 ' || a.name END FROM attachments a WHERE a.message = m.id ORDER BY a.id LIMIT 1), '')"
@@ -237,7 +242,9 @@ QList<ChatStore::Conversation> ChatStore::conversations() const
                           "  FROM messages m WHERE m.conversation = c.id ORDER BY sent_at DESC, id DESC LIMIT 1),"
                           " (SELECT COUNT(*) FROM messages m WHERE m.conversation = c.id AND m.seen = 0 AND m.author <> ''),"
                           " (SELECT m.deleted FROM messages m WHERE m.conversation = c.id ORDER BY sent_at DESC, id DESC LIMIT 1)"
-                          " FROM conversations c ORDER BY c.last_activity DESC, c.id DESC"));
+                          // Pinned first, in the order pinned; then the newest.
+                          " FROM conversations c ORDER BY CASE WHEN c.pinned > 0 THEN 0 ELSE 1 END, c.pinned,"
+                          " c.last_activity DESC, c.id DESC"));
     while (q.next()) {
         Conversation c;
         c.id = q.value(0).toLongLong();
@@ -248,9 +255,12 @@ QList<ChatStore::Conversation> ChatStore::conversations() const
         c.request = q.value(5).toString() == QLatin1String("request");
         c.left = q.value(5).toString() == QLatin1String("left");
         c.expireSeconds = q.value(6).toLongLong();
-        c.lastText = q.value(7).toString();
-        c.unread = q.value(8).toInt();
-        c.lastDeleted = q.value(9).toBool();
+        c.mutedUntil = q.value(7).toLongLong();
+        c.archived = q.value(8).toBool();
+        c.pinned = q.value(9).toInt();
+        c.lastText = q.value(10).toString();
+        c.unread = q.value(11).toInt();
+        c.lastDeleted = q.value(12).toBool();
         out.append(c);
     }
     return out;
@@ -311,6 +321,48 @@ void ChatStore::setAccepted(qint64 conversation)
     q.addBindValue(conversation);
     if (q.exec() && q.numRowsAffected() > 0)
         emit conversationsChanged();
+}
+
+void ChatStore::setMutedUntil(qint64 conversation, qint64 untilMs)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("UPDATE conversations SET muted_until = ? WHERE id = ?"));
+    q.addBindValue(qMax<qint64>(0, untilMs));
+    q.addBindValue(conversation);
+    if (q.exec() && q.numRowsAffected() > 0)
+        emit conversationsChanged();
+}
+
+void ChatStore::setArchived(qint64 conversation, bool archived)
+{
+    QSqlQuery q(m_db);
+    q.prepare(archived ? QStringLiteral("UPDATE conversations SET archived = 1, pinned = 0 WHERE id = ?")
+                       : QStringLiteral("UPDATE conversations SET archived = 0 WHERE id = ?"));
+    q.addBindValue(conversation);
+    if (q.exec() && q.numRowsAffected() > 0)
+        emit conversationsChanged();
+}
+
+bool ChatStore::setPinned(qint64 conversation, bool pinned)
+{
+    QSqlQuery q(m_db);
+    if (!pinned) {
+        q.prepare(QStringLiteral("UPDATE conversations SET pinned = 0 WHERE id = ?"));
+        q.addBindValue(conversation);
+    } else {
+        q.exec(QStringLiteral("SELECT COUNT(*), COALESCE(MAX(pinned), 0) FROM conversations WHERE pinned > 0"));
+        if (!q.next())
+            return false;
+        if (q.value(0).toInt() >= MaxPinned)
+            return false;
+        const int next = q.value(1).toInt() + 1;
+        q.prepare(QStringLiteral("UPDATE conversations SET pinned = ?, archived = 0 WHERE id = ? AND pinned = 0"));
+        q.addBindValue(next);
+        q.addBindValue(conversation);
+    }
+    if (q.exec() && q.numRowsAffected() > 0)
+        emit conversationsChanged();
+    return true;
 }
 
 void ChatStore::deleteConversation(qint64 conversation)
@@ -421,6 +473,14 @@ ChatStore::Message ChatStore::addMessage(qint64 conversation, const QString &bod
     touch.addBindValue(m.sentAt.toMSecsSinceEpoch());
     touch.addBindValue(conversation);
     touch.exec();
+    if (!author.isEmpty()) {
+        // Theirs brings an archived conversation back, unless it is muted (as Signal's).
+        QSqlQuery back(m_db);
+        back.prepare(QStringLiteral("UPDATE conversations SET archived = 0 WHERE id = ? AND archived = 1 AND muted_until <= ?"));
+        back.addBindValue(conversation);
+        back.addBindValue(QDateTime::currentMSecsSinceEpoch());
+        back.exec();
+    }
     emit messagesChanged(conversation);
     emit conversationsChanged();
     return m;
