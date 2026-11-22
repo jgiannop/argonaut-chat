@@ -245,6 +245,57 @@ private slots:
                                    + QByteArray(MaxQuoteChars + 1, 'x') + "\"}}")));
     }
 
+    void mentions()
+    {
+        const QString gid = newGroupId();
+        Content text = Content::text("Hi @Anna and @Bob");
+        text.group = gid;
+        text.mentions = {Mention{3, 5, "anna"}, Mention{13, 4, "bob"}};
+        auto back = decodeContent(encodeContent(text));
+        QVERIFY(back);
+        QCOMPARE(back->mentions, text.mentions);
+        QVERIFY(decodeContent(encodeContent(Content::text("none")))->mentions.isEmpty());
+        // An edit carries them too.
+        back = decodeContent(encodeContent(Content::edit(newMessageId(), "carol", "@Anna, late", gid, {Mention{0, 5, "anna"}})));
+        QVERIFY(back);
+        QCOMPARE(back->mentions, (QList<Mention>{Mention{0, 5, "anna"}}));
+
+        // Only inside the text, in order, apart, of real usernames, never splitting a character.
+        const QString body = QString::fromUtf8("@Anna 👍 @Bob");
+        QVERIFY(isValidMentions({Mention{0, 5, "anna"}, Mention{9, 4, "bob"}}, body));
+        QVERIFY(isValidMentions({}, body));
+        for (const QList<Mention> &bad : QList<QList<Mention>>{
+                 {Mention{0, 5, "Anna!"}},                      // not a username
+                 {Mention{-1, 5, "anna"}},                      // before it
+                 {Mention{0, 0, "anna"}},                       // empty
+                 {Mention{9, 5, "bob"}},                        // past its end
+                 {Mention{9, 4, "bob"}, Mention{0, 5, "anna"}}, // out of order
+                 {Mention{0, 5, "anna"}, Mention{4, 2, "bob"}}, // overlapping
+                 {Mention{7, 2, "anna"}},                       // half of 👍
+                 {Mention{5, 2, "anna"}}}) {                    // the other half
+            QVERIFY(!isValidMentions(bad, body));
+            text.body = body;
+            text.mentions = bad;
+            QVERIFY(encodeContent(text).isEmpty());
+        }
+        QList<Mention> many;
+        for (int i = 0; i <= MaxMentions; ++i)
+            many.append(Mention{i, 1, "anna"});
+        QVERIFY(!isValidMentions(many, QString(MaxMentions + 1, QLatin1Char('x'))));
+
+        // Not taken from anyone either.
+        const QByteArray head = "{\"v\":1,\"t\":\"text\",\"id\":\"" + newMessageId().toLatin1() + "\",\"sent\":1,\"body\":\"@Anna hi\",";
+        QVERIFY(decodeContent(pad(head + "\"mentions\":[{\"start\":0,\"length\":5,\"user\":\"anna\"}]}")));
+        QVERIFY(!decodeContent(pad(head + "\"mentions\":[]}")));
+        QVERIFY(!decodeContent(pad(head + "\"mentions\":{}}")));
+        QVERIFY(!decodeContent(pad(head + "\"mentions\":[{\"start\":0,\"length\":50,\"user\":\"anna\"}]}")));
+        QVERIFY(!decodeContent(pad(head + "\"mentions\":[{\"start\":0,\"length\":5,\"user\":5}]}")));
+        QVERIFY(!decodeContent(pad(head + "\"mentions\":[{\"start\":0,\"length\":5}]}")));
+        QVERIFY(!decodeContent(pad(head + "\"mentions\":[{\"start\":0.5,\"length\":5,\"user\":\"anna\"}]}")));
+        QVERIFY(!decodeContent(pad(head + "\"mentions\":[{\"start\":0,\"length\":5,\"user\":\"anna\",\"x\":1}]}")));
+        QVERIFY(!decodeContent(pad(head + "\"mentions\":[5]}")));
+    }
+
     void reactions()
     {
         const QString target = newMessageId();

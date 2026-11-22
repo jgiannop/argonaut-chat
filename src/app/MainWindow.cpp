@@ -38,7 +38,11 @@
 #include <QScrollBar>
 #include <QSplitter>
 #include <QStyledItemDelegate>
+#include <QRegularExpression>
+#include <QTextBlock>
 #include <QTextLayout>
+
+#include <cmath>
 #include <QStandardPaths>
 #include <QTimer>
 #include <QToolButton>
@@ -76,6 +80,9 @@ enum Role {
     MutedRole,       // a conversation's notifications are off
     PinnedRole,      // a conversation pinned on top
     DividerRole,     // the first unread one: "New messages" drawn above it
+    MentionsRole,    // its @mentions: [start, length, me] each (QVariantList)
+    MentionedRole,   // a conversation with an unread @mention of me
+    UsernameRole,    // the mention list: a member's username
 };
 
 QString shortTime(const QDateTime &when)
@@ -170,6 +177,16 @@ public:
             p->setPen(Qt::white);
             p->drawText(badge, Qt::AlignCenter, count);
             lastWidth -= w + 6;
+            if (index.data(MentionedRole).toBool() && !request) {
+                // An @mention of me among them: "@" before the count, never grey.
+                const QRect at(badge.left() - 26, badge.top(), 20, 20);
+                p->setPen(Qt::NoPen);
+                p->setBrush(m_theme->accent);
+                p->drawEllipse(at);
+                p->setPen(Qt::white);
+                p->drawText(at, Qt::AlignCenter, QStringLiteral("@"));
+                lastWidth -= 26;
+            }
         }
         p->setPen(m_theme->dimFg);
         p->drawText(QRect(text.left(), text.bottom() - plain.height(), lastWidth, plain.height()), Qt::AlignLeft | Qt::AlignVCenter,
@@ -251,6 +268,46 @@ public:
     static int reactionHeight(const QStyleOptionViewItem &option) { return QFontMetrics(option.font).height() + 8; }
     static constexpr int QuoteBar = 3;
 
+    // A text with @mentions: laid out here (as drawText would wrap it), each
+    // mention on a tint, mine (of me) bold on a stronger one. Its size.
+    static QSize layMentions(QTextLayout &layout, const QStyleOptionViewItem &option, const QModelIndex &index, int width,
+                             bool mine, const Theme *theme)
+    {
+        QString text = index.data().toString();
+        text.replace(QLatin1Char('\n'), QChar::LineSeparator); // the same length: the ranges still fit
+        layout.setText(text);
+        layout.setFont(textFont(option, index));
+        QTextOption wrap;
+        wrap.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+        layout.setTextOption(wrap);
+        QList<QTextLayout::FormatRange> formats;
+        for (const QVariant &v : index.data(MentionsRole).toList()) {
+            const QVariantList m = v.toList();
+            QTextLayout::FormatRange range;
+            range.start = m.value(0).toInt();
+            range.length = m.value(1).toInt();
+            QColor tint = mine ? QColor(255, 255, 255) : theme->accent;
+            const bool me = m.value(2).toBool();
+            tint.setAlpha(me ? 110 : 55);
+            range.format.setBackground(tint);
+            if (me)
+                range.format.setFontWeight(QFont::Bold);
+            formats.append(range);
+        }
+        layout.setFormats(formats);
+        layout.beginLayout();
+        qreal y = 0;
+        qreal w = 0;
+        for (QTextLine line = layout.createLine(); line.isValid(); line = layout.createLine()) {
+            line.setLineWidth(width);
+            line.setPosition(QPointF(0, y));
+            y += line.height();
+            w = qMax(w, line.naturalTextWidth());
+        }
+        layout.endLayout();
+        return {int(std::ceil(w)), int(std::ceil(y))};
+    }
+
     struct Layout
     {
         QRect image; // relative to the bubble's top left
@@ -309,7 +366,13 @@ public:
             width = qMax(width, w);
         }
         const QString text = index.data().toString();
-        if (!text.isEmpty()) {
+        if (!text.isEmpty() && !index.data(MentionsRole).toList().isEmpty()) {
+            QTextLayout lay;
+            const QSize t = layMentions(lay, option, index, most, index.data(OutgoingRole).toBool(), m_theme);
+            l.text = QRect(Pad, y, t.width(), t.height());
+            y += t.height();
+            width = qMax(width, t.width());
+        } else if (!text.isEmpty()) {
             const QRect t = QFontMetrics(textFont(option, index)).boundingRect(QRect(0, 0, most, 100000), Qt::TextWordWrap, text);
             l.text = QRect(Pad, y, t.width(), t.height());
             y += t.height();
@@ -516,7 +579,14 @@ public:
             p->setFont(textFont(option, index));
             if (deleted)
                 p->setPen(mine ? QColor(255, 255, 255, 200) : m_theme->dimFg);
-            p->drawText(l.text.translated(origin), Qt::TextWordWrap, index.data().toString());
+            if (!index.data(MentionsRole).toList().isEmpty()) {
+                const int most = qMax(120, option.rect.width() * 7 / 10) - 2 * Pad; // as in layout()
+                QTextLayout lay;
+                layMentions(lay, option, index, most, mine, m_theme);
+                lay.draw(p, l.text.translated(origin).topLeft());
+            } else {
+                p->drawText(l.text.translated(origin), Qt::TextWordWrap, index.data().toString());
+            }
             p->setFont(option.font);
         }
         p->setFont(small);
@@ -732,6 +802,17 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
     attachLayout->setSpacing(6);
     m_attachBar->hide();
     composerOuter->addWidget(m_attachBar);
+    // Above the field in a group, after "@": the members to mention.
+    m_mentionList = new QListWidget(composer);
+    m_mentionList->setObjectName(QStringLiteral("mentionList"));
+    m_mentionList->setFocusPolicy(Qt::NoFocus);
+    m_mentionList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_mentionList->hide();
+    composerOuter->addWidget(m_mentionList);
+    connect(m_mentionList, &QListWidget::itemClicked, this, [this](QListWidgetItem *item) {
+        m_mentionList->setCurrentItem(item);
+        pickMention();
+    });
     auto *composerLayout = new QHBoxLayout;
     composerLayout->setContentsMargins(0, 0, 0, 0);
     composerOuter->addLayout(composerLayout);
@@ -879,8 +960,12 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
     setCentralWidget(split);
 
     connect(m_send, &QPushButton::clicked, this, &MainWindow::send);
+    connect(m_compose, &QPlainTextEdit::cursorPositionChanged, this, &MainWindow::updateMentionList);
     connect(m_compose, &QPlainTextEdit::textChanged, this, [this] {
         updateSendButton();
+        if (m_compose->document()->isEmpty())
+            m_mentions.clear(); // sent, or cleared: they were for that text
+        updateMentionList();
         // The field grows with what is written, up to six lines.
         const int lines = qBound(1, int(m_compose->document()->size().height()), 6);
         m_compose->setFixedHeight(qMax(40, lines * m_compose->fontMetrics().lineSpacing() + 18));
@@ -1175,6 +1260,7 @@ void MainWindow::reloadConversations()
         item->setData(RequestRole, c.request);
         item->setData(MutedRole, c.isMuted(now));
         item->setData(PinnedRole, c.pinned > 0);
+        item->setData(MentionedRole, c.mentioned && c.id != m_current);
         if (c.id == m_current)
             current = item;
     }
@@ -1587,6 +1673,18 @@ void MainWindow::reloadMessages()
         item->setData(IdRole, m.id);
         item->setData(DeletedRole, m.deleted);
         item->setData(EditedRole, m.editedAt > 0 && !m.deleted);
+        if (!m.deleted && !m.mentions.isEmpty()) {
+            QVariantList mentions;
+            for (const Protocol::Mention &x : m.mentions)
+                mentions.append(QVariant(QVariantList{x.start, x.length,
+                                                      !m.outgoing() && m_messenger && x.username == m_messenger->username()}));
+            item->setData(MentionsRole, mentions);
+            QStringList who;
+            for (const Protocol::Mention &x : m.mentions)
+                who << QStringLiteral("@") + x.username;
+            who.removeDuplicates();
+            item->setToolTip(who.join(QStringLiteral(", ")));
+        }
         if (m.id == match) {
             item->setData(HighlightRole, true);
             matchItem = item;
@@ -2298,6 +2396,9 @@ void MainWindow::startEdit(qint64 message)
     m_replyLabel->setText(tr("Editing: %1").arg(m.body.simplified().left(200)));
     m_replyBar->show();
     m_compose->setPlainText(m.body);
+    m_mentions.clear();
+    for (const Protocol::Mention &x : m.mentions)
+        m_mentions.append({x.username, m.body.mid(x.start, x.length)});
     m_compose->moveCursor(QTextCursor::End);
     m_compose->setFocus();
 }
@@ -2328,7 +2429,7 @@ void MainWindow::send()
     if (m_editing != 0) {
         // Saved: the new text (unchanged or impossible: nothing happens).
         if (m_messenger && !text.isEmpty())
-            m_messenger->edit(m_editing, text);
+            m_messenger->edit(m_editing, text, composedMentions(text));
         m_compose->clear();
         cancelReply();
         return;
@@ -2341,9 +2442,11 @@ void MainWindow::send()
         while (!m_pending.isEmpty()) {
             const PendingFile f = m_pending.first();
             const QString caption = m_pending.size() == 1 ? text : QString();
+            const QList<Protocol::Mention> mentions = composedMentions(caption);
             QString error;
-            const qint64 id = f.path.isEmpty() ? m_messenger->sendFileData(m_current, f.name, f.data, caption, &error, m_replyTo)
-                                               : m_messenger->sendFile(m_current, f.path, caption, &error, m_replyTo);
+            const qint64 id = f.path.isEmpty()
+                                  ? m_messenger->sendFileData(m_current, f.name, f.data, caption, &error, m_replyTo, mentions)
+                                  : m_messenger->sendFile(m_current, f.path, caption, &error, m_replyTo, mentions);
             if (id == 0) {
                 showNotice(tr("%1: %2").arg(f.name, error));
                 refreshAttachBar();
@@ -2360,7 +2463,7 @@ void MainWindow::send()
     if (text.isEmpty() || m_current == 0)
         return;
     if (m_messenger)
-        m_messenger->send(m_current, text, m_replyTo);
+        m_messenger->send(m_current, text, m_replyTo, composedMentions(text));
     else
         m_store->addMessage(m_current, text);
     m_compose->clear();
@@ -2424,6 +2527,30 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
     // Enter sends; Shift+Enter is a new line.
     if (watched == m_compose && event->type() == QEvent::KeyPress) {
         auto *key = static_cast<QKeyEvent *>(event);
+        // The mention list open: ↑ ↓ choose, Enter or Tab takes, Esc closes.
+        if (m_mentionList->isVisible()) {
+            const int row = m_mentionList->currentRow();
+            const int count = m_mentionList->count();
+            switch (key->key()) {
+            case Qt::Key_Up:
+                m_mentionList->setCurrentRow((row + count - 1) % count);
+                return true;
+            case Qt::Key_Down:
+                m_mentionList->setCurrentRow((row + 1) % count);
+                return true;
+            case Qt::Key_Return:
+            case Qt::Key_Enter:
+            case Qt::Key_Tab:
+                pickMention();
+                return true;
+            case Qt::Key_Escape:
+                m_mentionDismissed = m_mentionStart;
+                m_mentionList->hide();
+                return true;
+            default:
+                break;
+            }
+        }
         if ((key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) && !(key->modifiers() & Qt::ShiftModifier)) {
             send();
             return true;
@@ -2438,14 +2565,141 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
     return QMainWindow::eventFilter(watched, event);
 }
 
-void MainWindow::notify(qint64 conversation, const QString &from, const QString &text, bool request)
+QString MainWindow::mentionLabel(const QString &username, const QStringList &members) const
+{
+    const QString name = m_messenger ? m_messenger->displayName(username) : username;
+    // Two of them by the same name: the username, to tell them apart.
+    for (const QString &other : members) {
+        if (other != username && m_messenger && m_messenger->displayName(other) == name)
+            return QStringLiteral("@") + username;
+    }
+    return QStringLiteral("@") + (name.isEmpty() ? username : name);
+}
+
+void MainWindow::updateMentionList()
+{
+    const ChatStore::Conversation c = m_store->conversation(m_current);
+    m_mentionStart = -1;
+    if (m_compose->document()->isEmpty())
+        m_mentionDismissed = -1;
+    if (!m_messenger || c.kind != QLatin1String("group") || c.left || !m_compose->textCursor().selectedText().isEmpty()) {
+        m_mentionList->hide();
+        return;
+    }
+    // "@" and what follows it, up to the cursor, in this line, with no space in between.
+    const QTextCursor cursor = m_compose->textCursor();
+    const QString line = cursor.block().text().left(cursor.positionInBlock());
+    const int at = line.lastIndexOf(QLatin1Char('@'));
+    const QString query = at < 0 ? QString() : line.mid(at + 1);
+    if (at < 0 || (at > 0 && !line.at(at - 1).isSpace()) || query.contains(QRegularExpression(QStringLiteral("\\s")))
+        || query.size() > 32) {
+        m_mentionList->hide();
+        return;
+    }
+    m_mentionStart = cursor.block().position() + at;
+    // The "@" closed with Esc: no list for it while it is there.
+    if (m_mentionDismissed >= 0 && m_compose->document()->characterAt(m_mentionDismissed) != QLatin1Char('@'))
+        m_mentionDismissed = -1;
+    if (m_mentionStart == m_mentionDismissed) {
+        m_mentionList->hide();
+        return;
+    }
+    const QString me = m_messenger->username();
+    const QStringList members = m_store->group(m_current).members;
+    struct Candidate
+    {
+        QString username;
+        QString name;
+    };
+    QList<Candidate> found;
+    for (const QString &member : members) {
+        if (member == me)
+            continue;
+        const QString name = m_messenger->displayName(member);
+        bool match = query.isEmpty() || member.startsWith(query, Qt::CaseInsensitive);
+        for (const QString &word : name.split(QLatin1Char(' '), Qt::SkipEmptyParts))
+            match = match || word.startsWith(query, Qt::CaseInsensitive);
+        if (match)
+            found.append({member, name});
+    }
+    std::sort(found.begin(), found.end(), [](const Candidate &a, const Candidate &b) {
+        return QString::localeAwareCompare(a.name, b.name) < 0;
+    });
+    const QString current = m_mentionList->currentItem() ? m_mentionList->currentItem()->data(UsernameRole).toString() : QString();
+    m_mentionList->clear();
+    for (const Candidate &candidate : found) {
+        auto *item = new QListWidgetItem(candidate.name == candidate.username
+                                             ? QStringLiteral("@") + candidate.username
+                                             : QStringLiteral("%1  @%2").arg(candidate.name, candidate.username),
+                                         m_mentionList);
+        item->setData(UsernameRole, candidate.username);
+        if (candidate.username == current)
+            m_mentionList->setCurrentItem(item);
+    }
+    if (found.isEmpty()) {
+        m_mentionList->hide();
+        return;
+    }
+    if (!m_mentionList->currentItem())
+        m_mentionList->setCurrentRow(0);
+    const int rows = qMin(int(found.size()), 5);
+    m_mentionList->setFixedHeight(rows * m_mentionList->sizeHintForRow(0) + 2 * m_mentionList->frameWidth() + 4);
+    m_mentionList->show();
+}
+
+void MainWindow::pickMention()
+{
+    QListWidgetItem *item = m_mentionList->currentItem();
+    if (!item || m_mentionStart < 0)
+        return;
+    const QString username = item->data(UsernameRole).toString();
+    const QString label = mentionLabel(username, m_store->group(m_current).members);
+    QTextCursor cursor = m_compose->textCursor();
+    cursor.setPosition(m_mentionStart, QTextCursor::KeepAnchor);
+    m_mentions.append({username, label}); // before the text changes: it is kept
+    cursor.insertText(label + QLatin1Char(' '));
+    m_compose->setTextCursor(cursor);
+    m_mentionList->hide();
+}
+
+QList<Protocol::Mention> MainWindow::composedMentions(const QString &text) const
+{
+    // Each picked label wherever it still stands on its own in the text.
+    QList<Protocol::Mention> found;
+    for (const ComposeMention &m : m_mentions) {
+        for (int i = text.indexOf(m.label); i >= 0; i = text.indexOf(m.label, i + 1)) {
+            const int end = i + int(m.label.size());
+            const bool alone = (i == 0 || !text.at(i - 1).isLetterOrNumber())
+                               && (end == text.size() || !text.at(end).isLetterOrNumber());
+            if (alone)
+                found.append({i, int(m.label.size()), m.username});
+        }
+    }
+    // In order; of two that overlap, the longer.
+    std::sort(found.begin(), found.end(), [](const Protocol::Mention &a, const Protocol::Mention &b) {
+        return a.start != b.start ? a.start < b.start : a.length > b.length;
+    });
+    QList<Protocol::Mention> out;
+    int end = 0;
+    for (const Protocol::Mention &m : found) {
+        if (m.start >= end) {
+            out.append(m);
+            end = m.start + m.length;
+        }
+    }
+    while (out.size() > Protocol::MaxMentions)
+        out.removeLast();
+    return out;
+}
+
+void MainWindow::notify(qint64 conversation, const QString &from, const QString &text, bool request, bool mentionsMe)
 {
     // In front of them already: nothing to say.
     if (isActiveWindow() && !isMinimized() && conversation == m_current)
         return;
     // Their chosen name; for a request, with the username too (anyone can choose any name).
-    if (m_store->conversation(conversation).isMuted())
-        return; // muted: nothing at all
+    if (m_store->conversation(conversation).isMuted() && !mentionsMe)
+        return; // muted: nothing, unless it @mentions me (as Signal does)
     const QString who = m_messenger ? m_messenger->displayName(from) : from;
     QString shownName = request && who != from ? QStringLiteral("%1 (@%2)").arg(who, from) : who;
     const ChatStore::Conversation c = m_store->conversation(conversation);

@@ -382,7 +382,21 @@ void Messenger::fetchSessions(const QString &to, const Done &done)
     });
 }
 
-qint64 Messenger::send(qint64 conversation, const QString &text, qint64 replyTo)
+QList<Protocol::Mention> Messenger::mentionsIn(qint64 conversation, const QString &text,
+                                              const QList<Protocol::Mention> &mentions, bool me) const
+{
+    QList<Protocol::Mention> out;
+    if (mentions.isEmpty() || m_store->conversation(conversation).kind != QLatin1String("group")
+        || !Protocol::isValidMentions(mentions, text))
+        return out;
+    for (const Protocol::Mention &m : mentions) {
+        if (m_store->isMember(conversation, m.username) && (me || m.username != username()))
+            out.append(m);
+    }
+    return out;
+}
+
+qint64 Messenger::send(qint64 conversation, const QString &text, qint64 replyTo, const QList<Protocol::Mention> &mentions)
 {
     const ChatStore::Conversation c = m_store->conversation(conversation);
     if (c.id == 0 || text.isEmpty())
@@ -412,6 +426,8 @@ qint64 Messenger::send(qint64 conversation, const QString &text, qint64 replyTo)
                             content.id, QStringLiteral("sending"));
     if (message.id != 0 && quote)
         m_store->setQuote(message.id, quote->id, quote->author, quote->text);
+    if (message.id != 0)
+        m_store->setMentions(message.id, mentionsIn(conversation, text, mentions, false), false);
     m_typingSentAt.remove(conversation); // the message says it: no "stopped" needed
     if (message.id != 0 && c.expireSeconds > 0) {
         m_store->setMessageExpiry(message.id, c.expireSeconds, now()); // mine: from now
@@ -577,15 +593,16 @@ bool Messenger::canEdit(qint64 message) const
            && now() - m.sentAt.toMSecsSinceEpoch() <= EditMs;
 }
 
-bool Messenger::edit(qint64 message, const QString &text)
+bool Messenger::edit(qint64 message, const QString &text, const QList<Protocol::Mention> &mentions)
 {
     const ChatStore::Message m = m_store->message(message);
     const bool hasFiles = !m_store->attachments(message).isEmpty();
-    if (!canEdit(message) || text == m.body || (text.isEmpty() && !hasFiles)
+    const QList<Protocol::Mention> kept = mentionsIn(m.conversation, text, mentions, false);
+    if (!canEdit(message) || (text == m.body && kept == m.mentions) || (text.isEmpty() && !hasFiles)
         || text.toUtf8().size() > Protocol::MaxTextBytes)
         return false;
     const bool note = m_store->conversation(m.conversation).kind == QLatin1String("self");
-    m_store->editMessage(message, text, qMax(nextLocalTime(), m.editedAt + 1), !note);
+    m_store->editMessage(message, text, qMax(nextLocalTime(), m.editedAt + 1), !note, kept);
     sendPendingEdits();
     return true;
 }
@@ -604,7 +621,7 @@ void Messenger::sendPendingEdits()
             m_store->setEditSent(id, m.editedAt);
             continue;
         }
-        const Protocol::Content content = Protocol::Content::edit(m.uid, username(), m.body, group ? c.peer : QString());
+        const Protocol::Content content = Protocol::Content::edit(m.uid, username(), m.body, group ? c.peer : QString(), m.mentions);
         Protocol::Content copy = content;
         if (!group)
             copy.sentTo = c.peer;
@@ -647,7 +664,10 @@ void Messenger::handleEdit(const QString &from, const Protocol::Envelope &envelo
         || envelope.serverTime - m.sentAt.toMSecsSinceEpoch() > 2 * EditMs || content.sentAt < m.editedAt
         || (content.body.isEmpty() && m_store->attachments(target).isEmpty()))
         return;
-    m_store->editMessage(target, content.body, content.sentAt);
+    const QList<Protocol::Mention> mentions = mentionsIn(conversation, content.body, content.mentions, !mine);
+    const bool mentionsMe = !mine && std::any_of(mentions.begin(), mentions.end(),
+                                                 [this](const Protocol::Mention &x) { return x.username == username(); });
+    m_store->editMessage(target, content.body, content.sentAt, false, mentions, mentionsMe);
 }
 
 // --- Deleting ---
@@ -880,6 +900,7 @@ void Messenger::deliver(const ChatStore::Message &message)
     content.expireSeconds = message.expireSeconds;
     if (message.isReply() && Protocol::isValidMessageId(message.quoteUid))
         content.quote = Protocol::Quote{message.quoteUid, message.quoteAuthor, message.quoteText};
+    content.mentions = message.mentions;
     for (const ChatStore::StoredAttachment &a : attachments)
         content.attachments.append({a.remoteId, a.key, a.digest, a.size, a.name, a.type, a.voice});
     if (Protocol::encodeContent(content).isEmpty()) {
@@ -925,7 +946,7 @@ void Messenger::deliveryFailed(qint64 message, const QString &error, const QStri
 }
 
 qint64 Messenger::sendFile(qint64 conversation, const QString &path, const QString &caption, QString *error,
-                           qint64 replyTo)
+                           qint64 replyTo, const QList<Protocol::Mention> &mentions)
 {
     auto fail = [error](const QString &why) {
         if (error)
@@ -940,11 +961,11 @@ qint64 Messenger::sendFile(qint64 conversation, const QString &path, const QStri
         return fail(tr("The file could not be read."));
     if (file.size() > Attachment::MaxFileBytes)
         return fail(tr("The file is larger than %1 MB.").arg(Attachment::MaxFileBytes / (1024 * 1024)));
-    return sendFileData(conversation, QFileInfo(path).fileName(), file.readAll(), caption, error, replyTo);
+    return sendFileData(conversation, QFileInfo(path).fileName(), file.readAll(), caption, error, replyTo, mentions);
 }
 
 qint64 Messenger::sendFileData(qint64 conversation, const QString &fileName, const QByteArray &data, const QString &caption,
-                               QString *error, qint64 replyTo)
+                               QString *error, qint64 replyTo, const QList<Protocol::Mention> &mentions)
 {
     if (data.size() > Attachment::MaxFileBytes) {
         if (error)
@@ -954,7 +975,7 @@ qint64 Messenger::sendFileData(qint64 conversation, const QString &fileName, con
     QString type = QMimeDatabase().mimeTypeForFileNameAndData(fileName, data.left(4096)).name();
     if (!Attachment::isValidType(type))
         type = QStringLiteral("application/octet-stream");
-    return sendData(conversation, fileName, type, data, caption, error, replyTo, false);
+    return sendData(conversation, fileName, type, data, caption, error, replyTo, false, mentions);
 }
 
 qint64 Messenger::sendVoice(qint64 conversation, const QByteArray &samples, QString *error, qint64 replyTo)
@@ -971,7 +992,8 @@ qint64 Messenger::sendVoice(qint64 conversation, const QByteArray &samples, QStr
 }
 
 qint64 Messenger::sendData(qint64 conversation, const QString &fileName, const QString &type, const QByteArray &data,
-                           const QString &caption, QString *error, qint64 replyTo, bool voice)
+                           const QString &caption, QString *error, qint64 replyTo, bool voice,
+                           const QList<Protocol::Mention> &mentions)
 {
     auto fail = [error](const QString &why) {
         if (error)
@@ -1001,6 +1023,7 @@ qint64 Messenger::sendData(qint64 conversation, const QString &fileName, const Q
                             content.id, direct ? QStringLiteral("sending") : QStringLiteral("sent"));
     if (message.id == 0)
         return fail(tr("The message could not be kept."));
+    m_store->setMentions(message.id, mentionsIn(conversation, caption, mentions, false), false);
     if (c.expireSeconds > 0) {
         m_store->setMessageExpiry(message.id, c.expireSeconds, now());
         scheduleExpiry();
@@ -1348,6 +1371,12 @@ void Messenger::handleContent(const QString &from, const Protocol::Envelope &env
         conversation, content.body, from, QDateTime::fromMSecsSinceEpoch(sentAt, QTimeZone::utc()), content.id);
     if (content.quote)
         m_store->setQuote(message.id, content.quote->id, content.quote->author, content.quote->text);
+    // @mentions: only of the group's members.
+    const QList<Protocol::Mention> mentions = mentionsIn(conversation, content.body, content.mentions, true);
+    const bool mentionsMe = std::any_of(mentions.begin(), mentions.end(),
+                                        [this](const Protocol::Mention &m) { return m.username == username(); });
+    if (!mentions.isEmpty())
+        m_store->setMentions(message.id, mentions, mentionsMe);
     if (content.expireSeconds > 0)
         m_store->setMessageExpiry(message.id, content.expireSeconds, 0); // counts once seen
     // Its attachments: fetched now, or once a request is accepted.
@@ -1373,7 +1402,7 @@ void Messenger::handleContent(const QString &from, const Protocol::Envelope &env
     const QString shown = !content.body.isEmpty() || content.attachments.isEmpty() ? content.body
                           : content.attachments.first().voice ? tr("🎤 Voice message")
                                                               : QStringLiteral("📎 ") + content.attachments.first().name;
-    emit messageReceived(conversation, from, shown, request);
+    emit messageReceived(conversation, from, shown, request, mentionsMe);
 }
 
 // --- Safety numbers ---
@@ -2025,6 +2054,8 @@ void Messenger::handleSync(const Protocol::Envelope &envelope, const Protocol::C
             content.id, QStringLiteral("sent"));
         if (content.quote)
             m_store->setQuote(message.id, content.quote->id, content.quote->author, content.quote->text);
+        if (!content.mentions.isEmpty())
+            m_store->setMentions(message.id, mentionsIn(conversation, content.body, content.mentions, false), false);
         if (content.expireSeconds > 0) {
             m_store->setMessageExpiry(message.id, content.expireSeconds, content.sentAt);
             scheduleExpiry();

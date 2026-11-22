@@ -313,6 +313,103 @@ private slots:
         QVERIFY(later.readReceipts());
     }
 
+    // @mentions in a group: "@" lists the members, one picked is sent as a mention.
+    void mentionsInAGroup()
+    {
+        ChatStore store(TestSupport::home() + QStringLiteral("/mentions.sqlite"));
+        KeyStore keys(&store);
+        Messenger messenger(&store, &keys);
+        ChatStore::Group g;
+        g.id = Protocol::newGroupId();
+        g.name = QStringLiteral("Trip");
+        g.admin = QStringLiteral("anna");
+        g.members = {QStringLiteral("anna"), QStringLiteral("bob"), QStringLiteral("carl")};
+        g.revision = 1;
+        const qint64 trip = store.addGroup(g, false);
+        store.setProfile(QStringLiteral("anna"), QStringLiteral("Anna Smith"), std::nullopt);
+        store.setProfile(QStringLiteral("bob"), QStringLiteral("Bob"), std::nullopt);
+        const qint64 direct = store.addConversation(QStringLiteral("direct"), QStringLiteral("bob"), QStringLiteral("bob"));
+        store.setAccepted(direct);
+        MainWindow window(&store, &messenger);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        auto *list = window.findChild<QListWidget *>(QStringLiteral("mentionList"));
+        QVERIFY(list);
+        QPlainTextEdit *field = window.composeField();
+
+        // In a direct chat: no list.
+        window.openConversation(direct);
+        field->setFocus();
+        QTest::keyClicks(field, QStringLiteral("@"));
+        QVERIFY(list->isHidden());
+        field->clear();
+
+        window.openConversation(trip);
+        field->setFocus();
+        QTest::keyClicks(field, QStringLiteral("Hi @"));
+        QVERIFY(list->isVisible());
+        QCOMPARE(list->count(), 3);
+        QTest::keyClicks(field, QStringLiteral("sm")); // her surname
+        QCOMPARE(list->count(), 1);
+        QCOMPARE(list->item(0)->text(), QStringLiteral("Anna Smith  @anna"));
+        QTest::keyClick(field, Qt::Key_Return); // takes it, doesn't send
+        QCOMPARE(field->toPlainText(), QStringLiteral("Hi @Anna Smith "));
+        QVERIFY(list->isHidden());
+        QCOMPARE(store.messages(trip).size(), 0);
+        QTest::keyClicks(field, QStringLiteral("and @"));
+        QCOMPARE(list->count(), 3);
+        QTest::keyClick(field, Qt::Key_Down); // Bob
+        QTest::keyClick(field, Qt::Key_Tab);
+        QCOMPARE(field->toPlainText(), QStringLiteral("Hi @Anna Smith and @Bob "));
+        // Esc: away until another "@".
+        QTest::keyClicks(field, QStringLiteral("@c"));
+        QVERIFY(list->isVisible());
+        QTest::keyClick(field, Qt::Key_Escape);
+        QVERIFY(list->isHidden());
+        QTest::keyClicks(field, QStringLiteral("a"));
+        QVERIFY(list->isHidden());
+        QTest::keyClicks(field, QStringLiteral(" @"));
+        QVERIFY(list->isVisible());
+        QTest::keyClick(field, Qt::Key_Backspace);
+        QTest::keyClick(field, Qt::Key_Backspace);
+        QTest::keyClick(field, Qt::Key_Return); // sent
+        QCOMPARE(store.messages(trip).size(), 1);
+        const ChatStore::Message sent = store.messages(trip).last();
+        QCOMPARE(sent.body, QStringLiteral("Hi @Anna Smith and @Bob @ca"));
+        QCOMPARE(sent.mentions, (QList<Protocol::Mention>{Protocol::Mention{3, 11, QStringLiteral("anna")},
+                                                           Protocol::Mention{19, 4, QStringLiteral("bob")}}));
+        QTRY_COMPARE(window.messages()->count(), 1);
+        const int mentionsRole = Qt::UserRole + 26, mentionedRole = Qt::UserRole + 27;
+        QCOMPARE(window.messages()->item(0)->data(mentionsRole).toList().size(), 2);
+
+        // Theirs, mentioning me: marked in the list until read; notified even when muted.
+        window.openConversation(store.noteToSelf()); // elsewhere: it stays unread
+        const ChatStore::Message theirs = store.addMessage(trip, QStringLiteral("@You come?"), QStringLiteral("anna"));
+        store.setMentions(theirs.id, {Protocol::Mention{0, 4, QStringLiteral("anna")}}, true);
+        auto row = [&] {
+            for (int r = 0; r < window.conversations()->count(); ++r)
+                if (window.conversations()->item(r)->data(Qt::UserRole + 1).toLongLong() == trip)
+                    return window.conversations()->item(r);
+            return static_cast<QListWidgetItem *>(nullptr);
+        };
+        QVERIFY(row() && row()->data(mentionedRole).toBool());
+        if (qEnvironmentVariableIsSet("CHAT_TEST_GRAB")) {
+            window.openConversation(trip);
+            window.resize(1000, 640);
+            QTest::qWait(200);
+            window.grab().save(qEnvironmentVariable("CHAT_TEST_GRAB"));
+            window.openConversation(store.noteToSelf());
+        }
+        store.setMutedUntil(trip, ChatStore::MutedForever);
+        QSignalSpy notified(&window, &MainWindow::notified);
+        emit messenger.messageReceived(trip, QStringLiteral("anna"), QStringLiteral("psst"), false, false);
+        QCOMPARE(notified.size(), 0);
+        emit messenger.messageReceived(trip, QStringLiteral("anna"), QStringLiteral("@You come?"), false, true);
+        QCOMPARE(notified.size(), 1);
+        window.openConversation(trip);
+        QVERIFY(!store.conversation(trip).mentioned);
+    }
+
     // A click on a reply's quote goes to what it answers, outlined for a moment.
     void jumpToTheQuotedMessage()
     {
@@ -570,8 +667,8 @@ private slots:
         QVERIFY(store.conversation(id["bob"]).mutedUntil > QDateTime::currentMSecsSinceEpoch() + 3500 * 1000);
         QCOMPARE(window.unreadCount(), 2);
         QSignalSpy notified(&window, &MainWindow::notified);
-        emit messenger.messageReceived(id["bob"], QStringLiteral("bob"), QStringLiteral("psst"), false);
-        emit messenger.messageReceived(id["carl"], QStringLiteral("carl"), QStringLiteral("hey"), false);
+        emit messenger.messageReceived(id["bob"], QStringLiteral("bob"), QStringLiteral("psst"), false, false);
+        emit messenger.messageReceived(id["carl"], QStringLiteral("carl"), QStringLiteral("hey"), false, false);
         QCOMPARE(notified.size(), 1);
         QCOMPARE(notified.at(0).at(0).toLongLong(), id["carl"]);
         for (int r = 0; r < list->count(); ++r)

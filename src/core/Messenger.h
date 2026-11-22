@@ -69,18 +69,19 @@ public:
     void startConversation(const QString &username, const std::function<void(qint64 conversation, const QString &error)> &done);
     // Mine: kept at once, sent when it can be. Note to Self stays here.
     // `replyTo`: a message of this conversation it answers (quoted, as Signal does).
-    qint64 send(qint64 conversation, const QString &text, qint64 replyTo = 0);
+    // `mentions`: @mentions in `text`, in a group only, of its other members (others dropped).
+    qint64 send(qint64 conversation, const QString &text, qint64 replyTo = 0, const QList<Protocol::Mention> &mentions = {});
     // A file (at most Attachment::MaxFileBytes), with an optional caption:
     // encrypted here, kept here as the encrypted blob, uploaded, then the
     // message with its key goes as any other. 0 and `error` if it cannot be.
     qint64 sendFile(qint64 conversation, const QString &path, const QString &caption, QString *error = nullptr,
-                    qint64 replyTo = 0);
+                    qint64 replyTo = 0, const QList<Protocol::Mention> &mentions = {});
     // A voice message: 16-bit mono samples at Voice::SampleRate, sent as a
     // WAV attachment marked "voice".
     // The same for bytes in memory (a pasted picture: never written to disk
     // unencrypted); its type is told from its name and its start.
     qint64 sendFileData(qint64 conversation, const QString &fileName, const QByteArray &data, const QString &caption,
-                        QString *error = nullptr, qint64 replyTo = 0);
+                        QString *error = nullptr, qint64 replyTo = 0, const QList<Protocol::Mention> &mentions = {});
     qint64 sendVoice(qint64 conversation, const QByteArray &samples, QString *error = nullptr, qint64 replyTo = 0);
     // What a reply to `message` quotes: its id, author and the start of its text.
     std::optional<Protocol::Quote> quoteOf(qint64 message) const;
@@ -166,7 +167,11 @@ public:
     // (my other devices too) sees the new text, marked edited. Files stay.
     static constexpr qint64 EditMs = 24LL * 3600 * 1000;
     bool canEdit(qint64 message) const;
-    bool edit(qint64 message, const QString &text);
+    bool edit(qint64 message, const QString &text, const QList<Protocol::Mention> &mentions = {});
+    // The @mentions that may stay in a message of `conversation`: in a group,
+    // of its members (`me` too, or not), in order; none if they don't fit `text`.
+    QList<Protocol::Mention> mentionsIn(qint64 conversation, const QString &text, const QList<Protocol::Mention> &mentions,
+                                        bool me) const;
 
     // Deleting (as Signal's). For me: from this computer only, any message.
     // For everyone: mine, sent, at most DeleteForEveryoneMs ago; the others
@@ -203,7 +208,8 @@ signals:
     void stateChanged(Messenger::State state);
     void safetyNumberChanged(const QString &username);
     // A new text from someone (not a receipt, not one seen before, not blocked).
-    void messageReceived(qint64 conversation, const QString &from, const QString &text, bool request);
+    // `mentionsMe`: it @mentions me (notified even when muted, as Signal does).
+    void messageReceived(qint64 conversation, const QString &from, const QString &text, bool request, bool mentionsMe);
     // For people: something went wrong that they should know of.
     void problem(const QString &text);
     // Who is typing in `conversation` changed (typingIn).
@@ -227,7 +233,8 @@ private:
 
     void flushOutbox();
     qint64 sendData(qint64 conversation, const QString &fileName, const QString &type, const QByteArray &data,
-                    const QString &caption, QString *error, qint64 replyTo, bool voice);
+                    const QString &caption, QString *error, qint64 replyTo, bool voice,
+                    const QList<Protocol::Mention> &mentions = {});
     void deliver(const ChatStore::Message &message);
     // A message of mine did not go: again later, or failed for good.
     void deliveryFailed(qint64 message, const QString &error, const QString &why);

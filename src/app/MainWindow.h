@@ -172,7 +172,23 @@ private:
     QString typingText(qint64 conversation) const;
     // "You", or their name: who wrote what a reply answers.
     QString quoteAuthorName(const QString &author) const;
-    void notify(qint64 conversation, const QString &from, const QString &text, bool request);
+    void notify(qint64 conversation, const QString &from, const QString &text, bool request, bool mentionsMe = false);
+    // @mentions while writing in a group: `mentionList` under the field shows
+    // the members matching what follows "@"; one picked becomes "@Name".
+    struct ComposeMention
+    {
+        QString username;
+        QString label; // "@Name", as written in the field
+    };
+    QList<ComposeMention> m_mentions;
+    QListWidget *m_mentionList = nullptr;
+    int m_mentionStart = -1;     // where the "@" being completed is in the field
+    int m_mentionDismissed = -1; // Esc on that "@": no list for it
+    void updateMentionList();
+    void pickMention();
+    QString mentionLabel(const QString &username, const QStringList &members) const;
+    // Where the picked ones are in `text` (the field's, trimmed).
+    QList<Protocol::Mention> composedMentions(const QString &text) const;
     void updateUnread();
 
     ChatStore *m_store;

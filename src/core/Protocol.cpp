@@ -245,7 +245,8 @@ Content Content::typingNow(bool started, const QString &group)
     return content;
 }
 
-Content Content::edit(const QString &targetId, const QString &me, const QString &body, const QString &group)
+Content Content::edit(const QString &targetId, const QString &me, const QString &body, const QString &group,
+                      const QList<Mention> &mentions)
 {
     Content content;
     content.type = Type::Edit;
@@ -254,6 +255,7 @@ Content Content::edit(const QString &targetId, const QString &me, const QString 
     content.quote = Quote{targetId, me, QString()};
     content.body = body;
     content.group = group;
+    content.mentions = mentions;
     return content;
 }
 
@@ -267,6 +269,60 @@ Content Content::deletion(const QString &targetId, const QString &me, const QStr
     content.group = group;
     return content;
 }
+
+bool isValidMentions(const QList<Mention> &mentions, const QString &body)
+{
+    if (mentions.size() > MaxMentions)
+        return false;
+    int end = 0; // where the one before ends
+    for (const Mention &m : mentions) {
+        if (!isValidUsername(m.username) || m.start < end || m.length < 1 || m.length > body.size()
+            || m.start > body.size() - m.length)
+            return false;
+        // Not in the middle of a character made of two units.
+        const int stop = m.start + m.length;
+        if (body.at(m.start).isLowSurrogate() || (stop < body.size() && body.at(stop).isLowSurrogate()))
+            return false;
+        end = stop;
+    }
+    return true;
+}
+
+namespace {
+
+QJsonArray mentionsToJson(const QList<Mention> &mentions)
+{
+    QJsonArray list;
+    for (const Mention &m : mentions)
+        list.append(QJsonObject{{QStringLiteral("start"), m.start},
+                                {QStringLiteral("length"), m.length},
+                                {QStringLiteral("user"), m.username}});
+    return list;
+}
+
+// Absent: none. Anything wrong: nothing.
+std::optional<QList<Mention>> mentionsFromJson(const QJsonValue &value, const QString &body)
+{
+    if (value.isUndefined())
+        return QList<Mention>();
+    if (!value.isArray() || value.toArray().isEmpty() || value.toArray().size() > MaxMentions)
+        return std::nullopt;
+    QList<Mention> out;
+    for (const QJsonValue &item : value.toArray()) {
+        const QJsonObject o = item.toObject();
+        const auto start = Json::integer(o.value(QStringLiteral("start")), 0, MaxTextBytes);
+        const auto length = Json::integer(o.value(QStringLiteral("length")), 1, MaxTextBytes);
+        const QJsonValue user = o.value(QStringLiteral("user"));
+        if (!item.isObject() || o.size() != 3 || !start || !length || !user.isString())
+            return std::nullopt;
+        out.append(Mention{int(*start), int(*length), user.toString()});
+    }
+    if (!isValidMentions(out, body))
+        return std::nullopt;
+    return out;
+}
+
+} // namespace
 
 bool isValidReaction(const QString &emoji)
 {
@@ -391,6 +447,10 @@ QByteArray encodeContent(const Content &content)
         if (content.expireSeconds > 0)
             json.insert(QStringLiteral("expire"), double(content.expireSeconds));
         json.insert(QStringLiteral("body"), content.body);
+        if (!isValidMentions(content.mentions, content.body))
+            return {};
+        if (!content.mentions.isEmpty())
+            json.insert(QStringLiteral("mentions"), mentionsToJson(content.mentions));
         if (content.quote) {
             if (!isValidMessageId(content.quote->id) || !isValidUsername(content.quote->author)
                 || content.quote->text.size() > MaxQuoteChars)
@@ -453,6 +513,10 @@ QByteArray encodeContent(const Content &content)
         json.insert(QStringLiteral("target"), QJsonObject{{QStringLiteral("id"), content.quote->id},
                                                           {QStringLiteral("author"), content.quote->author}});
         json.insert(QStringLiteral("body"), content.body);
+        if (!isValidMentions(content.mentions, content.body))
+            return {};
+        if (!content.mentions.isEmpty())
+            json.insert(QStringLiteral("mentions"), mentionsToJson(content.mentions));
         if (!content.group.isEmpty())
             json.insert(QStringLiteral("group"), content.group);
         if (!content.sentTo.isEmpty())
@@ -544,6 +608,10 @@ std::optional<Content> decodeContent(const QByteArray &padded)
             return std::nullopt;
         content.type = Content::Type::Text;
         content.body = body.toString();
+        const auto mentions = mentionsFromJson(json.value(QStringLiteral("mentions")), content.body);
+        if (!mentions)
+            return std::nullopt;
+        content.mentions = *mentions;
         const QJsonValue group = json.value(QStringLiteral("group"));
         if (!group.isUndefined()) {
             if (!group.isString() || !isValidGroupId(group.toString()))
@@ -619,6 +687,10 @@ std::optional<Content> decodeContent(const QByteArray &padded)
             if (!body.isString() || body.toString().toUtf8().size() > MaxTextBytes)
                 return std::nullopt;
             content.body = body.toString();
+            const auto mentions = mentionsFromJson(json.value(QStringLiteral("mentions")), content.body);
+            if (!mentions)
+                return std::nullopt;
+            content.mentions = *mentions;
         }
         const QJsonValue target = json.value(QStringLiteral("target"));
         const QJsonValue id = target.toObject().value(QStringLiteral("id"));

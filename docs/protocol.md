@@ -82,6 +82,26 @@ where the original is gone. A quote that is not exactly that object drops
 the whole message. Versions before 0.2 ignore the field and show the text
 alone.
 
+### Mentions
+
+A group's text (or an edit of one) may @mention members, as Signal's body
+ranges do:
+
+```json
+{"v":1, "t":"text", …, "body":"Hi @Anna", "group":"<32 hex>",
+ "mentions":[{"start":3, "length":5, "user":"anna"}]}
+```
+
+`start` and `length` count UTF-16 code units of `body` (as QString and
+JavaScript do); the text there is what the sender's app showed, so
+older versions (0.2.0 and before) ignore the field and show the text as it is. At most 50, in order, not
+overlapping, inside `body`, never splitting a character, each object
+exactly these three fields with `user` a username; anything else drops
+the whole message. On arrival, mentions of people who are not members of
+that group, and all mentions in direct messages, are dropped. A mention of
+me notifies even in a muted conversation, and marks it "@" in the list
+until read. An edit's `mentions` replace the old ones (none: none left).
+
 ### Reactions
 
 One emoji per person per message, as Signal's; a new one replaces the

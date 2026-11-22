@@ -6,6 +6,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QSet>
 #include <QJsonObject>
@@ -153,6 +154,9 @@ void ChatStore::createTables()
     addColumn(QStringLiteral("conversations"), QStringLiteral("muted_until"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
     addColumn(QStringLiteral("conversations"), QStringLiteral("archived"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
     addColumn(QStringLiteral("conversations"), QStringLiteral("pinned"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
+    // Added with @mentions.
+    addColumn(QStringLiteral("messages"), QStringLiteral("mentions"), QStringLiteral("TEXT NOT NULL DEFAULT ''"));
+    addColumn(QStringLiteral("messages"), QStringLiteral("mentions_me"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
     q.exec(QStringLiteral("CREATE INDEX IF NOT EXISTS messages_by_expiry ON messages(expires_at)"));
     // Reactions: one per person per message; mine with author ''. A removal
     // of mine stays (emoji '') until it has been sent.
@@ -193,7 +197,30 @@ namespace {
 
 const QString kMessageColumns =
     QStringLiteral("id, conversation, author, body, sent_at, status, uid, expire_seconds, expires_at, system,"
-                   " quote_uid, quote_author, quote_text, deleted, edited_at");
+                   " quote_uid, quote_author, quote_text, deleted, edited_at, mentions, mentions_me");
+
+// Kept as compact JSON: [[start, length, username], …].
+QString mentionsText(const QList<Protocol::Mention> &mentions)
+{
+    if (mentions.isEmpty())
+        return QStringLiteral("");
+    QJsonArray list;
+    for (const Protocol::Mention &m : mentions)
+        list.append(QJsonArray{m.start, m.length, m.username});
+    return QString::fromUtf8(QJsonDocument(list).toJson(QJsonDocument::Compact));
+}
+
+QList<Protocol::Mention> mentionsFrom(const QString &text, const QString &body)
+{
+    QList<Protocol::Mention> out;
+    if (text.isEmpty())
+        return out;
+    for (const QJsonValue &item : QJsonDocument::fromJson(text.toUtf8()).array()) {
+        const QJsonArray m = item.toArray();
+        out.append(Protocol::Mention{m.at(0).toInt(), m.at(1).toInt(), m.at(2).toString()});
+    }
+    return Protocol::isValidMentions(out, body) ? out : QList<Protocol::Mention>();
+}
 
 ChatStore::Message messageFrom(const QSqlQuery &q)
 {
@@ -213,6 +240,8 @@ ChatStore::Message messageFrom(const QSqlQuery &q)
     m.quoteText = q.value(12).toString();
     m.deleted = q.value(13).toBool();
     m.editedAt = q.value(14).toLongLong();
+    m.mentions = mentionsFrom(q.value(15).toString(), m.body);
+    m.mentionsMe = q.value(16).toBool() && !m.mentions.isEmpty();
     return m;
 }
 
@@ -241,7 +270,9 @@ QList<ChatStore::Conversation> ChatStore::conversations() const
                           "  ELSE m.body END"
                           "  FROM messages m WHERE m.conversation = c.id ORDER BY sent_at DESC, id DESC LIMIT 1),"
                           " (SELECT COUNT(*) FROM messages m WHERE m.conversation = c.id AND m.seen = 0 AND m.author <> ''),"
-                          " (SELECT m.deleted FROM messages m WHERE m.conversation = c.id ORDER BY sent_at DESC, id DESC LIMIT 1)"
+                          " (SELECT m.deleted FROM messages m WHERE m.conversation = c.id ORDER BY sent_at DESC, id DESC LIMIT 1),"
+                          " EXISTS (SELECT 1 FROM messages m WHERE m.conversation = c.id AND m.seen = 0 AND m.author <> ''"
+                          "  AND m.mentions_me = 1 AND m.deleted = 0)"
                           // Pinned first, in the order pinned; then the newest.
                           " FROM conversations c ORDER BY CASE WHEN c.pinned > 0 THEN 0 ELSE 1 END, c.pinned,"
                           " c.last_activity DESC, c.id DESC"));
@@ -261,6 +292,7 @@ QList<ChatStore::Conversation> ChatStore::conversations() const
         c.lastText = q.value(10).toString();
         c.unread = q.value(11).toInt();
         c.lastDeleted = q.value(12).toBool();
+        c.mentioned = q.value(13).toBool();
         out.append(c);
     }
     return out;
@@ -568,13 +600,18 @@ QStringList dropAttachments(QSqlDatabase &db, qint64 message)
 
 } // namespace
 
-void ChatStore::editMessage(qint64 message, const QString &body, qint64 at, bool pending)
+void ChatStore::editMessage(qint64 message, const QString &body, qint64 at, bool pending,
+                            const QList<Protocol::Mention> &mentions, bool mentionsMe)
 {
+    const bool valid = Protocol::isValidMentions(mentions, body);
     QSqlQuery q(m_db);
-    q.prepare(QStringLiteral("UPDATE messages SET body = ?, edited_at = ?, edit_pending = ? WHERE id = ? AND deleted = 0"));
+    q.prepare(QStringLiteral("UPDATE messages SET body = ?, edited_at = ?, edit_pending = ?, mentions = ?, mentions_me = ?"
+                             " WHERE id = ? AND deleted = 0"));
     q.addBindValue(text(body));
     q.addBindValue(at);
     q.addBindValue(pending ? 1 : 0);
+    q.addBindValue(mentionsText(valid ? mentions : QList<Protocol::Mention>()));
+    q.addBindValue(valid && mentionsMe && !mentions.isEmpty() ? 1 : 0);
     q.addBindValue(message);
     if (q.exec()) {
         emit messagesChanged(this->message(message).conversation);
@@ -629,7 +666,7 @@ void ChatStore::markDeleted(qint64 message, bool pending)
     q.prepare(QStringLiteral("DELETE FROM reactions WHERE message = ?"));
     q.addBindValue(message);
     q.exec();
-    q.prepare(QStringLiteral("UPDATE messages SET body = '', deleted = 1, delete_pending = ?,"
+    q.prepare(QStringLiteral("UPDATE messages SET body = '', deleted = 1, delete_pending = ?, mentions = '', mentions_me = 0,"
                              " quote_uid = '', quote_author = '', quote_text = '' WHERE id = ?"));
     q.addBindValue(pending ? 1 : 0);
     q.addBindValue(message);
@@ -742,6 +779,23 @@ qint64 ChatStore::messageByUid(qint64 conversation, const QString &uid) const
     q.addBindValue(conversation);
     q.addBindValue(uid);
     return q.exec() && q.next() ? q.value(0).toLongLong() : 0;
+}
+
+void ChatStore::setMentions(qint64 message, const QList<Protocol::Mention> &mentions, bool mentionsMe)
+{
+    const Message m = this->message(message);
+    if (m.id == 0 || m.deleted)
+        return;
+    const bool valid = Protocol::isValidMentions(mentions, m.body);
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("UPDATE messages SET mentions = ?, mentions_me = ? WHERE id = ?"));
+    q.addBindValue(mentionsText(valid ? mentions : QList<Protocol::Mention>()));
+    q.addBindValue(valid && mentionsMe && !mentions.isEmpty() ? 1 : 0);
+    q.addBindValue(message);
+    if (q.exec()) {
+        emit messagesChanged(m.conversation);
+        emit conversationsChanged();
+    }
 }
 
 void ChatStore::setQuote(qint64 message, const QString &uid, const QString &author, const QString &excerpt)

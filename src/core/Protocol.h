@@ -60,6 +60,23 @@ struct Quote
     bool operator==(const Quote &other) const { return id == other.id && author == other.author && text == other.text; }
 };
 
+// An @mention in a group's message, as Signal's body ranges: who (a
+// username) and where in the body (in UTF-16 units, as QString counts), the
+// text there being what the sender's app showed ("@Anna"). In order, not
+// overlapping, inside the body, never splitting a character.
+constexpr int MaxMentions = MaxGroupMembers;
+struct Mention
+{
+    int start = 0;
+    int length = 0;
+    QString username;
+    bool operator==(const Mention &other) const
+    {
+        return start == other.start && length == other.length && username == other.username;
+    }
+};
+bool isValidMentions(const QList<Mention> &mentions, const QString &body);
+
 struct Content
 {
     enum class Type { Text, Receipt, Profile, Group, Leave, Timer, Reaction, Delete, Edit, Typing };
@@ -83,6 +100,8 @@ struct Content
     // Text: the message it answers (a reply). Reaction, Delete, Edit: the
     // message it is about (its id and author; `text` unused).
     std::optional<Quote> quote;
+    // Text, Edit: the @mentions in `body` (`isValidMentions`).
+    QList<Mention> mentions;
     // Typing: started (true) or stopped.
     bool typing = false;
     // Reaction: one emoji (`isValidReaction`); `remove`: taken back.
@@ -109,7 +128,8 @@ struct Content
     // I am typing (or stopped) in a direct conversation, or a group's.
     static Content typingNow(bool started, const QString &group = QString());
     // My message `targetId` now says `body` (`me`: my username).
-    static Content edit(const QString &targetId, const QString &me, const QString &body, const QString &group = QString());
+    static Content edit(const QString &targetId, const QString &me, const QString &body, const QString &group = QString(),
+                        const QList<Mention> &mentions = {});
     // Deletes my message `targetId` for everyone (`me`: my username).
     static Content deletion(const QString &targetId, const QString &me, const QString &group = QString());
     static Content reaction(const QString &targetId, const QString &targetAuthor, const QString &emoji, bool remove,

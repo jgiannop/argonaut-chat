@@ -29,6 +29,9 @@ QWidget#replyBar { background: @pathBg; border-left: 3px solid @accent; border-r
 QLabel#replyLabel { color: @dimFg; }
 QWidget#recordBar { background: @pathBg; border-radius: 6px; }
 QWidget#attachBar { background: transparent; }
+QListWidget#mentionList { background: @popup; color: @fg; border: 1px solid @border; border-radius: 8px; padding: 2px; outline: none; }
+QListWidget#mentionList::item { padding: 4px 8px; border-radius: 6px; }
+QListWidget#mentionList::item:selected { background: @accent; color: white; }
 QToolButton#toBottomButton { background: @popup; color: @fg; border: 1px solid @border; border-radius: 20px; font-weight: bold; }
 QToolButton#toBottomButton:hover { background: @pathBg; }
 QToolButton#archivedButton { color: @dimFg; padding: 6px 12px; text-align: left; border: none; }

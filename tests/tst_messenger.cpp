@@ -1290,6 +1290,104 @@ private slots:
         QCOMPARE(status("one"), QString("read")); // what was read before stays so
     }
 
+    // @mentions (as Signal's): in groups only, of members only; mine notified.
+    void mentions()
+    {
+        Device alice(file("alice"));
+        Device bob(file("bob"));
+        Device carol(file("carol"));
+        Device dave(file("dave"));
+        for (auto &[device, name] : QList<QPair<Device *, QString>>{{&alice, "alice"}, {&bob, "bob"}, {&carol, "carol"}, {&dave, "dave"}})
+            QVERIFY(signUp(*device, name));
+        const qint64 aliceToBob = startConversation(alice, "bob");
+        alice.messenger->send(aliceToBob, "hi Bob");
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("alice") > 0, kWait);
+        const qint64 bobToAlice = bob.store->directConversation("alice");
+        bob.messenger->acceptRequest(bobToAlice);
+        std::optional<qint64> created;
+        alice.messenger->createGroup("Trip", {"bob", "carol"}, [&](qint64 c, const QString &) { created = c; });
+        QTRY_VERIFY_WITH_TIMEOUT(created.has_value() && *created > 0, kWait);
+        const qint64 trip = *created;
+        const QString gid = alice.store->group(trip).id;
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->groupConversation(gid) > 0, kWait);
+        QTRY_VERIFY_WITH_TIMEOUT(carol.store->groupConversation(gid) > 0, kWait);
+        const qint64 bobTrip = bob.store->groupConversation(gid);
+        const qint64 carolTrip = carol.store->groupConversation(gid);
+        carol.messenger->acceptRequest(carolTrip);
+        QSignalSpy bobHeard(bob.messenger.get(), &Messenger::messageReceived);
+        QSignalSpy carolHeard(carol.messenger.get(), &Messenger::messageReceived);
+
+        // Alice mentions Bob, and Dave (not in it) and herself: only Bob's stays.
+        const QString text = "@Bob @Dave @Alice pack";
+        const qint64 sent = alice.messenger->send(
+            trip, text, 0, {Protocol::Mention{0, 4, "bob"}, Protocol::Mention{5, 5, "dave"}, Protocol::Mention{11, 6, "alice"}});
+        const QList<Protocol::Mention> onlyBob{Protocol::Mention{0, 4, "bob"}};
+        QCOMPARE(alice.store->message(sent).mentions, onlyBob);
+        QVERIFY(!alice.store->message(sent).mentionsMe);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(bobTrip), text, kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(carol.last(carolTrip), text, kWait);
+        const ChatStore::Message atBob = bob.store->messages(bobTrip).last();
+        QCOMPARE(atBob.mentions, onlyBob);
+        QVERIFY(atBob.mentionsMe);
+        QVERIFY(bob.store->conversation(bobTrip).mentioned);
+        QTRY_COMPARE_WITH_TIMEOUT(bobHeard.size(), 1, kWait);
+        QVERIFY(bobHeard.last().at(4).toBool()); // a mention of him
+        QCOMPARE(carol.store->messages(carolTrip).last().mentions, onlyBob);
+        QVERIFY(!carol.store->messages(carolTrip).last().mentionsMe);
+        QVERIFY(!carol.store->conversation(carolTrip).mentioned);
+        QTRY_COMPARE_WITH_TIMEOUT(carolHeard.size(), 1, kWait);
+        QVERIFY(!carolHeard.last().at(4).toBool());
+        // Read: no longer marked.
+        bob.messenger->markRead(bobTrip);
+        QVERIFY(!bob.store->conversation(bobTrip).mentioned);
+
+        // An edit moves it to Carol.
+        QTRY_VERIFY_WITH_TIMEOUT(alice.messenger->canEdit(sent), kWait);
+        QVERIFY(alice.messenger->edit(sent, "@Carol pack", {Protocol::Mention{0, 6, "carol"}}));
+        QTRY_COMPARE_WITH_TIMEOUT(carol.last(carolTrip), QString("@Carol pack"), kWait);
+        QVERIFY(carol.store->messages(carolTrip).last().mentionsMe);
+        QVERIFY(carol.store->conversation(carolTrip).mentioned);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(bobTrip), QString("@Carol pack"), kWait);
+        QCOMPARE(bob.store->messages(bobTrip).last().mentions, (QList<Protocol::Mention>{Protocol::Mention{0, 6, "carol"}}));
+        QVERIFY(!bob.store->messages(bobTrip).last().mentionsMe);
+        // The same text, the mention gone: an edit too.
+        QVERIFY(alice.messenger->edit(sent, "@Carol pack"));
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->messages(bobTrip).last().mentions.isEmpty(), kWait);
+
+        // In a direct chat: none.
+        const qint64 direct = alice.messenger->send(aliceToBob, "@Bob", 0, {Protocol::Mention{0, 4, "bob"}});
+        QVERIFY(alice.store->message(direct).mentions.isEmpty());
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(bobToAlice), QString("@Bob"), kWait);
+        QVERIFY(bob.store->messages(bobToAlice).last().mentions.isEmpty());
+        // A file's caption may have them.
+        QString error;
+        const qint64 file = alice.messenger->sendFileData(trip, "map.txt", "x", "@Bob the map", &error, 0,
+                                                          {Protocol::Mention{0, 4, "bob"}});
+        QVERIFY2(file > 0, qPrintable(error));
+        QCOMPARE(alice.store->message(file).mentions, onlyBob);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(bobTrip), QString("@Bob the map"), kWait);
+        QVERIFY(bob.store->messages(bobTrip).last().mentionsMe);
+
+        // Carol, by hand: a mention of Dave (no member) is dropped, Bob's kept;
+        // one direct to Bob keeps none.
+        const qint64 carolToBob = startConversation(carol, "bob");
+        carol.messenger->send(carolToBob, "hello");
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("carol") > 0, kWait);
+        const qint64 bobToCarol = bob.store->directConversation("carol");
+        QTRY_COMPARE_WITH_TIMEOUT(m_serverStore->queuedCount("bob", 1), 0, kWait);
+        QTest::qWait(5); // newer than "hello"
+        Protocol::Content forged = Protocol::Content::text("@Bob @Dave");
+        forged.group = gid;
+        forged.mentions = {Protocol::Mention{0, 4, "bob"}, Protocol::Mention{5, 5, "dave"}};
+        Protocol::Content toHim = Protocol::Content::text("@Bob direct");
+        toHim.mentions = {Protocol::Mention{0, 4, "bob"}};
+        sendByHand(carol, "bob", {forged, toHim});
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(bobTrip), QString("@Bob @Dave"), kWait);
+        QCOMPARE(bob.store->messages(bobTrip).last().mentions, onlyBob);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(bobToCarol), QString("@Bob direct"), kWait);
+        QVERIFY(bob.store->messages(bobToCarol).last().mentions.isEmpty());
+    }
+
     void typing()
     {
         qint64 clock = QDateTime::currentMSecsSinceEpoch();
