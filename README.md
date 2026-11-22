@@ -5,7 +5,7 @@ Widgets: the same technology and the same look as
 [Argonaut](https://github.com/jgiannop/argonaut), the file manager, and
 [Argonaut Emails](https://github.com/jgiannop/argonaut-emails).
 
-Version 0.2.0, for Ubuntu and Windows. How Signal works, and what that means for this
+Version 0.2.1, for Ubuntu and Windows. How Signal works, and what that means for this
 program: [docs/how-signal-works.md](docs/how-signal-works.md).
 
 ## What it does now
@@ -34,6 +34,19 @@ program: [docs/how-signal-works.md](docs/how-signal-works.md).
   up to 5 minutes; a click plays one.
 - **Typing indicators** (View › Typing Indicators to turn them off) and
   **find in a conversation** (Ctrl+F).
+- **Pictures and files by pasting or dropping** them on a chat (Ctrl+V a
+  screenshot); they wait above the field until you send. **Choose and copy
+  messages** (click, Ctrl/Shift+click, Ctrl+C), and a click on a reply's
+  quote goes to the message it answers.
+- **Mute, archive and pin chats** (right-click a chat, or the Conversation
+  menu): mute for an hour up to always, archive out of the list, pin up to
+  four at the top.
+- **Where you left off**: a "New messages" line at the first unread, and a
+  ↓ button back to the newest.
+- **Read receipts** can be turned off (View › Read Receipts); as in Signal,
+  you then don't see others' either.
+- **@mentions in groups**: type @ and pick a member; a mention of you
+  notifies even in a muted group.
 - **Groups** of up to 50 (File › New Group…): kept by their members, each
   message encrypted for each member; the server cannot tell a group exists.
   Its creator adds and removes people; anyone can leave.
@@ -89,19 +102,35 @@ From [Releases](https://github.com/jgiannop/argonaut-chat/releases):
 `SHA256SUMS` beside them has the checksums. To make the Linux packages on
 your own computer: `packaging/build-debs.sh` (in Docker, into `dist/`).
 
+## Next
+
+In this order (agreed 2026-11-22):
+
+1. **Use 0.2.1 for real** with one or two people for a few days, and fix
+   what that turns up.
+2. **PQXDH**: the post-quantum start of a conversation that Signal uses
+   (X3DH plus ML-KEM), so that recorded traffic stays safe from a future
+   quantum computer. ML-KEM comes from a reviewed library (libsodium has
+   none); existing conversations keep working.
+3. **Locking the app**: after some idle minutes or on demand, the window
+   hides the chats until a passphrase is typed.
+
+Later: voice and video calls, moving history to a new linked computer,
+smaller voice messages (Opus).
+
 ## Making a release
 
-Set the version in `CMakeLists.txt` (`project(argonaut-chat VERSION 0.2.0 …)`),
+Set the version in `CMakeLists.txt` (`project(argonaut-chat VERSION 0.2.1 …)`),
 commit, then tag and push:
 
 ```bash
-git tag v0.2.0
-git push origin main v0.2.0
+git tag v0.2.1
+git push origin main v0.2.1
 ```
 
 The Release workflow builds the two `.deb` packages and the Windows
 installer and zip, checks that each installs and starts, and publishes them
-as the release `v0.2.0`. Every push to `main` builds and tests on Linux
+as the release `v0.2.1`. Every push to `main` builds and tests on Linux
 (also under ASan/UBSan) and on Windows.
 
 ## Building

@@ -62,6 +62,12 @@ Tests are Qt Test, one line each in `tests/CMakeLists.txt` (`chat_test(name [LIB
 - **The local database: SQLCipher** (decided 2026-11-20: the whole file encrypted; `libsqlcipher-dev` 4.5.6), **the key in the system keyring** through QtKeychain (`qtkeychain-qt6-dev` 0.14.2; GNOME Keyring or KWallet), no passphrase at start for now.
 - **Order of work** (steps 1-5 done 2026-11-20; then keep-alive, notifications, packages, server backup, attachments, profiles, groups, linked devices, disappearing messages, all 2026-11-20/21): 1) crypto in `chat_core` (keys, X3DH, Double Ratchet) with tests; 2) the protocol (message formats); 3) the server; 4) the app talking to it (accounts, contacts, sending); 5) the encrypted local database; then groups, attachments, linked devices.
 
+- **Next, in this order** (agreed with the owner 2026-11-22; also in README "Next"):
+  1. Release 0.2.1 (everything since 0.2.0: jump/copy, paste/drop, mute/archive/pin, where you left off, read receipts off, @mentions), then real use with one or two people for a few days, fixing what that turns up.
+  2. **PQXDH** (Signal's post-quantum X3DH: X3DH plus ML-KEM-1024 encapsulation in the prekey bundle, as in Signal's PQXDH specification). Never our own cryptography: ML-KEM from a reviewed library (libsodium has none; candidates liboqs or OpenSSL ≥ 3.5's ML-KEM — first check what Ubuntu 24.04, 26.04 and the Windows vcpkg build can all get). Changes the server's prekey storage (signed last-resort and one-time KEM prekeys) and the prekey message; existing sessions keep working; tests with tampered bundles and messages.
+  3. **App lock**: a passphrase (or the system's) after some idle minutes or on demand; covers the window only (the history is already encrypted with the keyring's key).
+  - Later: voice and video calls (WebRTC and a TURN relay on the VPS, which also serves teachkids.gr), moving history to a new linked computer, Opus voice messages.
+
 ## Rules
 
 - Nothing a user writes leaves this computer unencrypted: end-to-end encryption comes before any network code that carries messages. Never invent cryptography: the Signal Protocol's design (X3DH/PQXDH, Double Ratchet) from a reviewed library.
