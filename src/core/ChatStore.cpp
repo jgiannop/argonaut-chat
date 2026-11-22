@@ -808,6 +808,15 @@ QStringList ChatStore::unseenUids(qint64 conversation) const
     return out;
 }
 
+qint64 ChatStore::firstUnseen(qint64 conversation) const
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT id FROM messages WHERE conversation = ? AND seen = 0 AND author <> '' AND system = 0"
+                             " ORDER BY sent_at, id LIMIT 1"));
+    q.addBindValue(conversation);
+    return q.exec() && q.next() ? q.value(0).toLongLong() : 0;
+}
+
 void ChatStore::setStatus(qint64 message, const QString &status)
 {
     QSqlQuery q(m_db);

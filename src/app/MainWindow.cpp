@@ -75,6 +75,7 @@ enum Role {
     VoiceRole,       // a voice message's attachment (plays on a click)
     MutedRole,       // a conversation's notifications are off
     PinnedRole,      // a conversation pinned on top
+    DividerRole,     // the first unread one: "New messages" drawn above it
 };
 
 QString shortTime(const QDateTime &when)
@@ -343,6 +344,38 @@ public:
         return footer;
     }
 
+    // The first unread one: "New messages" across the top of its row.
+    static int dividerHeight(const QStyleOptionViewItem &option, const QModelIndex &index)
+    {
+        return index.data(DividerRole).toBool() ? QFontMetrics(option.font).height() + 16 : 0;
+    }
+    // The row without that line: where the message itself goes.
+    static QStyleOptionViewItem below(const QStyleOptionViewItem &option, const QModelIndex &index)
+    {
+        QStyleOptionViewItem o = option;
+        o.rect.setTop(o.rect.top() + dividerHeight(option, index));
+        return o;
+    }
+    void paintDivider(QPainter *p, const QStyleOptionViewItem &option) const
+    {
+        QFont bold = option.font;
+        bold.setBold(true);
+        bold.setPointSizeF(option.font.pointSizeF() * 0.85);
+        const QFontMetrics fm(bold);
+        const QString text = QCoreApplication::translate("MainWindow", "New messages");
+        const int y = option.rect.top() + (QFontMetrics(option.font).height() + 16) / 2;
+        const int w = fm.horizontalAdvance(text) + 24;
+        const QRect label(option.rect.center().x() - w / 2, y - fm.height() / 2, w, fm.height());
+        p->save();
+        p->setRenderHint(QPainter::Antialiasing);
+        p->setPen(QPen(m_theme->accent, 1));
+        p->drawLine(option.rect.left() + 14, y, label.left(), y);
+        p->drawLine(label.right(), y, option.rect.right() - 14, y);
+        p->setFont(bold);
+        p->drawText(label, Qt::AlignCenter, text);
+        p->restore();
+    }
+
     static QRect bubbleRect(const QStyleOptionViewItem &option, const QModelIndex &index, const Layout &l)
     {
         const bool mine = index.data(OutgoingRole).toBool();
@@ -355,8 +388,9 @@ public:
         if (index.data(SystemRole).toBool() || index.data(QuoteAuthorRole).toString().isEmpty())
             return {};
         bool read = false;
-        const Layout l = layout(option, index, footerFor(index, &read));
-        return l.quote.translated(bubbleRect(option, index, l).topLeft());
+        const QStyleOptionViewItem o = below(option, index);
+        const Layout l = layout(o, index, footerFor(index, &read));
+        return l.quote.translated(bubbleRect(o, index, l).topLeft());
     }
 
     bool editorEvent(QEvent *event, QAbstractItemModel *model, const QStyleOptionViewItem &option,
@@ -375,15 +409,19 @@ public:
 
     QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override
     {
+        const int line = dividerHeight(option, index);
         if (index.data(SystemRole).toBool())
-            return {option.rect.width(), QFontMetrics(option.font).height() + 22};
+            return {option.rect.width(), line + QFontMetrics(option.font).height() + 22};
         bool read = false;
         const int reactions = index.data(ReactionsRole).toString().isEmpty() ? 0 : reactionHeight(option) - 6;
-        return {option.rect.width(), layout(option, index, footerFor(index, &read)).height + 8 + reactions};
+        return {option.rect.width(), line + layout(option, index, footerFor(index, &read)).height + 8 + reactions};
     }
 
-    void paint(QPainter *p, const QStyleOptionViewItem &option, const QModelIndex &index) const override
+    void paint(QPainter *p, const QStyleOptionViewItem &whole, const QModelIndex &index) const override
     {
+        if (dividerHeight(whole, index) > 0)
+            paintDivider(p, whole);
+        const QStyleOptionViewItem option = below(whole, index);
         p->save();
         p->setRenderHint(QPainter::Antialiasing);
         if (index.data(SystemRole).toBool()) {
@@ -651,6 +689,16 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
         if (menu && !menu->isEmpty())
             menu->exec(m_messages->viewport()->mapToGlobal(pos));
     });
+    // ↓ at the bottom right of the messages, while further up.
+    m_toBottom = new QToolButton(m_messages);
+    m_toBottom->setObjectName(QStringLiteral("toBottomButton"));
+    m_toBottom->setText(QStringLiteral("↓"));
+    m_toBottom->setToolTip(tr("Go to the newest message"));
+    m_toBottom->setCursor(Qt::PointingHandCursor);
+    m_toBottom->hide();
+    connect(m_toBottom, &QToolButton::clicked, this, &MainWindow::scrollToNewest);
+    connect(m_messages->verticalScrollBar(), &QScrollBar::valueChanged, this, &MainWindow::updateToBottom);
+    connect(m_messages->verticalScrollBar(), &QScrollBar::rangeChanged, this, &MainWindow::updateToBottom);
     auto *composer = new QWidget(chat);
     composer->setObjectName(QStringLiteral("composer"));
     auto *composerOuter = new QVBoxLayout(composer);
@@ -1232,6 +1280,10 @@ void MainWindow::openConversation(qint64 id)
         m_flashTimer.stop();
         m_pending.clear(); // they were for that conversation
         refreshAttachBar();
+        m_unreadMarker = 0;
+        m_markerFresh = false;
+        m_stickToBottom = true;
+        m_newestSeen = 0;
         stopRecording(false); // a recording belongs to its conversation
         m_player.stop();
         if (m_findBar && m_findBar->isVisible()) {
@@ -1252,8 +1304,8 @@ void MainWindow::openConversation(qint64 id)
         }
     }
     updateHeader();
+    reloadMessages(); // before reading them: "New messages" goes above the first unread
     markCurrentRead();
-    reloadMessages();
     m_compose->setFocus();
     updateSendButton();
 }
@@ -1494,12 +1546,31 @@ void MainWindow::reloadMessages()
     for (const QListWidgetItem *item : m_messages->selectedItems())
         chosen.insert(item->data(IdRole).toLongLong());
     QListWidgetItem *flashItem = nullptr;
+    // Where the reader is: at the newest, or further up at some message.
+    QScrollBar *bar = m_messages->verticalScrollBar();
+    const bool atBottom = bar->value() >= bar->maximum() - 4;
+    qint64 anchor = 0;
+    int anchorTop = 0;
+    if (QListWidgetItem *top = m_messages->itemAt(QPoint(m_messages->viewport()->width() / 2, 1))) {
+        anchor = top->data(IdRole).toLongLong();
+        anchorTop = m_messages->visualItemRect(top).top();
+    }
+    const bool stick = std::exchange(m_stickToBottom, false) || atBottom;
+    if (m_unreadMarker == 0) {
+        m_unreadMarker = m_store->firstUnseen(m_current);
+        m_markerFresh = m_unreadMarker != 0;
+    }
+    QListWidgetItem *divider = nullptr;
     m_messages->clear();
     const bool group = m_store->conversation(m_current).kind == QLatin1String("group");
     const qint64 match = currentFindMatch();
     QListWidgetItem *matchItem = nullptr;
     for (const ChatStore::Message &m : m_store->messages(m_current, m_messageLimit)) {
         auto *item = new QListWidgetItem(m.deleted ? tr("This message was deleted") : m.body, m_messages);
+        if (m.id == m_unreadMarker) {
+            item->setData(DividerRole, true);
+            divider = item;
+        }
         item->setData(IdRole, m.id);
         item->setData(DeletedRole, m.deleted);
         item->setData(EditedRole, m.editedAt > 0 && !m.deleted);
@@ -1563,13 +1634,76 @@ void MainWindow::reloadMessages()
             item->setToolTip(item->toolTip().isEmpty() ? tip : item->toolTip() + QLatin1Char('\n') + tip);
         }
     }
-    // Gone to a quoted one, or searching: it stays in view; otherwise the newest.
-    if (flashItem || matchItem) {
-        m_messages->doItemsLayout(); // the heights first, or it scrolls to the wrong place
-        m_messages->scrollToItem(flashItem ? flashItem : matchItem, QAbstractItemView::PositionAtCenter);
+    // Just opened: what is there now is not "new" for ↓.
+    if (m_newestSeen == 0) {
+        for (int i = 0; i < m_messages->count(); ++i)
+            m_newestSeen = qMax(m_newestSeen, m_messages->item(i)->data(IdRole).toLongLong());
     }
-    else
+    // Gone to a quoted one, or searching: it stays in view. Just opened with
+    // unread ones: "New messages" at the top. Reading further up: the same
+    // place. Otherwise the newest.
+    m_messages->doItemsLayout(); // the heights first, or it scrolls to the wrong place
+    QListWidgetItem *kept = stick ? nullptr : messageItem(anchor);
+    if (flashItem || matchItem) {
+        m_messages->scrollToItem(flashItem ? flashItem : matchItem, QAbstractItemView::PositionAtCenter);
+    } else if (m_markerFresh && divider) {
+        m_markerFresh = false;
+        m_messages->scrollToItem(divider, QAbstractItemView::PositionAtTop);
+    } else if (kept) {
+        m_messages->scrollToItem(kept, QAbstractItemView::PositionAtTop);
+        bar->setValue(bar->value() - anchorTop);
+    } else {
         m_messages->scrollToBottom();
+    }
+    updateToBottom();
+}
+
+void MainWindow::scrollToNewest()
+{
+    m_messages->scrollToBottom();
+    updateToBottom();
+}
+
+void MainWindow::updateToBottom()
+{
+    const QScrollBar *bar = m_messages->verticalScrollBar();
+    const bool atBottom = bar->value() >= bar->maximum() - 40;
+    int below = 0;
+    if (atBottom) {
+        for (int i = 0; i < m_messages->count(); ++i)
+            m_newestSeen = qMax(m_newestSeen, m_messages->item(i)->data(IdRole).toLongLong());
+    } else {
+        // Theirs that came since the reader was last at the newest.
+        for (int i = m_messages->count() - 1; i >= 0; --i) {
+            const QListWidgetItem *item = m_messages->item(i);
+            const qint64 id = item->data(IdRole).toLongLong();
+            if (id != 0 && id > m_newestSeen && !item->data(OutgoingRole).toBool() && !item->data(SystemRole).toBool())
+                ++below;
+        }
+    }
+    m_toBottom->setText(below > 0 ? QStringLiteral("↓ %1").arg(below) : QStringLiteral("↓"));
+    m_toBottom->setVisible(!atBottom && m_messages->count() > 0);
+    placeToBottom();
+}
+
+void MainWindow::placeToBottom()
+{
+    m_toBottom->adjustSize();
+    const QSize size(qMax(40, m_toBottom->sizeHint().width() + 12), 40);
+    m_toBottom->resize(size);
+    const QRect area = m_messages->viewport()->geometry();
+    m_toBottom->move(area.right() - size.width() - 16, area.bottom() - size.height() - 12);
+    m_toBottom->raise();
+}
+
+void MainWindow::aboutToSend()
+{
+    // Sending: what they wrote has been seen; the line goes and the newest
+    // shows, as Signal does.
+    markCurrentRead();
+    m_unreadMarker = 0;
+    m_markerFresh = false;
+    m_stickToBottom = true;
 }
 
 QListWidgetItem *MainWindow::messageItem(qint64 message) const
@@ -1821,6 +1955,7 @@ void MainWindow::sendVoice(const QByteArray &samples)
     if (!m_messenger || m_current == 0)
         return;
     QString error;
+    aboutToSend();
     if (m_messenger->sendVoice(m_current, samples, &error, m_replyTo) == 0) {
         showNotice(error);
         return;
@@ -1853,6 +1988,7 @@ void MainWindow::attachFile(const QString &path)
         cancelReply(); // a file is a new message, not an edit
     }
     QString error;
+    aboutToSend();
     if (m_messenger->sendFile(m_current, path, m_compose->toPlainText().trimmed(), &error, m_replyTo) == 0) {
         showNotice(error);
         return;
@@ -2184,6 +2320,8 @@ void MainWindow::send()
         cancelReply();
         return;
     }
+    if ((!text.isEmpty() || !m_pending.isEmpty()) && m_current != 0)
+        aboutToSend();
     if (!m_pending.isEmpty() && m_messenger && m_current != 0) {
         // Each file its own message, the first answering what is replied to,
         // the text with the last. One that fails stays, with those after it.
@@ -2237,6 +2375,8 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
     }
     // The messages: Ctrl+C copies the chosen ones, Esc lets go of them, and
     // typing goes on in the field.
+    if (watched == m_messages && event->type() == QEvent::Resize)
+        QTimer::singleShot(0, this, &MainWindow::updateToBottom);
     if (watched == m_messages && event->type() == QEvent::KeyPress) {
         auto *key = static_cast<QKeyEvent *>(event);
         if (key->matches(QKeySequence::Copy)) {
@@ -2363,6 +2503,9 @@ void MainWindow::changeEvent(QEvent *event)
     // A theme change arrives as PaletteChange (Qt 6), as in Argonaut Emails.
     if (event->type() == QEvent::PaletteChange || event->type() == QEvent::ApplicationPaletteChange)
         applyTheme();
+    // Back in front of the open conversation: what came meanwhile is seen now.
+    if (event->type() == QEvent::ActivationChange && isActiveWindow() && m_current != 0)
+        QTimer::singleShot(0, this, &MainWindow::markCurrentRead);
     QMainWindow::changeEvent(event);
 }
 

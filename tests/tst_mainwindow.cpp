@@ -20,6 +20,7 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QPushButton>
+#include <QScrollBar>
 #include <QSignalSpy>
 #include <QToolButton>
 #include <QListWidget>
@@ -606,6 +607,81 @@ private slots:
             window.archiveConversation(dora, true);
             window.resize(1000, 640);
             QTest::qWait(200);
+            window.grab().save(qEnvironmentVariable("CHAT_TEST_GRAB"));
+        }
+    }
+
+    // "New messages" above the first unread one, the place kept while reading
+    // further up, ↓ back to the newest.
+    void whereYouLeftOff()
+    {
+        ChatStore store(TestSupport::home() + QStringLiteral("/left-off.sqlite"));
+        KeyStore keys(&store);
+        Messenger messenger(&store, &keys);
+        const qint64 anna = store.addConversation(QStringLiteral("direct"), QStringLiteral("Anna"), QStringLiteral("anna"));
+        store.setAccepted(anna);
+        const QDateTime t0 = QDateTime::currentDateTimeUtc().addSecs(-3600);
+        for (int i = 0; i < 30; ++i)
+            store.addMessage(anna, QStringLiteral("old %1").arg(i), QStringLiteral("anna"), t0.addSecs(i));
+        store.markRead(anna);
+        for (int i = 0; i < 30; ++i)
+            store.addMessage(anna, QStringLiteral("new %1").arg(i), QStringLiteral("anna"), t0.addSecs(100 + i));
+        const qint64 firstNew = store.firstUnseen(anna);
+        QCOMPARE(store.message(firstNew).body, QStringLiteral("new 0"));
+
+        MainWindow window(&store, &messenger);
+        window.resize(800, 500);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        const int dividerRole = Qt::UserRole + 25;
+        window.openConversation(anna);
+        QListWidget *list = window.messages();
+        QCOMPARE(list->count(), 60); // the line is part of its message's row
+        QCOMPARE(window.unreadMarker(), firstNew);
+        QListWidgetItem *first = list->item(30);
+        QVERIFY(first->data(dividerRole).toBool());
+        QVERIFY(!list->item(29)->data(dividerRole).toBool());
+        // Opened there: the line at the top, read now; ↓ shown.
+        QCOMPARE(list->visualItemRect(first).top(), 0);
+        QCOMPARE(store.firstUnseen(anna), 0);
+        QTRY_VERIFY(window.toBottomButton()->isVisible());
+
+        // Reading further up, a message comes: the place stays; ↓ counts it.
+        QScrollBar *bar = list->verticalScrollBar();
+        bar->setValue(bar->value() - 100);
+        const int place = bar->value();
+        store.addMessage(anna, QStringLiteral("are you there?"), QStringLiteral("anna"));
+        QCOMPARE(bar->value(), place);
+        QCOMPARE(window.toBottomButton()->text(), QStringLiteral("↓ 1"));
+        // ↓: the newest; it goes.
+        window.toBottomButton()->click();
+        QCOMPARE(bar->value(), bar->maximum());
+        QVERIFY(!window.toBottomButton()->isVisible());
+        // At the newest, a new one keeps it there.
+        store.addMessage(anna, QStringLiteral("hello?"), QStringLiteral("anna"));
+        QCOMPARE(bar->value(), bar->maximum());
+        QVERIFY(!window.toBottomButton()->isVisible());
+
+        // Writing: the line goes, as in Signal.
+        QTest::keyClicks(window.composeField(), QStringLiteral("here!"));
+        QTest::keyClick(window.composeField(), Qt::Key_Return);
+        QCOMPARE(window.unreadMarker(), 0);
+        for (int i = 0; i < list->count(); ++i)
+            QVERIFY(!list->item(i)->data(dividerRole).toBool());
+        QCOMPARE(bar->value(), bar->maximum());
+        // Opened again with nothing unread: no line, the newest.
+        window.openConversation(store.noteToSelf());
+        window.openConversation(anna);
+        QCOMPARE(window.unreadMarker(), 0);
+        QCOMPARE(bar->value(), bar->maximum());
+        if (qEnvironmentVariableIsSet("CHAT_TEST_GRAB")) {
+            for (int i = 0; i < 3; ++i)
+                store.addMessage(anna, QStringLiteral("one more %1").arg(i), QStringLiteral("anna"));
+            window.openConversation(store.noteToSelf());
+            window.openConversation(anna);
+            bar->setValue(bar->value() - 40);
+            store.addMessage(anna, QStringLiteral("and another"), QStringLiteral("anna"));
+            QTest::qWait(100);
             window.grab().save(qEnvironmentVariable("CHAT_TEST_GRAB"));
         }
     }

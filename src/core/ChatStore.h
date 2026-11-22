@@ -129,6 +129,8 @@ public:
     QHash<QString, QStringList> unseenUidsByAuthor(qint64 conversation) const;
     // The wire ids of theirs not seen yet (for read receipts).
     QStringList unseenUids(qint64 conversation) const;
+    // The oldest message of theirs not seen yet (where "New messages" goes); 0: none.
+    qint64 firstUnseen(qint64 conversation) const;
     void markRead(qint64 conversation);
     // Read on another of my devices: theirs with these wire ids, seen.
     void markSeenUids(const QStringList &uids);

@@ -125,6 +125,12 @@ public:
     void showArchived(bool show);
     bool showingArchived() const { return m_showArchived; }
     QToolButton *archivedButton() const { return m_archivedButton; }
+    // Where you left off: "New messages" above the first unread one, there on
+    // opening; the place kept when the list changes while you read further up;
+    // ↓ (with how many came since) back to the newest.
+    qint64 unreadMarker() const { return m_unreadMarker; }
+    QToolButton *toBottomButton() const { return m_toBottom; }
+    void scrollToNewest();
     // A click on a reply's quote: the message it answers scrolled into view
     // and outlined for a moment (false: it is gone, deleted or never here).
     bool jumpToQuote(qint64 reply);
@@ -195,6 +201,14 @@ private:
     QToolButton *m_archivedButton = nullptr;
     bool m_showArchived = false;
     QTimer m_muteTimer; // a mute running out: the list again
+    qint64 m_unreadMarker = 0;   // the message "New messages" is above (this opening)
+    bool m_markerFresh = false;  // not scrolled to yet
+    bool m_stickToBottom = true; // the next reload ends at the newest (opening, sending)
+    qint64 m_newestSeen = 0;     // the newest message when last at the bottom
+    QToolButton *m_toBottom = nullptr;
+    void aboutToSend();
+    void updateToBottom();
+    void placeToBottom();
     QAction *m_membersAction = nullptr;
     QAction *m_leaveAction = nullptr;
     QLabel *m_leftNote = nullptr;
