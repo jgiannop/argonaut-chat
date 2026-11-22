@@ -1082,6 +1082,19 @@ void MainWindow::buildMenus()
         notificationGroup->addAction(a);
         connect(a, &QAction::triggered, a, [content = content] { Notifications::save(content); });
     }
+    m_readReceiptsAction = view->addAction(tr("Read Receipts"));
+    m_readReceiptsAction->setObjectName(QStringLiteral("readReceiptsAction"));
+    m_readReceiptsAction->setCheckable(true);
+    m_readReceiptsAction->setToolTip(tr("Let others see when you have read their messages, and see when they have read yours"));
+    m_readReceiptsAction->setChecked(QSettings().value(QStringLiteral("privacy/readReceipts"), true).toBool());
+    if (m_messenger)
+        m_messenger->setReadReceipts(m_readReceiptsAction->isChecked());
+    m_readReceiptsAction->setEnabled(m_messenger != nullptr);
+    connect(m_readReceiptsAction, &QAction::toggled, this, [this](bool on) {
+        QSettings().setValue(QStringLiteral("privacy/readReceipts"), on);
+        if (m_messenger)
+            m_messenger->setReadReceipts(on);
+    });
     m_typingAction = view->addAction(tr("Typing Indicators"));
     m_typingAction->setObjectName(QStringLiteral("typingIndicatorsAction"));
     m_typingAction->setCheckable(true);

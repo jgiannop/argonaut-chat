@@ -1166,7 +1166,8 @@ void Messenger::markRead(qint64 conversation)
         if (m_state == State::Online && !c.left) {
             QStringList all;
             for (auto it = byAuthor.cbegin(); it != byAuthor.cend(); ++it) {
-                sendReceipt(it.key(), Protocol::Content::Receipt::Read, it.value());
+                if (m_readReceipts)
+                    sendReceipt(it.key(), Protocol::Content::Receipt::Read, it.value());
                 all << it.value();
             }
             if (!all.isEmpty())
@@ -1177,8 +1178,9 @@ void Messenger::markRead(qint64 conversation)
     const QStringList ids = m_store->unseenUids(conversation);
     m_store->markRead(conversation);
     if (!ids.isEmpty() && c.kind == QLatin1String("direct") && m_state == State::Online) {
-        sendReceipt(c.peer, Protocol::Content::Receipt::Read, ids);
-        syncToMyDevices(Protocol::Content::receiptOf(Protocol::Content::Receipt::Read, ids));
+        if (m_readReceipts)
+            sendReceipt(c.peer, Protocol::Content::Receipt::Read, ids);
+        syncToMyDevices(Protocol::Content::receiptOf(Protocol::Content::Receipt::Read, ids)); // mine know anyway
     }
 }
 
@@ -1320,9 +1322,9 @@ void Messenger::handleContent(const QString &from, const Protocol::Envelope &env
         return;
     }
     if (content.type == Protocol::Content::Type::Receipt) {
-        m_store->advanceStatusFrom(from, content.receiptFor,
-                                   content.receipt == Protocol::Content::Receipt::Read ? QStringLiteral("read")
-                                                                                       : QStringLiteral("delivered"));
+        // With mine off, theirs say no more than "delivered" (later turned on: not after the fact).
+        const bool read = content.receipt == Protocol::Content::Receipt::Read && m_readReceipts;
+        m_store->advanceStatusFrom(from, content.receiptFor, read ? QStringLiteral("read") : QStringLiteral("delivered"));
         return;
     }
     qint64 conversation = 0;

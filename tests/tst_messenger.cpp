@@ -1247,6 +1247,49 @@ private slots:
         QCOMPARE(bob.store->message(theirs).body, QString("Meet at 9"));
     }
 
+    // Read receipts off (as Signal's, both ways): mine not sent, theirs shown as delivered.
+    void readReceiptsOff()
+    {
+        Device alice(file("alice"));
+        Device bob(file("bob"));
+        QVERIFY(signUp(alice, "alice"));
+        QVERIFY(signUp(bob, "bob"));
+        const qint64 toBob = startConversation(alice, "bob");
+        auto status = [&](const QString &body) {
+            for (const ChatStore::Message &m : alice.store->messages(toBob))
+                if (m.body == body)
+                    return m.status;
+            return QString();
+        };
+        alice.messenger->send(toBob, "one");
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store->directConversation("alice") > 0, kWait);
+        const qint64 toAlice = bob.store->directConversation("alice");
+        bob.messenger->acceptRequest(toAlice);
+        bob.messenger->markRead(toAlice);
+        QTRY_COMPARE_WITH_TIMEOUT(status("one"), QString("read"), kWait);
+
+        // Bob turns his off: Alice learns only that it arrived.
+        bob.messenger->setReadReceipts(false);
+        alice.messenger->send(toBob, "two");
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(toAlice), QString("two"), kWait);
+        bob.messenger->markRead(toAlice);
+        QTRY_COMPARE_WITH_TIMEOUT(status("two"), QString("delivered"), kWait);
+        QTest::qWait(300);
+        QCOMPARE(status("two"), QString("delivered"));
+        QVERIFY(bob.store->unseenUids(toAlice).isEmpty()); // read here all the same
+
+        // Bob's on again, Alice's off: his receipts reach her, but say "delivered".
+        bob.messenger->setReadReceipts(true);
+        alice.messenger->setReadReceipts(false);
+        alice.messenger->send(toBob, "three");
+        QTRY_COMPARE_WITH_TIMEOUT(bob.last(toAlice), QString("three"), kWait);
+        bob.messenger->markRead(toAlice);
+        QTRY_COMPARE_WITH_TIMEOUT(status("three"), QString("delivered"), kWait);
+        QTest::qWait(300);
+        QCOMPARE(status("three"), QString("delivered"));
+        QCOMPARE(status("one"), QString("read")); // what was read before stays so
+    }
+
     void typing()
     {
         qint64 clock = QDateTime::currentMSecsSinceEpoch();

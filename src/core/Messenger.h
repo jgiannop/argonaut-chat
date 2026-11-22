@@ -151,6 +151,11 @@ public:
     static constexpr qint64 TypingShownMs = 15000;
     void setTypingIndicators(bool on);
     bool typingIndicators() const { return m_typingIndicators; }
+    // Read receipts (as Signal's, both ways): off, others are not told when I
+    // read theirs, and theirs show me only "delivered". Delivered receipts
+    // and my own devices' read state go on as before.
+    void setReadReceipts(bool on) { m_readReceipts = on; }
+    bool readReceipts() const { return m_readReceipts; }
     void setTyping(qint64 conversation, bool typing);
     // Who is typing there now (usernames).
     QStringList typingIn(qint64 conversation) const;
@@ -305,6 +310,7 @@ private:
     QSet<qint64> m_editsInFlight;
     qint64 m_lastLocalTime = 0;
     bool m_typingIndicators = true;
+    bool m_readReceipts = true;
     QHash<qint64, qint64> m_typingSentAt;            // where I said I am typing: when
     QHash<qint64, QHash<QString, qint64>> m_typing;  // who types where: until when
     QTimer m_typingExpiry;

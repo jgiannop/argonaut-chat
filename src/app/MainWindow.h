@@ -90,6 +90,8 @@ public:
     void startEdit(qint64 message);
     qint64 editing() const { return m_editing; }
     QAction *typingIndicatorsAction() const { return m_typingAction; }
+    // View › Read Receipts (QSettings privacy/readReceipts, on by default).
+    QAction *readReceiptsAction() const { return m_readReceiptsAction; }
     // Find in Conversation (Ctrl+F): its matches, newest first in turn; Enter
     // goes to older ones, Shift+Enter newer, Esc closes.
     void showFind();
@@ -221,6 +223,7 @@ private:
     qint64 m_editing = 0;
     QTimer m_typingIdle; // "stopped" 5 s after the last key
     QAction *m_typingAction = nullptr;
+    QAction *m_readReceiptsAction = nullptr;
     void runFind();
     void showFindMatch();
     static constexpr int DefaultMessageLimit = 500;

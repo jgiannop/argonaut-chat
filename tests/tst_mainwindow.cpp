@@ -292,6 +292,27 @@ private slots:
         QVERIFY(messenger.typingIndicators());
     }
 
+    void readReceiptsSetting()
+    {
+        ChatStore store(TestSupport::home() + QStringLiteral("/receipts.sqlite"));
+        KeyStore keys(&store);
+        Messenger messenger(&store, &keys);
+        {
+            MainWindow window(&store, &messenger);
+            QVERIFY(window.readReceiptsAction()->isChecked()); // on at first, as Signal's
+            QVERIFY(messenger.readReceipts());
+            window.readReceiptsAction()->setChecked(false);
+            QVERIFY(!messenger.readReceipts());
+        }
+        // Remembered.
+        Messenger later(&store, &keys);
+        MainWindow again(&store, &later);
+        QVERIFY(!again.readReceiptsAction()->isChecked());
+        QVERIFY(!later.readReceipts());
+        again.readReceiptsAction()->setChecked(true);
+        QVERIFY(later.readReceipts());
+    }
+
     // A click on a reply's quote goes to what it answers, outlined for a moment.
     void jumpToTheQuotedMessage()
     {
