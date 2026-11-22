@@ -48,23 +48,25 @@ jobs:
             }
           }
 
-      # libsodium, SQLCipher (with OpenSSL) and Opus (libopus, libogg,
-      # opusfile, libopusenc: voice messages), built by vcpkg (which the
+      # libsodium, SQLCipher (with OpenSSL), Opus (libopus, libogg,
+      # opusfile, libopusenc: voice messages and calls) and speexdsp (calls'
+      # echo cancellation), built by vcpkg (which the
       # machine has) and kept between runs, since building them takes minutes.
       - name: Keep vcpkg's built libraries
         uses: actions/cache@v5
         with:
           path: vcpkg-cache
-          key: vcpkg-sodium-sqlcipher-opus-x64-windows-v1
+          key: vcpkg-sodium-sqlcipher-opus-speexdsp-openssl-x64-windows-v1
 
-      - name: Install libsodium, SQLCipher and Opus
+      - name: Install libsodium, SQLCipher, Opus, speexdsp and OpenSSL
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force vcpkg-cache | Out-Null
           $env:VCPKG_DEFAULT_BINARY_CACHE = "$PWD\vcpkg-cache"
           & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install libsodium:x64-windows sqlcipher:x64-windows `
-            opus:x64-windows libogg:x64-windows opusfile:x64-windows libopusenc:x64-windows
-          if ($LASTEXITCODE -ne 0) { Write-Output "::error title=build: vcpkg::vcpkg could not install libsodium, sqlcipher and opus"; exit 1 }
+            opus:x64-windows libogg:x64-windows opusfile:x64-windows libopusenc:x64-windows `
+            speexdsp:x64-windows openssl:x64-windows
+          if ($LASTEXITCODE -ne 0) { Write-Output "::error title=build: vcpkg::vcpkg could not install libsodium, sqlcipher, opus, speexdsp and openssl"; exit 1 }
 
       # QtKeychain (the database key in Windows Credential Manager), built
       # against the Qt above: vcpkg's would bring a Qt of its own.
@@ -170,7 +172,7 @@ jobs:
       - name: Check that it starts on its own
         shell: pwsh
         run: |
-          $missing = @("libsodium.dll", "sqlcipher.dll", "opus.dll", "qt6keychain.dll", "Qt6WebSockets.dll", "Qt6Multimedia.dll",
+          $missing = @("libsodium.dll", "sqlcipher.dll", "opus.dll", "speexdsp.dll", "qt6keychain.dll", "Qt6WebSockets.dll", "Qt6Multimedia.dll",
                        "vcruntime140.dll", "platforms\qwindows.dll", "tls\qschannelbackend.dll") | Where-Object { -not (Test-Path "dist\$_") }
           # Voice messages: a media backend (FFmpeg's or Windows').
           if (-not (Get-ChildItem dist\multimedia\*.dll -ErrorAction SilentlyContinue)) { $missing += "multimedia\*.dll" }

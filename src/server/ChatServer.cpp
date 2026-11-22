@@ -8,6 +8,7 @@
 #include <QDateTime>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QMessageAuthenticationCode>
 #include <QTimer>
 #include <QWebSocket>
 
@@ -246,7 +247,8 @@ QJsonObject ChatServer::handle(QWebSocket *socket, Client &client, const QString
         if (op == QLatin1String("keys") || op == QLatin1String("send") || op == QLatin1String("ack")
             || op == QLatin1String("prekeys") || op == QLatin1String("upload") || op == QLatin1String("upload-chunk")
             || op == QLatin1String("download") || op == QLatin1String("provision-send")
-            || op == QLatin1String("devices") || op == QLatin1String("remove-device"))
+            || op == QLatin1String("devices") || op == QLatin1String("remove-device")
+            || op == QLatin1String("relay"))
             return fail(QStringLiteral("unauthenticated"), QStringLiteral("Sign in first."));
         return fail(QStringLiteral("unknown-op"), QStringLiteral("No such request."));
     }
@@ -282,6 +284,11 @@ QJsonObject ChatServer::handle(QWebSocket *socket, Client &client, const QString
         return listDevices(client);
     if (op == QLatin1String("remove-device"))
         return removeDevice(client, request);
+    if (op == QLatin1String("relay")) {
+        if (auto limited = limit(QStringLiteral("relay:") + client.username, m_limits.relayFetchesPerAccount))
+            return *limited;
+        return relay(client);
+    }
     return fail(QStringLiteral("unknown-op"), QStringLiteral("No such request."));
 }
 
@@ -614,6 +621,26 @@ QJsonObject ChatServer::addDevice(QWebSocket *socket, Client &client, const QJso
     }
     signIn(socket, client, username, device);
     return ok({{QStringLiteral("device"), double(device)}});
+}
+
+void ChatServer::setRelay(const QStringList &urls, const QByteArray &secret)
+{
+    m_relayUrls = secret.isEmpty() ? QStringList() : urls;
+    m_relaySecret = secret;
+}
+
+QJsonObject ChatServer::relay(const Client &client) const
+{
+    if (m_relayUrls.isEmpty())
+        return ok({{QStringLiteral("urls"), QJsonArray()}});
+    const qint64 expiry = QDateTime::currentSecsSinceEpoch() + RelayTtlSeconds;
+    const QString username = QString::number(expiry) + QLatin1Char(':') + client.username;
+    const QByteArray credential =
+        QMessageAuthenticationCode::hash(username.toUtf8(), m_relaySecret, QCryptographicHash::Sha1).toBase64();
+    return ok({{QStringLiteral("urls"), QJsonArray::fromStringList(m_relayUrls)},
+               {QStringLiteral("username"), username},
+               {QStringLiteral("credential"), QString::fromLatin1(credential)},
+               {QStringLiteral("ttl"), RelayTtlSeconds}});
 }
 
 QJsonObject ChatServer::listDevices(const Client &client)

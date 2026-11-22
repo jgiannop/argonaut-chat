@@ -413,6 +413,67 @@ bool isValidReaction(const QString &emoji)
     return symbol;
 }
 
+bool isValidCallId(const QString &id)
+{
+    return isValidGroupId(id); // the same shape: 32 random hex digits
+}
+
+QString newCallId()
+{
+    return newGroupId();
+}
+
+bool isValidSdp(const QString &sdp)
+{
+    if (sdp.size() > MaxSdpBytes || !sdp.startsWith(QLatin1String("v=0")))
+        return false;
+    for (QChar c : sdp) {
+        const ushort u = c.unicode();
+        if ((u < 0x20 || u > 0x7e) && u != '\r' && u != '\n')
+            return false;
+    }
+    return true;
+}
+
+namespace {
+
+QString callKindName(Call::Kind kind)
+{
+    switch (kind) {
+    case Call::Kind::Offer: return QStringLiteral("offer");
+    case Call::Kind::Answer: return QStringLiteral("answer");
+    case Call::Kind::Hangup: return QStringLiteral("hangup");
+    case Call::Kind::Busy: return QStringLiteral("busy");
+    }
+    return {};
+}
+
+QString callReasonName(Call::Reason reason)
+{
+    switch (reason) {
+    case Call::Reason::Normal: return QStringLiteral("normal");
+    case Call::Reason::Declined: return QStringLiteral("declined");
+    case Call::Reason::NoAnswer: return QStringLiteral("no-answer");
+    case Call::Reason::Failed: return QStringLiteral("failed");
+    case Call::Reason::AnsweredElsewhere: return QStringLiteral("answered-elsewhere");
+    case Call::Reason::DeclinedElsewhere: return QStringLiteral("declined-elsewhere");
+    }
+    return {};
+}
+
+} // namespace
+
+Content Content::callSignal(const Call &call, const QString &sentTo)
+{
+    Content content;
+    content.type = Type::Call;
+    content.id = newMessageId();
+    content.sentAt = QDateTime::currentMSecsSinceEpoch();
+    content.call = call;
+    content.sentTo = sentTo;
+    return content;
+}
+
 Content Content::history(const QList<Attachment::Pointer> &pieces)
 {
     Content content;
@@ -641,6 +702,28 @@ QByteArray encodeContent(const Content &content)
         }
         json.insert(QStringLiteral("t"), QStringLiteral("history"));
         json.insert(QStringLiteral("pieces"), pieces);
+    } else if (content.type == Content::Type::Call) {
+        const Call &call = content.call;
+        const bool described = call.kind == Call::Kind::Offer || call.kind == Call::Kind::Answer;
+        const bool elsewhere = call.kind == Call::Kind::Hangup
+            && (call.reason == Call::Reason::AnsweredElsewhere || call.reason == Call::Reason::DeclinedElsewhere);
+        if (!isValidCallId(call.id) || (described ? !isValidSdp(call.sdp) : !call.sdp.isEmpty())
+            || (call.video && call.kind != Call::Kind::Offer)
+            || (call.kind != Call::Kind::Hangup && call.reason != Call::Reason::Normal)
+            || (elsewhere != !content.sentTo.isEmpty())
+            || (!content.sentTo.isEmpty() && !isValidUsername(content.sentTo)))
+            return {};
+        json.insert(QStringLiteral("t"), QStringLiteral("call"));
+        json.insert(QStringLiteral("kind"), callKindName(call.kind));
+        json.insert(QStringLiteral("call"), call.id);
+        if (described)
+            json.insert(QStringLiteral("sdp"), call.sdp);
+        if (call.video)
+            json.insert(QStringLiteral("video"), true);
+        if (call.kind == Call::Kind::Hangup)
+            json.insert(QStringLiteral("reason"), callReasonName(call.reason));
+        if (!content.sentTo.isEmpty())
+            json.insert(QStringLiteral("sentTo"), content.sentTo);
     } else if (content.type == Content::Type::Leave) {
         if (!isValidGroupId(content.group))
             return {};
@@ -825,6 +908,61 @@ std::optional<Content> decodeContent(const QByteArray &padded)
             return std::nullopt;
         content.quote = Quote{id.toString(), author.toString(), QString()};
         content.group = group.toString();
+        content.sentTo = sentTo.toString();
+        return content;
+    }
+    if (type == QLatin1String("call")) {
+        content.type = Content::Type::Call;
+        Call &call = content.call;
+        const QString kind = json.value(QStringLiteral("kind")).toString();
+        bool known = false;
+        for (Call::Kind k : {Call::Kind::Offer, Call::Kind::Answer, Call::Kind::Hangup, Call::Kind::Busy}) {
+            if (kind == callKindName(k)) {
+                call.kind = k;
+                known = true;
+            }
+        }
+        const QJsonValue id = json.value(QStringLiteral("call"));
+        const QJsonValue sdp = json.value(QStringLiteral("sdp"));
+        const QJsonValue video = json.value(QStringLiteral("video"));
+        const QJsonValue reason = json.value(QStringLiteral("reason"));
+        const QJsonValue sentTo = json.value(QStringLiteral("sentTo"));
+        if (!known || !id.isString() || !isValidCallId(id.toString()))
+            return std::nullopt;
+        call.id = id.toString();
+        const bool described = call.kind == Call::Kind::Offer || call.kind == Call::Kind::Answer;
+        if (described) {
+            if (!sdp.isString() || !isValidSdp(sdp.toString()))
+                return std::nullopt;
+            call.sdp = sdp.toString();
+        } else if (!sdp.isUndefined()) {
+            return std::nullopt;
+        }
+        if (!video.isUndefined()) {
+            if (call.kind != Call::Kind::Offer || video != QJsonValue(true))
+                return std::nullopt;
+            call.video = true;
+        }
+        if (call.kind == Call::Kind::Hangup) {
+            bool found = false;
+            for (Call::Reason r : {Call::Reason::Normal, Call::Reason::Declined, Call::Reason::NoAnswer,
+                                   Call::Reason::Failed, Call::Reason::AnsweredElsewhere,
+                                   Call::Reason::DeclinedElsewhere}) {
+                if (reason.isString() && reason.toString() == callReasonName(r)) {
+                    call.reason = r;
+                    found = true;
+                }
+            }
+            if (!found)
+                return std::nullopt;
+        } else if (!reason.isUndefined()) {
+            return std::nullopt;
+        }
+        const bool elsewhere = call.reason == Call::Reason::AnsweredElsewhere
+            || call.reason == Call::Reason::DeclinedElsewhere;
+        if (sentTo.isUndefined() == elsewhere
+            || (!sentTo.isUndefined() && (!sentTo.isString() || !isValidUsername(sentTo.toString()))))
+            return std::nullopt;
         content.sentTo = sentTo.toString();
         return content;
     }

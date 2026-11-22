@@ -8,8 +8,10 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QMimeDatabase>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QTimeZone>
 
@@ -1346,6 +1348,14 @@ void Messenger::handleContent(const QString &from, const Protocol::Envelope &env
         return; // dropped, and they learn nothing
     if (content.type == Protocol::Content::Type::History)
         return; // only ever from a computer of mine
+    if (content.type == Protocol::Content::Type::Call) {
+        // Only from someone I accepted: a stranger's request never rings.
+        const qint64 conversation = m_store->directConversation(from);
+        if (conversation == 0 || !canCall(conversation) || !content.sentTo.isEmpty())
+            return;
+        emit callSignal(from, envelope.fromDevice, content.call, qMax<qint64>(0, now() - envelope.serverTime), false);
+        return;
+    }
     if (content.type == Protocol::Content::Type::Profile) {
         // Kept, even before a request is accepted (shown with their username);
         // the picture is fetched only once accepted.
@@ -2316,7 +2326,91 @@ void Messenger::handleSync(const Protocol::Envelope &envelope, const Protocol::C
     case Protocol::Content::Type::History:
         handleHistory(content);
         return;
+    case Protocol::Content::Type::Call:
+        // Answered or declined on another device of mine: stop ringing here.
+        if (!content.sentTo.isEmpty())
+            emit callSignal(content.sentTo, envelope.fromDevice, content.call,
+                            qMax<qint64>(0, now() - envelope.serverTime), true);
+        return;
     }
+}
+
+bool Messenger::canCall(qint64 conversation) const
+{
+    if (!hasAccount())
+        return false;
+    const ChatStore::Conversation c = m_store->conversation(conversation);
+    return c.id != 0 && c.kind == QLatin1String("direct") && !c.request && !c.peer.isEmpty()
+        && c.peer != username() && !m_store->isBlocked(c.peer);
+}
+
+QString Messenger::callPeer(qint64 conversation) const
+{
+    return canCall(conversation) ? m_store->conversation(conversation).peer : QString();
+}
+
+void Messenger::sendCall(const QString &peer, const Protocol::Call &call, const Done &done)
+{
+    const bool elsewhere = call.kind == Protocol::Call::Kind::Hangup
+        && (call.reason == Protocol::Call::Reason::AnsweredElsewhere
+            || call.reason == Protocol::Call::Reason::DeclinedElsewhere);
+    if (elsewhere) {
+        // Not only to those I know of (haveOtherDevices): one linked since
+        // signing in rings too, and must stop.
+        sendContent(username(), Protocol::Content::callSignal(call, peer), done);
+        return;
+    }
+    sendContent(peer, Protocol::Content::callSignal(call), done);
+}
+
+void Messenger::fetchRelay(const std::function<void(const Relay &relay, const QString &error)> &done)
+{
+    if (m_state != State::Online) {
+        done({}, QStringLiteral("disconnected"));
+        return;
+    }
+    m_client.relay([done](const ChatClient::Result &result) {
+        if (!result.ok) {
+            done({}, result.message.isEmpty() ? result.error : result.message);
+            return;
+        }
+        Relay relay;
+        const QJsonValue urls = result.data.value(QStringLiteral("urls"));
+        const QJsonValue user = result.data.value(QStringLiteral("username"));
+        const QJsonValue credential = result.data.value(QStringLiteral("credential"));
+        if (!urls.isArray() || urls.toArray().size() > 8) {
+            done({}, QStringLiteral("bad-response"));
+            return;
+        }
+        for (const QJsonValue &url : urls.toArray()) {
+            const QString text = url.toString();
+            // turn:host:port[?transport=udp|tcp], turns:…, stun:…
+            static const QRegularExpression shape(
+                QStringLiteral("^(turns?|stun):[A-Za-z0-9.\\-\\[\\]:]{1,253}(\\?transport=(udp|tcp))?$"));
+            if (!url.isString() || !shape.match(text).hasMatch()) {
+                done({}, QStringLiteral("bad-response"));
+                return;
+            }
+            relay.urls << text;
+        }
+        if (!relay.urls.isEmpty()) {
+            if (!user.isString() || !credential.isString() || user.toString().size() > 128
+                || credential.toString().size() > 128 || user.toString().contains(QLatin1Char('\n'))) {
+                done({}, QStringLiteral("bad-response"));
+                return;
+            }
+            relay.username = user.toString();
+            relay.credential = credential.toString();
+        }
+        done(relay, QString());
+    });
+}
+
+void Messenger::addCallNote(const QString &peer, const QString &text)
+{
+    const qint64 conversation = m_store->directConversation(peer);
+    if (conversation != 0)
+        m_store->addSystemNote(conversation, text, QDateTime::currentDateTimeUtc());
 }
 
 void Messenger::applyMyProfile(const QString &name, const std::optional<Attachment::Pointer> &avatar)

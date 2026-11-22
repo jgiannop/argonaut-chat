@@ -1,5 +1,7 @@
 #include "MainWindow.h"
 
+#include "CallDevices.h"
+#include "Calls.h"
 #include "Dialogs.h"
 #include "ImageViewer.h"
 #include "Messenger.h"
@@ -90,6 +92,31 @@ QIcon composerIcon(bool microphone, const QColor &color, qreal ratio)
         clip.lineTo(13, 15);
         p.drawPath(clip);
     }
+    p.end();
+    return QIcon(pixmap);
+}
+
+// The header's 📞, drawn as the composer's are: a handset.
+QIcon phoneIcon(const QColor &color, qreal ratio)
+{
+    QPixmap pixmap(QSize(24, 24) * ratio);
+    pixmap.setDevicePixelRatio(ratio);
+    pixmap.fill(Qt::transparent);
+    QPainter p(&pixmap);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setPen(QPen(color, 1.8, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.setBrush(Qt::NoBrush);
+    QPainterPath handset;
+    handset.moveTo(7.5, 3.5);
+    handset.lineTo(10, 8);
+    handset.lineTo(8.5, 10);
+    handset.cubicTo(9.5, 12.5, 11.5, 14.5, 14, 15.5);
+    handset.lineTo(16, 14);
+    handset.lineTo(20.5, 16.5);
+    handset.lineTo(19.5, 19.5);
+    handset.cubicTo(11, 20.5, 3.5, 13, 4.5, 4.5);
+    handset.closeSubpath();
+    p.drawPath(handset);
     p.end();
     return QIcon(pixmap);
 }
@@ -810,6 +837,15 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
     m_safety->setText(tr("Safety Number"));
     m_safety->setToolTip(tr("Check that your messages reach only them"));
     m_safety->setCursor(Qt::PointingHandCursor);
+    m_callButton = new QToolButton(header);
+    m_callButton->setObjectName(QStringLiteral("callButton"));
+    m_callButton->setIconSize(QSize(22, 22));
+    m_callButton->setToolTip(tr("Voice call, encrypted end to end"));
+    m_callButton->setCursor(Qt::PointingHandCursor);
+    m_callButton->setAutoRaise(true);
+    m_callButton->hide();
+    connect(m_callButton, &QToolButton::clicked, this, &MainWindow::startCall);
+    headerLayout->addWidget(m_callButton);
     headerLayout->addWidget(m_safety);
     connect(m_safety, &QToolButton::clicked, this, &MainWindow::showSafetyNumber);
     m_messages = new MessageList(chat);
@@ -1064,6 +1100,36 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
     connect(newer, &QToolButton::clicked, this, [this] { findStep(1); });
     connect(closeFindButton, &QToolButton::clicked, this, &MainWindow::closeFind);
 
+    // A call (whichever conversation is open): who, how it stands, its buttons.
+    m_callBar = new QWidget(chat);
+    m_callBar->setObjectName(QStringLiteral("callBar"));
+    m_callBar->setAttribute(Qt::WA_StyledBackground);
+    auto *callLayout = new QHBoxLayout(m_callBar);
+    callLayout->setContentsMargins(16, 8, 12, 8);
+    m_callLabel = new QLabel(m_callBar);
+    m_callLabel->setObjectName(QStringLiteral("callLabel"));
+    m_callLabel->setTextFormat(Qt::PlainText);
+    m_muteCall = new QToolButton(m_callBar);
+    m_muteCall->setObjectName(QStringLiteral("muteCallButton"));
+    m_muteCall->setText(tr("Mute"));
+    m_muteCall->setCheckable(true);
+    m_muteCall->setCursor(Qt::PointingHandCursor);
+    m_declineCall = new QPushButton(tr("Decline"), m_callBar);
+    m_declineCall->setObjectName(QStringLiteral("declineCallButton"));
+    m_acceptCall = new QPushButton(tr("Accept"), m_callBar);
+    m_acceptCall->setObjectName(QStringLiteral("acceptCallButton"));
+    m_hangUp = new QPushButton(tr("Hang Up"), m_callBar);
+    m_hangUp->setObjectName(QStringLiteral("hangUpButton"));
+    callLayout->addWidget(m_callLabel, 1);
+    for (QWidget *button : std::initializer_list<QWidget *>{m_muteCall, m_declineCall, m_acceptCall, m_hangUp}) {
+        button->setCursor(Qt::PointingHandCursor);
+        callLayout->addWidget(button);
+    }
+    m_callBar->hide();
+    m_callTick.setInterval(1000);
+    connect(&m_callTick, &QTimer::timeout, this, &MainWindow::updateCallBar);
+
+    chatLayout->addWidget(m_callBar);
     chatLayout->addWidget(header);
     chatLayout->addWidget(m_findBar);
     chatLayout->addWidget(m_messages, 1);
@@ -1198,6 +1264,20 @@ MainWindow::MainWindow(ChatStore *store, Messenger *messenger, QWidget *parent)
             }
         });
         connect(m_messenger, &Messenger::stateChanged, this, &MainWindow::updateConnection);
+        connect(m_messenger, &Messenger::stateChanged, this, &MainWindow::updateCallButton);
+        m_calls = new Calls(m_messenger, this);
+        m_ringer = new CallRinger(this);
+        connect(m_calls, &Calls::stateChanged, this, &MainWindow::updateCallBar);
+        connect(m_calls, &Calls::incomingCall, this, &MainWindow::onIncomingCall);
+        connect(m_calls, &Calls::problem, this, &MainWindow::showNotice);
+        connect(m_calls, &Calls::ended, this, [this](const QString &, const QString &why) {
+            if (!why.isEmpty())
+                showNotice(why);
+        });
+        connect(m_acceptCall, &QPushButton::clicked, m_calls, &Calls::accept);
+        connect(m_declineCall, &QPushButton::clicked, m_calls, &Calls::decline);
+        connect(m_hangUp, &QPushButton::clicked, m_calls, &Calls::hangUp);
+        connect(m_muteCall, &QToolButton::toggled, m_calls, &Calls::setMuted);
         connect(m_messenger, &Messenger::safetyNumberChanged, this, [this](const QString &username) {
             updateHeader();
             showNotice(tr("Your safety number with %1 has changed.").arg(username));
@@ -1298,6 +1378,7 @@ void MainWindow::buildMenus()
     QAction *find = conversation->addAction(tr("Find in Conversation…"), this, &MainWindow::showFind);
     find->setShortcut(QKeySequence::Find);
     conversation->addSeparator();
+    m_callAction = conversation->addAction(tr("Voice Call"), this, &MainWindow::startCall);
     m_safetyAction = conversation->addAction(tr("Safety Number…"), this, &MainWindow::showSafetyNumber);
     conversation->addSeparator();
     m_membersAction = conversation->addAction(tr("Members…"), this, [this] {
@@ -1644,6 +1725,7 @@ void MainWindow::updateHeader()
             a->setChecked(a->data().toLongLong() == c.expireSeconds);
     }
     m_safety->setVisible(direct && m_messenger);
+    updateCallButton();
     if (m_safetyAction)
         m_safetyAction->setEnabled(direct && m_messenger);
     if (m_membersAction)
@@ -2699,6 +2781,85 @@ void MainWindow::updateComposerIcons()
     const qreal ratio = devicePixelRatioF();
     m_attach->setIcon(composerIcon(false, m_theme.dimFg, ratio));
     m_voiceButton->setIcon(composerIcon(true, m_theme.dimFg, ratio));
+    if (m_callButton)
+        m_callButton->setIcon(phoneIcon(m_theme.dimFg, ratio));
+}
+
+void MainWindow::startCall()
+{
+    if (!m_calls || m_current == 0)
+        return;
+    QString error;
+    if (!m_calls->call(m_current, &error))
+        showNotice(error);
+}
+
+void MainWindow::updateCallButton()
+{
+    const bool can = m_calls && m_messenger && m_current != 0 && m_messenger->canCall(m_current);
+    const bool ready = can && m_calls->isIdle() && m_messenger->state() == Messenger::State::Online;
+    m_callButton->setVisible(can);
+    m_callButton->setEnabled(ready);
+    if (m_callAction)
+        m_callAction->setEnabled(ready);
+}
+
+void MainWindow::updateCallBar()
+{
+    updateCallButton();
+    if (!m_calls || m_calls->isIdle()) {
+        m_callBar->hide();
+        m_callTick.stop();
+        m_ringer->stop();
+        m_muteCall->setChecked(false);
+        return;
+    }
+    const QString who = m_messenger->displayName(m_calls->peer());
+    const Calls::State state = m_calls->state();
+    switch (state) {
+    case Calls::State::Calling:
+        m_callLabel->setText(tr("Calling %1…").arg(who));
+        break;
+    case Calls::State::Ringing:
+        m_callLabel->setText(tr("%1 is calling you").arg(who));
+        break;
+    case Calls::State::Connecting:
+        m_callLabel->setText(tr("Connecting to %1…").arg(who));
+        break;
+    case Calls::State::Active:
+        m_callLabel->setText(QStringLiteral("%1 · %2").arg(who, Voice::formatDuration(m_calls->activeMs())));
+        break;
+    case Calls::State::Idle:
+        break;
+    }
+    const bool ringing = state == Calls::State::Ringing;
+    m_acceptCall->setVisible(ringing);
+    m_declineCall->setVisible(ringing);
+    m_hangUp->setVisible(!ringing);
+    m_hangUp->setText(state == Calls::State::Calling ? tr("Cancel") : tr("Hang Up"));
+    m_muteCall->setVisible(state == Calls::State::Active);
+    if (!ringing)
+        m_ringer->stop();
+    if (state == Calls::State::Active && !m_callTick.isActive())
+        m_callTick.start();
+    m_callBar->show();
+}
+
+void MainWindow::onIncomingCall(const QString &peer)
+{
+    updateCallBar();
+    m_ringer->start();
+    showAndRaise();
+    // As a message's notification, but always shown for a call: without the
+    // name while locked, or when names are not to be shown.
+    const Notifications::Content content = Notifications::saved();
+    if (content == Notifications::Content::Off)
+        return;
+    const bool named = !m_locked && content != Notifications::Content::Nothing;
+    const QString title = tr("Incoming call");
+    const QString body = named ? tr("%1 is calling you").arg(m_messenger->displayName(peer)) : tr("Someone is calling you");
+    m_tray->showMessage(title, body);
+    emit notified(m_store->directConversation(peer), title, body);
 }
 
 bool MainWindow::saveAttachment(qint64 attachment, const QString &path)

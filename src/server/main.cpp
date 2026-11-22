@@ -4,6 +4,7 @@
 
 #include <QCommandLineParser>
 #include <QCoreApplication>
+#include <QFile>
 #include <QHostAddress>
 
 #include <cstdio>
@@ -32,7 +33,16 @@ int main(int argc, char **argv)
         QStringLiteral("trust-proxy"),
         QStringLiteral("Behind a reverse proxy on this computer: take the client's address from X-Forwarded-For "
                        "(for the rate limits)."));
-    parser.addOptions({listenOption, portOption, databaseOption, trustProxyOption});
+    const QCommandLineOption relayOption(
+        QStringLiteral("relay"),
+        QStringLiteral("A relay (TURN) for calls, as turn:host:port (may be given more than once); "
+                       "with --relay-secret-file."),
+        QStringLiteral("url"));
+    const QCommandLineOption relaySecretOption(
+        QStringLiteral("relay-secret-file"),
+        QStringLiteral("The file with the secret shared with the relay (coturn's static-auth-secret)."),
+        QStringLiteral("file"));
+    parser.addOptions({listenOption, portOption, databaseOption, trustProxyOption, relayOption, relaySecretOption});
     parser.process(app);
 
     const QHostAddress address(parser.value(listenOption));
@@ -53,6 +63,28 @@ int main(int argc, char **argv)
     }
     ChatServer server(&store);
     server.setTrustProxy(parser.isSet(trustProxyOption));
+    if (parser.isSet(relayOption) != parser.isSet(relaySecretOption)) {
+        std::fprintf(stderr, "argonaut-chat-server: --relay and --relay-secret-file go together\n");
+        return 2;
+    }
+    if (parser.isSet(relayOption)) {
+        QFile file(parser.value(relaySecretOption));
+        const QByteArray secret = file.open(QIODevice::ReadOnly) ? file.readAll().trimmed() : QByteArray();
+        if (secret.size() < 16) {
+            std::fprintf(stderr, "argonaut-chat-server: no relay secret (16 characters at least) in %s\n",
+                         qPrintable(file.fileName()));
+            return 1;
+        }
+        const QStringList urls = parser.values(relayOption);
+        for (const QString &url : urls) {
+            if (!url.startsWith(QLatin1String("turn:")) && !url.startsWith(QLatin1String("turns:"))
+                && !url.startsWith(QLatin1String("stun:"))) {
+                std::fprintf(stderr, "argonaut-chat-server: not a relay: %s\n", qPrintable(url));
+                return 2;
+            }
+        }
+        server.setRelay(urls, secret);
+    }
     if (!server.listen(address, quint16(port))) {
         std::fprintf(stderr, "argonaut-chat-server: cannot listen: %s\n", qPrintable(server.errorString()));
         return 1;

@@ -89,6 +89,8 @@ public:
                    const Protocol::PublicSignedPreKey &signedPreKey,
                    const QList<Protocol::PublicOneTimePreKey> &oneTimePreKeys, const Callback &done);
     void listDevices(const Callback &done);
+    // The relay for calls: {urls, username, credential} (short-lived).
+    void relay(const Callback &done);
     void removeDevice(quint32 device, const Callback &done);
 
     // Tests: the ping interval and how long past it a silence is tolerated.

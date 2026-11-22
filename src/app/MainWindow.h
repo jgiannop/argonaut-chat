@@ -12,6 +12,8 @@
 #include <QTimer>
 #include <QPixmap>
 
+class Calls;
+class CallRinger;
 class Messenger;
 class TrayIcon;
 class ImageViewer;
@@ -166,6 +168,16 @@ public:
     // it is, several as "[date time] Name: text" lines, oldest first.
     QString selectedMessagesText() const;
     void copySelectedMessages();
+    // Voice calls (as Signal's): 📞 in a direct conversation's header (and
+    // Conversation › Voice Call); the call bar at the top shows ringing
+    // (Accept, Decline), calling, connecting, and the call itself (time,
+    // Mute, Hang Up), whichever conversation is open. An incoming call rings,
+    // shows the window and notifies (no name while locked).
+    Calls *calls() const { return m_calls; }
+    void startCall();
+    QToolButton *callButton() const { return m_callButton; }
+    QWidget *callBar() const { return m_callBar; }
+    QLabel *callLabel() const { return m_callLabel; }
 
 signals:
     // A notification was shown (tests: the offscreen platform has no tray).
@@ -234,6 +246,20 @@ private:
     QLabel *m_connection = nullptr;
     QLabel *m_notice = nullptr;
     QToolButton *m_safety = nullptr;
+    QToolButton *m_callButton = nullptr;
+    QAction *m_callAction = nullptr;
+    Calls *m_calls = nullptr;
+    CallRinger *m_ringer = nullptr;
+    QWidget *m_callBar = nullptr;
+    QLabel *m_callLabel = nullptr;
+    QPushButton *m_acceptCall = nullptr;
+    QPushButton *m_declineCall = nullptr;
+    QToolButton *m_muteCall = nullptr;
+    QPushButton *m_hangUp = nullptr;
+    QTimer m_callTick;
+    void updateCallBar();
+    void updateCallButton();
+    void onIncomingCall(const QString &peer);
     QAction *m_signUpAction = nullptr;
     QAction *m_newChatAction = nullptr;
     QAction *m_safetyAction = nullptr;

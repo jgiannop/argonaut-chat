@@ -78,9 +78,32 @@ struct Mention
 };
 bool isValidMentions(const QList<Mention> &mentions, const QString &body);
 
+// A call's signalling (as Signal's: WebRTC offers and answers carried inside
+// the end-to-end encrypted messages, so the server never sees them and
+// cannot put itself between the two: each side's DTLS fingerprint is in its
+// session description). The caller picks the id; an Answer, a Hangup and a
+// Busy carry it. To my own other devices: Hangup with AnsweredElsewhere or
+// DeclinedElsewhere (and `sentTo`), so they stop ringing.
+constexpr int MaxSdpBytes = 16 * 1024;
+struct Call
+{
+    enum class Kind { Offer, Answer, Hangup, Busy };
+    enum class Reason { Normal, Declined, NoAnswer, Failed, AnsweredElsewhere, DeclinedElsewhere };
+    Kind kind = Kind::Offer;
+    QString id;                     // 32 lower-case hex digits
+    QString sdp;                    // Offer, Answer (isValidSdp)
+    bool video = false;             // Offer
+    Reason reason = Reason::Normal; // Hangup
+};
+// A session description as it may be handed to WebRTC: "v=0" first, printable
+// ASCII and line ends only, at most MaxSdpBytes.
+bool isValidSdp(const QString &sdp);
+bool isValidCallId(const QString &id);
+QString newCallId();
+
 struct Content
 {
-    enum class Type { Text, Receipt, Profile, Group, Leave, Timer, Reaction, Delete, Edit, Typing, History };
+    enum class Type { Text, Receipt, Profile, Group, Leave, Timer, Reaction, Delete, Edit, Typing, History, Call };
     enum class Receipt { Delivered, Read };
 
     Type type = Type::Text;
@@ -117,6 +140,8 @@ struct Content
     QString groupAdmin;
     QStringList groupMembers;
     int groupRevision = 0;
+    // Call: the signalling (with `sentTo` when to my own devices).
+    Call call;
 
     static Content text(const QString &body);
     static Content receiptOf(Receipt kind, const QStringList &ids);
@@ -137,6 +162,7 @@ struct Content
     static Content deletion(const QString &targetId, const QString &me, const QString &group = QString());
     static Content reaction(const QString &targetId, const QString &targetAuthor, const QString &emoji, bool remove,
                             const QString &group = QString());
+    static Content callSignal(const Call &call, const QString &sentTo = QString());
 };
 
 // A reaction: one emoji as people type it (with its variation selectors,

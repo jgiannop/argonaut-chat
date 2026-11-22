@@ -28,7 +28,7 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends build-essential cmake ninja-build pkg-config \
             qt6-base-dev qt6-websockets-dev qt6-multimedia-dev libsodium-dev libsqlcipher-dev qtkeychain-qt6-dev \
-            libopus-dev libogg-dev libopusfile-dev libopusenc-dev
+            libopus-dev libogg-dev libopusfile-dev libopusenc-dev libspeexdsp-dev libssl-dev
 
       - uses: actions/checkout@v5
 

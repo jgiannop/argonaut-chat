@@ -379,6 +379,11 @@ void ChatClient::addDevice(const QString &username, const Crypto::IdentityKeyPai
     });
 }
 
+void ChatClient::relay(const Callback &done)
+{
+    request(QStringLiteral("relay"), {}, done);
+}
+
 void ChatClient::listDevices(const Callback &done)
 {
     request(QStringLiteral("devices"), {}, done);

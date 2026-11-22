@@ -16,6 +16,12 @@
 #                 `nginx -t` before every reload, undone if it fails
 #       * Apache or anything else: stops before changing anything
 #     The other sites on the machine are left as they are.
+#   - a relay for calls (coturn: TURN on UDP port 3478, the relayed
+#     media on UDP 49160-49200), with passwords the server hands out for 12
+#     hours (a secret the two share, in /etc/argonaut-chat); UDP only, never
+#     into private networks. RELAY=no leaves it out. It
+#     stops before changing anything if another program has port 3478, or
+#     coturn is set up here for something else.
 #
 # Run it as root (or with sudo) from the uploaded source (see docs/deploy.md):
 #
@@ -25,12 +31,14 @@
 # restarts. The database stays.
 #
 # Environment: PORT (default 8790), the server's port on 127.0.0.1;
-# EMAIL, for Let's Encrypt's expiry notices (nginx only; optional).
+# EMAIL, for Let's Encrypt's expiry notices (nginx only; optional);
+# RELAY=no: no relay for calls (calls then connect only directly).
 set -euo pipefail
 
 DOMAIN="${1:-}"
 PORT="${PORT:-8790}"
 EMAIL="${EMAIL:-}"
+RELAY="${RELAY:-yes}"
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVICE=argonaut-chat-server
 ACCOUNT=argonaut-chat
@@ -41,6 +49,13 @@ CADDY_SITE=/etc/caddy/argonaut-chat.caddy
 NGINX_SITE=/etc/nginx/sites-available/argonaut-chat
 NGINX_LINK=/etc/nginx/sites-enabled/argonaut-chat
 ACME_ROOT=/var/www/argonaut-chat-acme
+CONFIG=/etc/argonaut-chat
+RELAY_SECRET=$CONFIG/relay-secret
+TURN_CONF=/etc/turnserver.conf
+TURN_MARK="# Written by deploy/setup-server.sh (Argonaut Chat)."
+RELAY_PORT=3478
+RELAY_MIN=49160
+RELAY_MAX=49200
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[33mWarning: %s\033[0m\n' "$*" >&2; }
@@ -84,6 +99,22 @@ if [[ $WEB == nginx && -e /etc/nginx/sites-enabled ]] && grep -rqsw -- "server_n
     die "another nginx site already uses $DOMAIN; nothing has been changed."
 fi
 
+# The relay's port: free, or coturn's as set up by an earlier run.
+[[ $RELAY == yes || $RELAY == no ]] || die "RELAY is yes or no, not: $RELAY"
+if [[ $RELAY == yes ]]; then
+    relay_holders=$({ ss -lunpH "sport = :$RELAY_PORT"; ss -ltnpH "sport = :$RELAY_PORT"; } |
+        { grep -o 'users:(("[^"]*"' || true; } | cut -d'"' -f2 | sort -u | tr '\n' ' ')
+    relay_holders=${relay_holders% }
+    case "$relay_holders" in
+        "" | turnserver) ;;
+        *) die "port $RELAY_PORT (the relay's) is held by: $relay_holders; nothing has been changed. RELAY=no sets up the server without a relay." ;;
+    esac
+    if [[ -f $TURN_CONF ]] && ! head -1 "$TURN_CONF" | grep -qxF "$TURN_MARK" &&
+        grep -qE '^[[:space:]]*[a-z]' "$TURN_CONF"; then
+        die "coturn is already set up here ($TURN_CONF is not ours); nothing has been changed. RELAY=no leaves it alone."
+    fi
+fi
+
 # The domain must point here, or no certificate can be had.
 mine=$(hostname -I 2>/dev/null || true)
 resolved=$(getent ahosts "$DOMAIN" | awk '{print $1}' | sort -u || true)
@@ -112,7 +143,12 @@ case $WEB in
     caddy-new | caddy) packages+=(caddy) ;;
     nginx) command -v certbot >/dev/null || packages+=(certbot) ;;
 esac
+if [[ $RELAY == yes ]]; then packages+=(coturn); fi
 apt-get install -y -q --no-install-recommends "${packages[@]}"
+# coturn starts as it is installed; not until it has our configuration (below).
+if [[ $RELAY == yes ]] && ! head -1 "$TURN_CONF" 2>/dev/null | grep -qxF "$TURN_MARK"; then
+    systemctl stop coturn 2>/dev/null || true
+fi
 
 # --- Build ---
 
@@ -135,6 +171,78 @@ say "The service: $SERVICE, on 127.0.0.1:$PORT"
 if ! id -u "$ACCOUNT" >/dev/null 2>&1; then
     useradd --system --home-dir "$STATE" --no-create-home --shell /usr/sbin/nologin "$ACCOUNT"
 fi
+
+# The relay for calls (coturn), sharing a secret with the server.
+relay_args=""
+if [[ $RELAY == yes ]]; then
+    say "The relay for calls: coturn on port $RELAY_PORT (media on UDP $RELAY_MIN-$RELAY_MAX)"
+    install -d -m 0750 -o root -g "$ACCOUNT" "$CONFIG"
+    if [[ ! -s $RELAY_SECRET ]]; then
+        (umask 077 && head -c 32 /dev/urandom | base64 | tr -d '\n=' > "$RELAY_SECRET")
+    fi
+    chgrp "$ACCOUNT" "$RELAY_SECRET"
+    chmod 0640 "$RELAY_SECRET"
+    secret=$(cat "$RELAY_SECRET")
+    if [[ -f $TURN_CONF && ! -f $TURN_CONF.before-argonaut-chat ]]; then
+        cp -p "$TURN_CONF" "$TURN_CONF.before-argonaut-chat"
+    fi
+    {
+        echo "$TURN_MARK"
+        cat <<TURN
+# TURN for Argonaut Chat's calls: only their encrypted media passes. The
+# passwords come from argonaut-chat-server (the TURN REST scheme, this secret).
+listening-port=$RELAY_PORT
+min-port=$RELAY_MIN
+max-port=$RELAY_MAX
+realm=$DOMAIN
+use-auth-secret
+static-auth-secret=$secret
+fingerprint
+no-tls
+no-dtls
+no-tcp
+no-cli
+no-tcp-relay
+no-multicast-peers
+no-software-attribute
+stale-nonce=600
+total-quota=100
+user-quota=4
+syslog
+simple-log
+# Never into private and reserved networks (this machine's public address
+# stays allowed: two callers both relayed here reach each other through it;
+# UDP only, no-tcp-relay).
+denied-peer-ip=0.0.0.0-0.255.255.255
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=100.64.0.0-100.127.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.0.0.0-192.0.0.255
+denied-peer-ip=192.0.2.0-192.0.2.255
+denied-peer-ip=192.88.99.0-192.88.99.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=198.18.0.0-198.19.255.255
+denied-peer-ip=198.51.100.0-198.51.100.255
+denied-peer-ip=203.0.113.0-203.0.113.255
+denied-peer-ip=224.0.0.0-255.255.255.255
+denied-peer-ip=::1
+denied-peer-ip=64:ff9b::-64:ff9b::ffff:ffff
+denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+TURN
+    } > "$TURN_CONF.new"
+    chown root:turnserver "$TURN_CONF.new"
+    chmod 0640 "$TURN_CONF.new"
+    mv "$TURN_CONF.new" "$TURN_CONF"
+    if [[ -f /etc/default/coturn ]] && ! grep -qx 'TURNSERVER_ENABLED=1' /etc/default/coturn; then
+        echo 'TURNSERVER_ENABLED=1' >> /etc/default/coturn
+    fi
+    systemctl enable coturn >/dev/null
+    systemctl restart coturn
+    relay_args=" --relay turn:$DOMAIN:$RELAY_PORT --relay-secret-file $RELAY_SECRET"
+fi
 cat > "/etc/systemd/system/$SERVICE.service" <<EOF
 # Written by deploy/setup-server.sh (Argonaut Chat).
 [Unit]
@@ -145,7 +253,7 @@ Wants=network-online.target
 [Service]
 User=$ACCOUNT
 Group=$ACCOUNT
-ExecStart=$BIN --listen 127.0.0.1 --port $PORT --database $STATE/server.sqlite --trust-proxy
+ExecStart=$BIN --listen 127.0.0.1 --port $PORT --database $STATE/server.sqlite --trust-proxy$relay_args
 Environment=HOME=$STATE
 Environment=LANG=C.UTF-8
 StateDirectory=argonaut-chat
@@ -347,6 +455,11 @@ if command -v ufw >/dev/null && ufw status | grep -q '^Status: active'; then
     say "Opening ports 80 and 443 in ufw"
     ufw allow 80/tcp >/dev/null
     ufw allow 443/tcp >/dev/null
+    if [[ $RELAY == yes ]]; then
+        say "Opening the relay's ports in ufw"
+        ufw allow "$RELAY_PORT/udp" >/dev/null
+        ufw allow "$RELAY_MIN:$RELAY_MAX/udp" >/dev/null
+    fi
 fi
 
 # --- Checks ---
@@ -360,6 +473,13 @@ if systemctl start argonaut-chat-backup.service; then
     echo "A backup now: $(ls -1t /var/backups/argonaut-chat/server-*.sqlite.gz 2>/dev/null | head -1)"
 else
     warn "the backup did not work: journalctl -u argonaut-chat-backup"
+fi
+if [[ $RELAY == yes ]]; then
+    if systemctl is-active --quiet coturn && ss -lunH "sport = :$RELAY_PORT" | grep -q .; then
+        echo "The relay for calls runs, on port $RELAY_PORT."
+    else
+        warn "the relay for calls is not running: journalctl -u coturn"
+    fi
 fi
 # A WebSocket handshake through the web server: "101 Switching Protocols"
 # means TLS, the certificate, the proxy and the server all work. (curl then
@@ -384,3 +504,10 @@ Restart:  systemctl restart $SERVICE
 Database: $STATE/server.sqlite
 Backups:  /var/backups/argonaut-chat (each night, the newest 14 kept)
 EOF
+if [[ $RELAY == yes ]]; then
+    cat <<EOF
+Relay:    journalctl -u coturn -f
+          With a Hetzner Cloud Firewall, allow there too (inbound):
+          UDP $RELAY_PORT and UDP $RELAY_MIN-$RELAY_MAX.
+EOF
+fi

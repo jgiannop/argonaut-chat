@@ -213,6 +213,27 @@ public:
     QStringList blocked() const { return m_store->blocked(); }
 
     // The 60 digits to compare with them; empty while their key is unknown.
+    // Calls (the signalling only; the call itself is Calls' in chat_call):
+    // only in an accepted direct conversation, never with the blocked.
+    bool canCall(qint64 conversation) const;
+    QString callPeer(qint64 conversation) const; // whom; empty if canCall is false
+    // Sends `call` to every device of `peer`; Hangup with AnsweredElsewhere or
+    // DeclinedElsewhere goes to my own other devices instead.
+    void sendCall(const QString &peer, const Protocol::Call &call, const Done &done);
+    // The relay (TURN) for calls, as the server hands it out for a while:
+    // no urls when it has none (then calls go only directly).
+    struct Relay
+    {
+        QStringList urls;
+        QString username;
+        QString credential;
+    };
+    void fetchRelay(const std::function<void(const Relay &relay, const QString &error)> &done);
+    // A note in a conversation's history ("Missed call"), dated now.
+    void addCallNote(const QString &peer, const QString &text);
+    // The engine's clock (ms; a fake one in tests).
+    qint64 now() const;
+
     QString safetyNumber(const QString &username) const;
     bool safetyNumberHasChanged(const QString &username) const { return m_keys->identityChanged(username); }
     void setVerified(const QString &username, bool verified);
@@ -236,6 +257,10 @@ signals:
     // and how it ended (`message` for people).
     void historyProgress(bool sending, int percent);
     void historyFinished(bool sending, bool ok, const QString &message);
+    // A call's signalling from `peer` (`device`: theirs), or, with `mine`,
+    // from another device of mine about a call with `peer`. `age`: how long
+    // the server held it (ms).
+    void callSignal(const QString &peer, quint32 device, const Protocol::Call &call, qint64 age, bool mine);
 
 private:
     void setState(State state);
@@ -306,7 +331,6 @@ private:
     void sendReceipt(const QString &to, Protocol::Content::Receipt kind, const QStringList &ids);
     void replenishPreKeys();
     void rotateSignedPreKey();
-    qint64 now() const;
     // now(), but later than the last one it gave: two edits or reactions in
     // the same millisecond still have their order (and the newer one stays pending).
     qint64 nextLocalTime();

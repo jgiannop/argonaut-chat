@@ -79,6 +79,7 @@ public:
         qint64 maxStoredAttachmentBytes = 5LL * 1000 * 1000 * 1000;
         qint64 attachmentKeepMs = 30LL * 24 * 3600 * 1000;
         qint64 unfinishedUploadKeepMs = 24LL * 3600 * 1000;
+        RateLimiter::Rule relayFetchesPerAccount{30, 30.0 / 3600};
     };
     static constexpr int MaxChunkBytes = 512 * 1024;
     // Linked devices: at most this many per account; a new device waits
@@ -95,6 +96,12 @@ public:
     // Tests: the limiter's clock (ms).
     void setClock(RateLimiter::Clock clock) { m_limiter.setClock(std::move(clock)); }
     void setTrustProxy(bool trust) { m_trustProxy = trust; }
+    // The relay (TURN, e.g. coturn with use-auth-secret) for calls: its urls
+    // and the secret it shares with us. A signed-in device asks for a
+    // password, valid RelayTtlSeconds: username "<expiry>:<account>",
+    // credential base64(HMAC-SHA1(secret, username)) (the TURN REST scheme).
+    static constexpr int RelayTtlSeconds = 12 * 3600;
+    void setRelay(const QStringList &urls, const QByteArray &secret);
     // Tests: the ping interval (a connection silent for two is dropped).
     void setKeepAlive(int intervalMs);
 
@@ -140,6 +147,7 @@ private:
     QJsonObject provisionSend(const QJsonObject &request);
     QJsonObject addDevice(QWebSocket *socket, Client &client, const QJsonObject &request);
     QJsonObject listDevices(const Client &client);
+    QJsonObject relay(const Client &client) const;
     QJsonObject removeDevice(const Client &client, const QJsonObject &request);
 
     QJsonObject signInFailed(QWebSocket *socket, Client &client, const QString &error, const QString &message);
@@ -166,4 +174,6 @@ private:
     QTimer m_keepAlive;
     QElapsedTimer m_clock;
     bool m_trustProxy = false;
+    QStringList m_relayUrls;
+    QByteArray m_relaySecret;
 };

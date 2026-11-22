@@ -58,6 +58,13 @@ program: [docs/how-signal-works.md](docs/how-signal-works.md).
   Its creator adds and removes people; anyone can leave.
 - **Disappearing messages** (Conversation › Disappearing Messages): from
   30 seconds to 4 weeks after they are seen, gone on every side.
+- **Voice calls** (📞 in a chat's header), as Signal's: only with people
+  whose chats you have accepted (a stranger's request never rings), set up
+  inside the end-to-end encrypted messages and carried with DTLS-SRTP
+  (libdatachannel), directly or through our relay when the two networks
+  can't meet; echo cancellation and noise suppression (speexdsp). It rings
+  on all your computers; answering on one stops the others. The chat notes
+  missed, declined and finished calls.
 - **Linked devices**: your account on up to five computers (File › Linked
   Devices…), linked by a code; what you send and read follows you. A new
   computer can get the last year's messages and files from the one that
@@ -82,7 +89,7 @@ program: [docs/how-signal-works.md](docs/how-signal-works.md).
 
 ## Not there yet
 
-Calls, Sender Keys for big groups, Signal's post-quantum ratchet (SPQR).
+Video calls, group calls, Sender Keys for big groups, Signal's post-quantum ratchet (SPQR).
 
 ## Installing
 
@@ -122,7 +129,8 @@ Then:
 
 1. **Use 0.3.x for real** with one or two people for a few days, and fix
    what that turns up.
-2. Later: voice and video calls, Signal's post-quantum ratchet (SPQR).
+2. **Voice calls** — done (2026-11-22; the relay, coturn, on the VPS with
+   the server). Next: video calls, then group calls and SPQR.
 
 ## Making a release
 
@@ -143,7 +151,9 @@ as the release `v0.3.2`. Every push to `main` builds and tests on Linux
 
 Dependencies (Ubuntu 24.04): `cmake ninja-build pkg-config qt6-base-dev
 qt6-websockets-dev qt6-multimedia-dev libsodium-dev libsqlcipher-dev
-qtkeychain-qt6-dev libopus-dev libogg-dev libopusfile-dev libopusenc-dev`.
+qtkeychain-qt6-dev libopus-dev libogg-dev libopusfile-dev libopusenc-dev
+libspeexdsp-dev libssl-dev`. libdatachannel (calls) is in `third_party`, built
+with the rest.
 
 ```bash
 cmake --preset debug

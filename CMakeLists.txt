@@ -76,10 +76,49 @@ if(NOT CHAT_SERVER_ONLY)
         add_library(chat_opus INTERFACE)
         target_link_libraries(chat_opus INTERFACE PkgConfig::OPUS)
     endif()
+    # Calls: echo cancellation and noise suppression.
+    if(WIN32)
+        find_path(SPEEXDSP_INCLUDE_DIR speex/speex_echo.h REQUIRED)
+        find_library(SPEEXDSP_LIBRARY NAMES speexdsp libspeexdsp REQUIRED)
+        add_library(chat_speexdsp INTERFACE)
+        target_include_directories(chat_speexdsp INTERFACE ${SPEEXDSP_INCLUDE_DIR})
+        target_link_libraries(chat_speexdsp INTERFACE ${SPEEXDSP_LIBRARY})
+    else()
+        pkg_check_modules(SPEEXDSP REQUIRED IMPORTED_TARGET speexdsp)
+        add_library(chat_speexdsp INTERFACE)
+        target_link_libraries(chat_speexdsp INTERFACE PkgConfig::SPEEXDSP)
+    endif()
 endif()
 qt_standard_project_setup()
 
 include(GNUInstallDirs)
+
+if(NOT CHAT_SERVER_ONLY)
+    # Calls: libdatachannel (ICE with libjuice, DTLS-SRTP, SCTP), copied
+    # unchanged into third_party (its README). Static, without its WebSocket
+    # part, examples or tests; built without our warning flags (not our code).
+    function(chat_add_libdatachannel)
+        string(REGEX REPLACE "-W[^ ]*" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+        string(REGEX REPLACE "-W[^ ]*" "" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
+        set(BUILD_SHARED_LIBS OFF)
+        set(NO_WEBSOCKET ON)
+        set(NO_EXAMPLES ON)
+        set(NO_TESTS ON)
+        set(LIBSRTP_TEST_APPS OFF)
+        set(ENABLE_WARNINGS OFF)
+        set(ENABLE_WARNINGS_AS_ERRORS OFF)
+        set(sctp_build_programs OFF)
+        set(sctp_build_fuzzer OFF)
+        set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+        add_subdirectory(third_party/libdatachannel EXCLUDE_FROM_ALL)
+        foreach(target datachannel-static juice-static srtp2 usrsctp)
+            if(TARGET ${target})
+                target_compile_options(${target} PRIVATE $<IF:$<CXX_COMPILER_ID:MSVC>,/w,-w>)
+            endif()
+        endforeach()
+    endfunction()
+    chat_add_libdatachannel()
+endif()
 
 # ML-KEM-1024 for PQXDH: mlkem-native, copied unchanged into third_party
 # (its README says which release), one C file, randomness from libsodium.
@@ -122,6 +161,17 @@ if(NOT CHAT_SERVER_ONLY)
 endif()
 
 if(NOT CHAT_SERVER_ONLY)
+# Calls: the signalling's state, the connection (libdatachannel), the sound.
+qt_add_library(chat_call STATIC
+    src/call/CallAudio.cpp src/call/CallAudio.h
+    src/call/CallConnection.cpp src/call/CallConnection.h
+    src/call/CallDevices.cpp src/call/CallDevices.h
+    src/call/Calls.cpp src/call/Calls.h
+)
+target_include_directories(chat_call PUBLIC src/call)
+target_link_libraries(chat_call PUBLIC chat_core Qt6::Multimedia
+                      PRIVATE datachannel-static chat_opus chat_speexdsp chat_sodium)
+
 # The window.
 qt_add_library(chat_app STATIC
     src/app/DatabaseKey.cpp src/app/DatabaseKey.h
@@ -136,7 +186,7 @@ qt_add_library(chat_app STATIC
     src/app/VoiceAudio.cpp src/app/VoiceAudio.h
 )
 target_include_directories(chat_app PUBLIC src/app)
-target_link_libraries(chat_app PUBLIC chat_core Qt6::Widgets Qt6::Multimedia PRIVATE Qt6Keychain::Qt6Keychain)
+target_link_libraries(chat_app PUBLIC chat_core chat_call Qt6::Widgets Qt6::Multimedia PRIVATE Qt6Keychain::Qt6Keychain)
 if(Qt6DBus_FOUND AND UNIX AND NOT APPLE)
     target_link_libraries(chat_app PRIVATE Qt6::DBus)
     target_compile_definitions(chat_app PRIVATE CHAT_DBUS)

@@ -43,6 +43,17 @@ QLabel#lockTitle { color: @fg; font-size: 16pt; font-weight: bold; padding: 8px;
 QLabel#lockMessage { color: #e01b24; padding: 6px; }
 QLineEdit#lockField { background: @pathBg; border: 1px solid @border; border-radius: 8px; padding: 6px 10px; color: @fg; }
 QWidget#findBar { background: @window; border-bottom: 1px solid @border; }
+QToolButton#callButton { background: transparent; border: none; border-radius: 16px; padding: 4px; }
+QToolButton#callButton:hover { background: @hover; }
+QWidget#callBar { background: @pathBg; border-bottom: 1px solid @border; }
+QLabel#callLabel { color: @fg; font-weight: bold; }
+QWidget#callBar QPushButton { border: none; border-radius: 16px; padding: 7px 18px; color: #ffffff; font-weight: bold; }
+QWidget#callBar QPushButton#acceptCallButton { background: #2e9d4f; }
+QWidget#callBar QPushButton#acceptCallButton:hover { background: #38b25b; }
+QWidget#callBar QPushButton#declineCallButton, QWidget#callBar QPushButton#hangUpButton { background: #d64541; }
+QWidget#callBar QPushButton#declineCallButton:hover, QWidget#callBar QPushButton#hangUpButton:hover { background: #e2574f; }
+QToolButton#muteCallButton { color: @fg; background: @window; border: none; border-radius: 16px; padding: 7px 14px; }
+QToolButton#muteCallButton:checked { background: @accent; color: #ffffff; }
 QLineEdit#findField { background: @pathBg; border: none; border-radius: 8px; padding: 5px 8px; color: @fg; }
 QLabel#findCount { color: @dimFg; padding: 0 6px; }
 QPlainTextEdit#composeField { background: @pathBg; color: @fg; border: none; border-radius: 18px; padding: 6px 12px;

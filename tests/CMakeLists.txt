@@ -29,5 +29,7 @@ chat_test(history)
 chat_test(server LIBRARY chat_server)
 # Two devices through a real server, many cases: ~50 s here, near 60 on CI's Windows.
 chat_test(messenger LIBRARY chat_server TIMEOUT 300)
+# Calls between two (and three) devices through a real server, connected directly.
+chat_test(calls LIBRARY chat_call chat_server TIMEOUT 180)
 chat_test(mainwindow LIBRARY chat_app chat_server)
 chat_test(singleinstance LIBRARY chat_app)

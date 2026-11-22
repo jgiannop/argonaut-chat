@@ -24,6 +24,16 @@ there:
   Other sites on the machine are left as they are. (Tested on Ubuntu 26.04
   with systemd and nginx already serving another site on 80 and 443: that
   site kept answering, its files unchanged.)
+- sets up the **relay for calls** (coturn, from Ubuntu): TURN on UDP 3478,
+  the relayed media on UDP 49160–49200, `/etc/turnserver.conf` written by
+  the script (an earlier one kept as `.before-argonaut-chat`). It accepts
+  only passwords the server hands to signed-in devices (valid 12 hours;
+  the secret the two share is in `/etc/argonaut-chat/relay-secret`, root
+  and the server's group only), carries UDP only, and never relays into
+  private or reserved networks. It sees only encrypted media. The script
+  stops before changing anything if another program holds port 3478 or
+  coturn is already set up for something else; `RELAY=no` leaves the relay
+  out (calls then connect only directly, which fails between some networks).
 
 ## Before
 
@@ -32,9 +42,10 @@ there:
      server's address; or
    - for now, a free name from [sslip.io](https://sslip.io) that needs no
      setup: `188-34-165-32.sslip.io` already points at `188.34.165.32`.
-2. Ports **80 and 443** open: in the Hetzner Cloud Firewall, if you use one
-   (the script opens them in `ufw` if `ufw` is on). Port 80 is needed for
-   the certificate.
+2. Ports **80 and 443** (TCP) open, and for the relay **UDP 3478 and UDP
+   49160–49200**: in the Hetzner Cloud Firewall, if you use one (the script
+   opens them in `ufw` if `ufw` is on). Port 80 is needed for the
+   certificate.
 
 ## Upload and run
 
@@ -101,4 +112,8 @@ accounts made after it are gone (their owners sign up again).
 journalctl -u argonaut-chat-server -f    # the server's log
 sudo systemctl restart argonaut-chat-server
 journalctl -u caddy -f                   # or: journalctl -u nginx
+journalctl -u coturn -f                  # the relay for calls
 ```
+
+A call that won't connect: `CHAT_RTC_LOG=1 argonaut-chat` prints the call
+library's log on the terminal (addresses included, so only when asked).

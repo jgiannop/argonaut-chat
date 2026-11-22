@@ -1,3 +1,4 @@
+#include "Calls.h"
 #include "ChatServer.h"
 #include "ChatStore.h"
 #include "Dialogs.h"
@@ -1102,6 +1103,87 @@ private slots:
         window.openConversation(anna);
         QCOMPARE(store.conversation(anna).unread, 0);
         QCOMPARE(window.messages()->count(), 1);
+    }
+
+    // Two windows, Alice's and Bob's, through the real server: a call.
+    void callInTheWindow()
+    {
+        ServerStore serverStore(TestSupport::home() + QStringLiteral("/calls-server.sqlite"));
+        ChatServer server(&serverStore);
+        QVERIFY(server.listen());
+        const QUrl url(QStringLiteral("ws://127.0.0.1:%1").arg(server.port()));
+        struct Person
+        {
+            explicit Person(const QString &name)
+                : store(TestSupport::home() + QStringLiteral("/calls-%1.sqlite").arg(name))
+                , keys(&store)
+                , messenger(&store, &keys)
+                , window(&store, &messenger)
+            {
+            }
+            ChatStore store;
+            KeyStore keys;
+            Messenger messenger;
+            MainWindow window;
+        };
+        Person alice(QStringLiteral("alice"));
+        Person bob(QStringLiteral("bob"));
+        for (Person *person : {&alice, &bob}) {
+            person->window.calls()->setDevicesEnabled(false);
+            person->window.show();
+            std::optional<bool> signedUp;
+            person->messenger.signUp(url, person == &alice ? QStringLiteral("alice") : QStringLiteral("bob"),
+                                     [&](bool ok, const QString &) { signedUp = ok; });
+            QTRY_VERIFY(signedUp.has_value());
+            QVERIFY(*signedUp);
+        }
+        alice.window.startChatWith(QStringLiteral("bob"));
+        QTRY_VERIFY(alice.store.directConversation(QStringLiteral("bob")) > 0);
+        QTRY_COMPARE(alice.window.currentConversation(), alice.store.directConversation(QStringLiteral("bob")));
+        // Not in Note to Self; in an accepted chat.
+        QVERIFY(alice.window.callButton()->isVisible());
+        QVERIFY(alice.window.callButton()->isEnabled());
+        QVERIFY(!alice.window.callBar()->isVisible());
+        alice.messenger.send(alice.window.currentConversation(), QStringLiteral("hello"));
+        QTRY_VERIFY_WITH_TIMEOUT(bob.store.directConversation(QStringLiteral("alice")) > 0, 5000);
+        const qint64 toAlice = bob.store.directConversation(QStringLiteral("alice"));
+        bob.window.openConversation(toAlice);
+        QVERIFY(!bob.window.callButton()->isVisible()); // a request: no calls yet
+        bob.window.acceptRequest();
+        QVERIFY(bob.window.callButton()->isVisible());
+        bob.window.openConversation(bob.store.noteToSelf());
+        QVERIFY(!bob.window.callButton()->isVisible());
+
+        QSignalSpy notified(&bob.window, &MainWindow::notified);
+        alice.window.callButton()->click();
+        QVERIFY(alice.window.callBar()->isVisible());
+        QCOMPARE(alice.window.callLabel()->text(), QStringLiteral("Calling bob…"));
+        QVERIFY(!alice.window.callButton()->isEnabled());
+        QTRY_VERIFY_WITH_TIMEOUT(bob.window.callBar()->isVisible(), 10000);
+        QCOMPARE(bob.window.callLabel()->text(), QStringLiteral("alice is calling you"));
+        QTRY_VERIFY(!notified.isEmpty());
+        QCOMPARE(notified.last().at(1).toString(), QStringLiteral("Incoming call"));
+        auto *accept = bob.window.findChild<QPushButton *>(QStringLiteral("acceptCallButton"));
+        QVERIFY(accept && accept->isVisible());
+        accept->click();
+        QTRY_COMPARE_WITH_TIMEOUT(alice.window.calls()->state(), Calls::State::Active, 10000);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.window.calls()->state(), Calls::State::Active, 10000);
+        QVERIFY(alice.window.callLabel()->text().startsWith(QStringLiteral("bob · 0:")));
+        auto *mute = alice.window.findChild<QToolButton *>(QStringLiteral("muteCallButton"));
+        QVERIFY(mute && mute->isVisible());
+        mute->click();
+        QVERIFY(alice.window.calls()->isMuted());
+        QVERIFY(!accept->isVisible());
+
+        alice.window.findChild<QPushButton *>(QStringLiteral("hangUpButton"))->click();
+        QVERIFY(!alice.window.callBar()->isVisible());
+        QTRY_VERIFY_WITH_TIMEOUT(!bob.window.callBar()->isVisible(), 10000);
+        QVERIFY(!mute->isChecked());
+        // The note, in Alice's open conversation.
+        const QList<ChatStore::Message> messages = alice.store.messages(alice.window.currentConversation());
+        QVERIFY(messages.last().system);
+        QVERIFY(messages.last().body.startsWith(QStringLiteral("Outgoing call · 0:")));
+        QTRY_VERIFY(alice.window.callButton()->isEnabled());
     }
 
     // Alice in the window, Bob without one, through the real server.

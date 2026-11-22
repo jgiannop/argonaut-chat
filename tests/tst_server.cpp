@@ -9,7 +9,9 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QDateTime>
 #include <QJsonArray>
+#include <QMessageAuthenticationCode>
 #include <QNetworkRequest>
 #include <QSignalSpy>
 #include <QTcpServer>
@@ -614,6 +616,45 @@ private slots:
                                       [&](const QByteArray &, const ChatClient::Result &result) { wrong = result; });
         QTRY_VERIFY_WITH_TIMEOUT(wrong.has_value(), kWait);
         QVERIFY(!wrong->ok);
+    }
+
+    void relayForCalls()
+    {
+        Person alice(QStringLiteral("alice"));
+        QVERIFY(join(alice));
+        // None set up: no urls, calls go directly.
+        ChatClient::Result result = wait([&](auto done) { alice.client.relay(done); });
+        QVERIFY(result.ok);
+        QVERIFY(result.data.value("urls").toArray().isEmpty());
+        QVERIFY(!result.data.contains("credential"));
+
+        const QByteArray secret = "a secret shared with coturn";
+        m_server->setRelay({"turn:relay.example.org:3478", "turn:relay.example.org:3478?transport=tcp"}, secret);
+        const qint64 before = QDateTime::currentSecsSinceEpoch();
+        result = wait([&](auto done) { alice.client.relay(done); });
+        QVERIFY(result.ok);
+        QCOMPARE(result.data.value("urls").toArray().size(), 2);
+        // TURN's REST scheme: "<expiry>:<who>", base64(HMAC-SHA1(secret, it)).
+        const QString username = result.data.value("username").toString();
+        const QStringList parts = username.split(':');
+        QCOMPARE(parts.size(), 2);
+        QCOMPARE(parts[1], QString("alice"));
+        const qint64 expiry = parts[0].toLongLong();
+        QVERIFY(expiry >= before + ChatServer::RelayTtlSeconds && expiry <= before + ChatServer::RelayTtlSeconds + 5);
+        QCOMPARE(result.data.value("credential").toString().toLatin1(),
+                 QMessageAuthenticationCode::hash(username.toUtf8(), secret, QCryptographicHash::Sha1).toBase64());
+
+        // Only for those signed in, and not without end.
+        ChatClient stranger;
+        QVERIFY(connectTo(stranger));
+        result = wait([&](auto done) { stranger.relay(done); });
+        QCOMPARE(result.error, QString("unauthenticated"));
+        ChatServer::Limits limits = m_server->limits();
+        limits.relayFetchesPerAccount = {1, 0.0001};
+        m_server->setLimits(limits);
+        wait([&](auto done) { alice.client.relay(done); });
+        result = wait([&](auto done) { alice.client.relay(done); });
+        QCOMPARE(result.error, QString("rate-limited"));
     }
 
     void attachmentsFromStrangers()

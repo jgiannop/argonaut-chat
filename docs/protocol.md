@@ -141,6 +141,40 @@ by the server's clock is ignored (a server before 0.2 queues it). Not to
 or from requests, and not at all when View › Typing Indicators is off
 (neither sent nor shown, as Signal's). Versions before 0.2 drop it unread.
 
+### Calls
+
+A call is set up as Signal's: WebRTC session descriptions inside these
+end-to-end encrypted messages, so the server never sees them and cannot
+stand in the middle (each side's DTLS fingerprint is in its description,
+and the media connection checks it).
+
+```json
+{"v":1, "t":"call", "id":"<uuid>", "sent":…, "call":"<32 hex>", "kind":"offer"|"answer"|"hangup"|"busy",
+ "sdp":"v=0…"?, "video":true?, "reason":"normal"|"declined"|"no-answer"|"failed"|"answered-elsewhere"|"declined-elsewhere"?,
+ "sentTo":"<username>"?}
+```
+
+- `call`: the call's id, chosen by the caller. `sdp` only in an offer or
+  an answer (printable ASCII and line ends, "v=0" first, ≤ 16 KiB), every
+  candidate already in it (no trickling); `video` only in an offer (not
+  yet used); `reason` only in a hangup.
+- The offer goes to every device of the person called; it rings only in a
+  direct conversation they have accepted (a stranger's never rings), and
+  only if the server held it less than 45 s (later: "Missed call"). A
+  device already in a call answers `busy`.
+- The first device that answers sends the answer, and a hangup with
+  `answered-elsewhere` and `sentTo` (whom the call is with) to its own other
+  devices, which stop ringing; declining sends `declined` to the caller and
+  `declined-elsewhere` to my devices. Once a device of theirs answered, the
+  caller listens only to it.
+- Unanswered for 60 s: the caller sends `no-answer`. Answered but not
+  connected within 30 s: `failed`.
+- The media: one Opus audio track (48 kHz mono, 20 ms, 32 kbit/s, in-band
+  FEC; payload type 111), SRTP keyed by DTLS, through ICE: directly, or
+  through the relay (TURN, below) when the networks can't meet.
+
+Versions before 0.4 drop it unread (the caller hears no answer).
+
 ### Editing
 
 The author of a text may change it, up to 24 hours after sending it, as
@@ -338,6 +372,14 @@ Any request may also be answered `rate-limited`, with `retryAfter` (ms).
 | `add-device` | as `register`, with the account's `identityKey`; signature for device 0 | `device` | `denied`, `too-many-devices` (5) |
 | `devices` | | `devices`: `[{device, created}]` | |
 | `remove-device` | `device` | | `denied` (the first device removes others; any removes itself; the first stays) |
+
+| `relay` | | `urls` (TURN, e.g. `turn:host:3478`; empty when the server has none), `username`, `credential`, `ttl` (s) | for calls; signed in only, 30 an hour |
+
+The relay's password follows the TURN REST scheme coturn's `use-auth-secret`
+checks: `username` = "<expiry, Unix seconds>:<account>", `credential` =
+base64(HMAC-SHA1(the secret the server and coturn share, `username`)),
+valid 12 hours. The server is started with `--relay <url>` and
+`--relay-secret-file <file>`. The relay sees only encrypted media.
 
 ### Linked devices
 

@@ -415,6 +415,79 @@ private slots:
         QVERIFY(!decodeContent(pad(head + ",\"action\":\"started\",\"group\":5}")));
     }
 
+    void calls()
+    {
+        const QString sdp = QStringLiteral("v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n");
+        Call offer;
+        offer.kind = Call::Kind::Offer;
+        offer.id = newCallId();
+        offer.sdp = sdp;
+        auto back = decodeContent(encodeContent(Content::callSignal(offer)));
+        QVERIFY(back && back->type == Content::Type::Call);
+        QCOMPARE(back->call.kind, Call::Kind::Offer);
+        QCOMPARE(back->call.id, offer.id);
+        QCOMPARE(back->call.sdp, sdp);
+        QVERIFY(!back->call.video);
+        QVERIFY(back->sentTo.isEmpty());
+
+        Call hangup;
+        hangup.kind = Call::Kind::Hangup;
+        hangup.id = offer.id;
+        hangup.reason = Call::Reason::Declined;
+        back = decodeContent(encodeContent(Content::callSignal(hangup)));
+        QVERIFY(back && back->call.kind == Call::Kind::Hangup && back->call.reason == Call::Reason::Declined);
+        QVERIFY(back->call.sdp.isEmpty());
+        // To my own devices: "answered elsewhere", with whom.
+        hangup.reason = Call::Reason::AnsweredElsewhere;
+        back = decodeContent(encodeContent(Content::callSignal(hangup, "alice")));
+        QVERIFY(back && back->call.reason == Call::Reason::AnsweredElsewhere);
+        QCOMPARE(back->sentTo, QString("alice"));
+        // Not made: elsewhere without whom, whom without elsewhere, a description
+        // where none goes, a bad one, a bad id.
+        QVERIFY(encodeContent(Content::callSignal(hangup)).isEmpty());
+        hangup.reason = Call::Reason::Normal;
+        QVERIFY(encodeContent(Content::callSignal(hangup, "alice")).isEmpty());
+        hangup.sdp = sdp;
+        QVERIFY(encodeContent(Content::callSignal(hangup)).isEmpty());
+        Call bad = offer;
+        bad.sdp = "v=0\r\n\x01";
+        QVERIFY(encodeContent(Content::callSignal(bad)).isEmpty());
+        bad.sdp = sdp + QString(MaxSdpBytes, 'a');
+        QVERIFY(encodeContent(Content::callSignal(bad)).isEmpty());
+        bad = offer;
+        bad.id = "ABC";
+        QVERIFY(encodeContent(Content::callSignal(bad)).isEmpty());
+        QVERIFY(isValidSdp(sdp));
+        QVERIFY(!isValidSdp("o=- 1 2\r\n"));
+        QVERIFY(!isValidSdp(QString::fromUtf8("v=0\r\ns=é\r\n")));
+
+        // A stranger's, by hand.
+        const QByteArray head = "{\"v\":1,\"t\":\"call\",\"id\":\"" + newMessageId().toLatin1() + "\",\"sent\":1,\"call\":\""
+            + newCallId().toLatin1() + "\"";
+        QVERIFY(decodeContent(pad(head + ",\"kind\":\"offer\",\"sdp\":\"v=0\\r\\n\"}")));
+        QVERIFY(decodeContent(pad(head + ",\"kind\":\"offer\",\"sdp\":\"v=0\\r\\n\",\"video\":true}")));
+        QVERIFY(decodeContent(pad(head + ",\"kind\":\"busy\"}")));
+        QVERIFY(decodeContent(pad(head + ",\"kind\":\"hangup\",\"reason\":\"no-answer\"}")));
+        QVERIFY(decodeContent(pad(head + ",\"kind\":\"hangup\",\"reason\":\"declined-elsewhere\",\"sentTo\":\"bob\"}")));
+        QVERIFY(!decodeContent(pad(head + "}")));
+        QVERIFY(!decodeContent(pad(head + ",\"kind\":\"ring\"}")));
+        QVERIFY(!decodeContent(pad(head + ",\"kind\":\"offer\"}")));
+        QVERIFY(!decodeContent(pad(head + ",\"kind\":\"offer\",\"sdp\":\"hello\"}")));
+        QVERIFY(!decodeContent(pad(head + ",\"kind\":\"offer\",\"sdp\":5}")));
+        QVERIFY(!decodeContent(pad(head + ",\"kind\":\"answer\",\"sdp\":\"v=0\",\"video\":true}")));
+        QVERIFY(!decodeContent(pad(head + ",\"kind\":\"offer\",\"sdp\":\"v=0\",\"video\":1}")));
+        QVERIFY(!decodeContent(pad(head + ",\"kind\":\"busy\",\"sdp\":\"v=0\"}")));
+        QVERIFY(!decodeContent(pad(head + ",\"kind\":\"busy\",\"reason\":\"normal\"}")));
+        QVERIFY(!decodeContent(pad(head + ",\"kind\":\"hangup\"}")));
+        QVERIFY(!decodeContent(pad(head + ",\"kind\":\"hangup\",\"reason\":\"bored\"}")));
+        QVERIFY(!decodeContent(pad(head + ",\"kind\":\"hangup\",\"reason\":\"answered-elsewhere\"}")));
+        QVERIFY(!decodeContent(pad(head + ",\"kind\":\"hangup\",\"reason\":\"normal\",\"sentTo\":\"bob\"}")));
+        QVERIFY(!decodeContent(pad(head + ",\"kind\":\"hangup\",\"reason\":\"declined-elsewhere\",\"sentTo\":\"B B\"}")));
+        const QByteArray badId = "{\"v\":1,\"t\":\"call\",\"id\":\"" + newMessageId().toLatin1()
+            + "\",\"sent\":1,\"call\":\"x\",\"kind\":\"busy\"}";
+        QVERIFY(!decodeContent(pad(badId)));
+    }
+
     void contentFromStrangers_data()
     {
         QTest::addColumn<QByteArray>("json");
