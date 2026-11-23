@@ -172,8 +172,11 @@ jobs:
       - name: Check that it starts on its own
         shell: pwsh
         run: |
-          $missing = @("libsodium.dll", "sqlcipher.dll", "opus.dll", "speexdsp.dll", "qt6keychain.dll", "Qt6WebSockets.dll", "Qt6Multimedia.dll",
+          $missing = @("libsodium.dll", "sqlcipher.dll", "opus.dll", "qt6keychain.dll", "Qt6WebSockets.dll", "Qt6Multimedia.dll",
                        "vcruntime140.dll", "platforms\qwindows.dll", "tls\qschannelbackend.dll") | Where-Object { -not (Test-Path "dist\$_") }
+          # Calls: speexdsp (vcpkg names it libspeexdsp.dll) and OpenSSL.
+          if (-not (Get-ChildItem dist\*speexdsp*.dll -ErrorAction SilentlyContinue)) { $missing += "speexdsp.dll" }
+          if (-not (Get-ChildItem dist\libcrypto*.dll -ErrorAction SilentlyContinue)) { $missing += "libcrypto*.dll" }
           # Voice messages: a media backend (FFmpeg's or Windows').
           if (-not (Get-ChildItem dist\multimedia\*.dll -ErrorAction SilentlyContinue)) { $missing += "multimedia\*.dll" }
           if ($missing) { Write-Output "::error title=build: folder::missing: $($missing -join ', ')"; exit 1 }
